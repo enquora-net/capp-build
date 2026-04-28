@@ -1,3 +1,7 @@
 [project]
 name = "capp-build"
 version = "0.1.0"
+
+[dependencies.go]
+"github.com/spf13/cobra" = "v1.10.2"
+"github.com/spf13/pflag" = { version = "v1.0.9", via = ["github.com/spf13/cobra"] }
