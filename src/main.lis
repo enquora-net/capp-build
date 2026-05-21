@@ -9,23 +9,15 @@
 import "go:fmt"
 import "go:github.com/spf13/cobra"
 
+// Type alias matching cobra's Run function field signature exactly.
+// Gives the emitter proof of the expected Go type at each assignment site.
+type RunFn = fn(Ref<cobra.Command>, Slice<string>) -> ()
+
 fn no_args(cmd: Ref<cobra.Command>, args: Slice<string>) -> Result<(), error> {
   cobra.NoArgs(cmd, args)
 }
 
-fn no_valid_args(
-  _cmd: Ref<cobra.Command>,
-  _args: Slice<string>,
-  _to_complete: string,
-) -> (Slice<string>, cobra.ShellCompDirective) {
-  ([], cobra.ShellCompDirectiveDefault)
-}
-
 fn noop_run(_cmd: Ref<cobra.Command>, _args: Slice<string>) {}
-
-fn noop_run_e(_cmd: Ref<cobra.Command>, _args: Slice<string>) -> Result<(), error> {
-  Ok(())
-}
 
 fn run_root(cmd: Ref<cobra.Command>, _args: Slice<string>) {
   cmd.Println("capp-build cobra smoke test")
@@ -36,7 +28,7 @@ fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
 }
 
 fn completion_options() -> cobra.CompletionOptions {
-  cobra.CompletionOptions { 
+  cobra.CompletionOptions {
     DisableDefaultCmd: false,
     DisableNoDescFlag: false,
     DisableDescriptions: false,
@@ -53,9 +45,9 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
 fn make_command(
   use: string,
   short: string,
-  run: fn(Ref<cobra.Command>, Slice<string>) -> (),
+  run: RunFn,
 ) -> cobra.Command {
-  cobra.Command { 
+  cobra.Command {
     Use: use,
     Aliases: [],
     SuggestFor: [],
@@ -64,23 +56,23 @@ fn make_command(
     Long: "",
     Example: "",
     ValidArgs: [],
-    ValidArgsFunction: Some(no_valid_args),
+    ValidArgsFunction: None,
     Args: Some(no_args as cobra.PositionalArgs),
     ArgAliases: [],
     BashCompletionFunction: "",
     Deprecated: "",
     Annotations: Map.new<string, string>(),
     Version: "",
-    PersistentPreRun: Some(noop_run),
-    PersistentPreRunE: Some(noop_run_e),
-    PreRun: Some(noop_run),
-    PreRunE: Some(noop_run_e),
-    Run: Some(run),
-    RunE: Some(noop_run_e),
-    PostRun: Some(noop_run),
-    PostRunE: Some(noop_run_e),
-    PersistentPostRun: Some(noop_run),
-    PersistentPostRunE: Some(noop_run_e),
+    PersistentPreRun:    Some(noop_run as RunFn),
+    PersistentPreRunE:   None,
+    PreRun:              Some(noop_run as RunFn),
+    PreRunE:             None,
+    Run:                 Some(run),
+    RunE:                None,
+    PostRun:             Some(noop_run as RunFn),
+    PostRunE:            None,
+    PersistentPostRun:   Some(noop_run as RunFn),
+    PersistentPostRunE:  None,
     FParseErrWhitelist: fparse_err_whitelist(),
     CompletionOptions: completion_options(),
     TraverseChildren: false,
