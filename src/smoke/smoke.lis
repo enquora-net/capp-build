@@ -1,0 +1,72 @@
+//**
+// smoke/smoke.lis
+// capp-build
+//
+// Smoke tests for Lisette interop boundaries.
+// Invoked via `capp-build smoke <cobra|capp|all>` to verify each
+// Lisette release has not broken the interop boundaries.
+// Also exported for programmatic invocation by the orchestration application.
+//
+// Created by David Richardson on Thursday, May 22, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// **
+import "go:fmt"
+import "go:github.com/spf13/cobra"
+import "go:github.com/enquora-net/capp-parse/capp"
+
+// SmokeResult is the outcome of a smoke test.
+pub struct SmokeResult {
+  pub name: string,
+  pub ok:   bool,
+  pub note: string,
+}
+
+// smoke_cobra verifies the cobra interop boundary.
+// Proves that cobra.Command can be constructed and executed from Lisette.
+pub fn smoke_cobra() -> SmokeResult {
+  let mut cmd = cobra.Command {
+    Use:   "smoke-cobra",
+    Short: "cobra interop smoke test",
+    ..,
+  }
+  let name = cmd.Name()
+  let ok = name == "smoke-cobra"
+  SmokeResult {
+    name: "cobra",
+    ok:   ok,
+    note: f"cobra.Command.Name() = {name}",
+  }
+}
+
+// smoke_capp verifies the capp-parse interop boundary.
+// Proves that capp.Parse can be called and returns a result.
+pub fn smoke_capp(grammar_path: string) -> SmokeResult {
+  let cfg = capp.ParseConfig {
+    Path:        "",
+    Src:         [],
+    GrammarPath: grammar_path,
+    Benchmark:   false,
+  }
+  match capp.Parse(cfg) {
+    Ok(result) => SmokeResult {
+      name: "capp",
+      ok:   true,
+      note: f"capp.Parse ok: node_count={result.NodeCount}",
+    },
+    Err(e) => SmokeResult {
+      name: "capp",
+      ok:   false,
+      note: f"capp.Parse error: {e}",
+    },
+  }
+}
+
+// smoke_all runs all smoke tests and prints results.
+pub fn smoke_all(grammar_path: string) {
+  let results = [smoke_cobra(), smoke_capp(grammar_path)]
+  for r in results {
+    let icon = if r.ok { "✓" } else { "✗" }
+    fmt.Println(f"{icon}  {r.name}: {r.note}")
+  }
+}

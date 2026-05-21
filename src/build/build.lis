@@ -1,0 +1,40 @@
+//**
+// build/build.lis
+// capp-build
+//
+// Exported library surface for the Cappuccino source compiler.
+// Consumed by main.lis (CLI) and the orchestration application.
+//
+// Created by David Richardson on Thursday, May 22, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// **
+
+// BuildMode controls the compilation target.
+pub enum BuildMode {
+  Debug,
+  Release,
+  Clean,
+}
+
+// BuildConfig is the complete specification for a build operation.
+pub struct BuildConfig {
+  pub mode:        BuildMode,
+  pub source_root: string,
+  pub grammar:     string,
+}
+
+// BuildResult is the outcome of a build operation.
+pub struct BuildResult {
+  pub ok:      bool,
+  pub message: string,
+}
+
+// build executes a compilation pass as described by cfg.
+// Not yet implemented.
+pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
+  Ok(BuildResult {
+    ok: false,
+    message: f"build: not yet implemented (mode={cfg.mode})",
+  })
+}

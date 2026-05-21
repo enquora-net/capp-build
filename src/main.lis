@@ -1,6 +1,15 @@
 //**
 // main.lis
+// capp-build
 //
+// CLI entry point. Thin consumer of the build and smoke library packages.
+// Wires the cobra command surface and delegates all logic to sub-packages.
+//
+// Command surface:
+//   capp-build build [--debug|--release|--clean]
+//   capp-build smoke cobra
+//   capp-build smoke capp
+//   capp-build smoke all
 //
 // Created by David Richardson on Thursday, April 9, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
@@ -8,9 +17,13 @@
 // **
 import "go:fmt"
 import "go:github.com/spf13/cobra"
+import "build"
+import "smoke"
 
-// Type alias matching cobra's Run function field signature exactly.
-// Gives the emitter proof of the expected Go type at each assignment site.
+// ---------------------------------------------------------------------------
+// Shared cobra scaffolding
+// ---------------------------------------------------------------------------
+
 type RunFn = fn(Ref<cobra.Command>, Slice<string>) -> ()
 
 fn no_args(cmd: Ref<cobra.Command>, args: Slice<string>) -> Result<(), error> {
@@ -18,14 +31,6 @@ fn no_args(cmd: Ref<cobra.Command>, args: Slice<string>) -> Result<(), error> {
 }
 
 fn noop_run(_cmd: Ref<cobra.Command>, _args: Slice<string>) {}
-
-fn run_root(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  cmd.Println("capp-build cobra smoke test")
-}
-
-fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  cmd.Println("build subcommand wired through cobra")
-}
 
 fn completion_options() -> cobra.CompletionOptions {
   cobra.CompletionOptions {
@@ -42,27 +47,12 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
   cobra.FParseErrWhitelist { UnknownFlags: false }
 }
 
-fn make_command(
-  use: string,
-  short: string,
-  run: RunFn,
-) -> cobra.Command {
+fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
   cobra.Command {
-    Use: use,
-    Aliases: [],
-    SuggestFor: [],
+    Use:   use,
     Short: short,
-    GroupID: "",
-    Long: "",
-    Example: "",
-    ValidArgs: [],
-    ValidArgsFunction: None,
-    Args: Some(no_args as cobra.PositionalArgs),
-    ArgAliases: [],
-    BashCompletionFunction: "",
-    Deprecated: "",
+    Args:  Some(no_args as cobra.PositionalArgs),
     Annotations: Map.new<string, string>(),
-    Version: "",
     PersistentPreRun:    Some(noop_run as RunFn),
     PersistentPreRunE:   None,
     PreRun:              Some(noop_run as RunFn),
@@ -73,33 +63,151 @@ fn make_command(
     PostRunE:            None,
     PersistentPostRun:   Some(noop_run as RunFn),
     PersistentPostRunE:  None,
-    FParseErrWhitelist: fparse_err_whitelist(),
-    CompletionOptions: completion_options(),
-    TraverseChildren: false,
-    Hidden: false,
-    SilenceErrors: true,
-    SilenceUsage: true,
-    DisableFlagParsing: false,
-    DisableAutoGenTag: false,
-    DisableFlagsInUseLine: false,
-    DisableSuggestions: false,
+    ValidArgsFunction:   None,
+    FParseErrWhitelist:  fparse_err_whitelist(),
+    CompletionOptions:   completion_options(),
+    SilenceErrors:       true,
+    SilenceUsage:        true,
     SuggestionsMinimumDistance: 2,
     ..,
   }
 }
 
+fn make_group(use: string, short: string) -> cobra.Command {
+  cobra.Command {
+    Use:   use,
+    Short: short,
+    Args:  Some(no_args as cobra.PositionalArgs),
+    Annotations: Map.new<string, string>(),
+    PersistentPreRun:    Some(noop_run as RunFn),
+    PersistentPreRunE:   None,
+    PreRun:              None,
+    PreRunE:             None,
+    Run:                 None,
+    RunE:                None,
+    PostRun:             None,
+    PostRunE:            None,
+    PersistentPostRun:   Some(noop_run as RunFn),
+    PersistentPostRunE:  None,
+    ValidArgsFunction:   None,
+    FParseErrWhitelist:  fparse_err_whitelist(),
+    CompletionOptions:   completion_options(),
+    SilenceErrors:       true,
+    SilenceUsage:        true,
+    SuggestionsMinimumDistance: 2,
+    ..,
+  }
+}
+
+
+fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  let release_flag = match cmd.Flags().GetBool("release") {
+    Ok(v)  => v,
+    Err(_) => false,
+  }
+  let clean_flag = match cmd.Flags().GetBool("clean") {
+    Ok(v)  => v,
+    Err(_) => false,
+  }
+
+  let mode = if clean_flag {
+    build.BuildMode.Clean
+  } else if release_flag {
+    build.BuildMode.Release
+  } else {
+    build.BuildMode.Debug
+  }
+
+  let cfg = build.BuildConfig {
+    mode:        mode,
+    source_root: ".",
+    grammar:     "",
+  }
+
+  match build.build(cfg) {
+    Ok(result) => cmd.Println(result.message),
+    Err(e)     => cmd.Println(f"build error: {e}"),
+  }
+}
+
+fn new_build_cmd() -> cobra.Command {
+  let mut cmd = make_command(
+    "build",
+    "Compile Objective-J source",
+    run_build,
+  )
+  let _ = cmd.Flags().Bool("debug",   false, "compile in debug mode (default)")
+  let _ = cmd.Flags().Bool("release", false, "compile in release mode")
+  let _ = cmd.Flags().Bool("clean",   false, "clean build artifacts")
+  cmd
+}
+
+// ---------------------------------------------------------------------------
+// smoke commands
+// ---------------------------------------------------------------------------
+
+fn run_smoke_cobra(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  let result = smoke.smoke_cobra()
+  let icon = if result.ok { "✓" } else { "✗" }
+  cmd.Println(f"{icon}  {result.name}: {result.note}")
+}
+
+fn run_smoke_capp(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  let grammar = match cmd.Flags().GetString("grammar") {
+    Ok(v)  => v,
+    Err(_) => "",
+  }
+  let result  = smoke.smoke_capp(grammar)
+  let icon = if result.ok { "✓" } else { "✗" }
+  cmd.Println(f"{icon}  {result.name}: {result.note}")
+}
+
+fn run_smoke_all(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  let grammar = match cmd.Flags().GetString("grammar") {
+    Ok(v)  => v,
+    Err(_) => "",
+  }
+  smoke.smoke_all(grammar)
+}
+
+fn new_smoke_cmd() -> cobra.Command {
+  let mut smoke_cmd = make_group(
+    "smoke",
+    "Run interop smoke tests",
+  )
+
+  let cobra_cmd = make_command("cobra", "Smoke-test cobra interop", run_smoke_cobra)
+
+  let mut capp_cmd = make_command("capp", "Smoke-test capp-parse interop", run_smoke_capp)
+  let _ = capp_cmd.Flags().String("grammar", "", "explicit path to grammar dylib")
+
+  let mut all_cmd = make_command("all", "Run all smoke tests", run_smoke_all)
+  let _ = all_cmd.Flags().String("grammar", "", "explicit path to grammar dylib")
+
+  smoke_cmd.AddCommand(&cobra_cmd)
+  smoke_cmd.AddCommand(&capp_cmd)
+  smoke_cmd.AddCommand(&all_cmd)
+  smoke_cmd
+}
+
+// ---------------------------------------------------------------------------
+// root and main
+// ---------------------------------------------------------------------------
+
 fn main() {
-  let mut root = make_command(
+  let mut root = make_group(
     "capp-build",
     "Cappuccino source compiler",
-    run_root,
   )
-  let build = make_command("build", "Smoke-test build subcommand", run_build)
 
-  root.AddCommand(&build)
+  let build_cmd = new_build_cmd()
+  let smoke_cmd = new_smoke_cmd()
+
+  root.AddCommand(&build_cmd)
+  root.AddCommand(&smoke_cmd)
 
   match root.Execute() {
-    Ok(_) => (),
+    Ok(_)  => (),
     Err(e) => fmt.Println(f"error: {e}"),
   }
 }
