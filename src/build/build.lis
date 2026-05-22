@@ -9,6 +9,13 @@
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
 // **
+import "go:errors"
+import "go:os"
+import "go:path/filepath"
+
+// ---------------------------------------------------------------------------
+// BuildMode / BuildConfig / BuildResult
+// ---------------------------------------------------------------------------
 
 // BuildMode controls the compilation target.
 pub enum BuildMode {
@@ -30,11 +37,74 @@ pub struct BuildResult {
   pub message: string,
 }
 
+// ---------------------------------------------------------------------------
+// Project root discovery
+// ---------------------------------------------------------------------------
+
+// ProjectRoot holds the resolved, absolute path of the Cappuccino project root.
+pub struct ProjectRoot {
+  pub path: string,
+}
+
+// is_project_root returns true if dir contains any recognised project root sentinel:
+//   Frameworks/Foundation  — standard application layout
+//   Info.plist             — framework source or Info.plist-rooted application
+fn is_project_root(dir: string) -> bool {
+  let frameworks = filepath.Join(dir, "Frameworks", "Foundation")
+  match os.Stat(frameworks) {
+    Ok(_)  => return true,
+    Err(_) => (),
+  }
+  let info_plist = filepath.Join(dir, "Info.plist")
+  match os.Stat(info_plist) {
+    Ok(_)  => true,
+    Err(_) => false,
+  }
+}
+
+// find_project_root resolves the project root from start.
+// start may be relative (e.g. ".") or absolute.
+// Walks upward until is_project_root is satisfied.
+// Returns Err if no qualifying ancestor exists before the filesystem root.
+pub fn find_project_root(start: string) -> Result<ProjectRoot, error> {
+  let abs = filepath.Abs(start)?
+  let mut dir = abs
+  loop {
+    if is_project_root(dir) {
+      return Ok(ProjectRoot { path: dir })
+    }
+    let parent = filepath.Dir(dir)
+    if parent == dir {
+      return Err(errors.New("no Cappuccino project root found: no Frameworks/Foundation or Info.plist in any ancestor directory"))
+    }
+    dir = parent
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build context
+// ---------------------------------------------------------------------------
+
+// BuildContext accumulates the resolved outputs of each pipeline phase.
+// It is constructed once at the start of a build and threaded through every
+// subsequent phase, ensuring no phase recomputes what a prior phase has
+// already resolved.  Fields are added as phases are implemented.
+pub struct BuildContext {
+  pub config: BuildConfig,
+  pub root:   ProjectRoot,
+}
+
+// ---------------------------------------------------------------------------
+// Build pipeline entry point
+// ---------------------------------------------------------------------------
+
 // build executes a compilation pass as described by cfg.
-// Not yet implemented.
+// Phase 1: locate the project root and construct the build context.
 pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
+  let root = find_project_root(cfg.source_root)?
+  let ctx  = BuildContext { config: cfg, root: root }
   Ok(BuildResult {
-    ok: false,
-    message: f"build: not yet implemented (mode={cfg.mode})",
+    ok:      true,
+    message: f"project root: {ctx.root.path}",
   })
 }

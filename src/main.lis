@@ -7,6 +7,7 @@
 //
 // Command surface:
 //   capp-build build [--debug|--release|--clean]
+//   capp-build verify root
 //   capp-build smoke cobra
 //   capp-build smoke capp
 //   capp-build smoke all
@@ -19,6 +20,7 @@ import "go:fmt"
 import "go:github.com/spf13/cobra"
 import "build"
 import "smoke"
+import "verify"
 
 // ---------------------------------------------------------------------------
 // Shared cobra scaffolding
@@ -143,6 +145,26 @@ fn new_build_cmd() -> cobra.Command {
 }
 
 // ---------------------------------------------------------------------------
+// verify commands
+// ---------------------------------------------------------------------------
+
+fn run_verify_root(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  let result = verify.verify_root(".")
+  let icon = if result.ok { "✓" } else { "✗" }
+  cmd.Println(f"{icon}  {result.label}: {result.detail}")
+}
+
+fn new_verify_cmd() -> cobra.Command {
+  let mut verify_cmd = make_group(
+    "verify",
+    "Verify Cappuccino project structure",
+  )
+  let root_cmd = make_command("root", "Locate the project root", run_verify_root)
+  verify_cmd.AddCommand(&root_cmd)
+  verify_cmd
+}
+
+// ---------------------------------------------------------------------------
 // smoke commands
 // ---------------------------------------------------------------------------
 
@@ -200,10 +222,12 @@ fn main() {
     "Cappuccino source compiler",
   )
 
-  let build_cmd = new_build_cmd()
-  let smoke_cmd = new_smoke_cmd()
+  let build_cmd  = new_build_cmd()
+  let verify_cmd = new_verify_cmd()
+  let smoke_cmd  = new_smoke_cmd()
 
   root.AddCommand(&build_cmd)
+  root.AddCommand(&verify_cmd)
   root.AddCommand(&smoke_cmd)
 
   match root.Execute() {
