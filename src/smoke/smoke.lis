@@ -13,7 +13,7 @@
 // **
 import "go:fmt"
 import "go:github.com/spf13/cobra"
-import "go:github.com/enquora-net/capp-parse/capp"
+import "go:github.com/enquora-net/capp-parse"
 
 // SmokeResult is the outcome of a smoke test.
 pub struct SmokeResult {
@@ -47,6 +47,7 @@ pub fn smoke_capp(grammar_path: string) -> SmokeResult {
     Src:         [],
     GrammarPath: grammar_path,
     Benchmark:   false,
+    ..
   }
   match capp.Parse(cfg) {
     Ok(result) => SmokeResult {
