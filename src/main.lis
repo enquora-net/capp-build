@@ -2,12 +2,12 @@
 // main.lis
 // capp-build
 //
-// CLI entry point. Thin consumer of the build and smoke library packages.
+// CLI entry point. Thin consumer of the build, verify, and smoke library packages.
 // Wires the cobra command surface and delegates all logic to sub-packages.
 //
 // Command surface:
 //   capp-build build [--debug|--release|--clean]
-//   capp-build verify root
+//   capp-build verify root [path]
 //   capp-build smoke cobra
 //   capp-build smoke capp
 //   capp-build smoke all
@@ -49,6 +49,7 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
   cobra.FParseErrWhitelist { UnknownFlags: false }
 }
 
+// make_command creates a leaf command that accepts no positional arguments.
 fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
   cobra.Command {
     Use:   use,
@@ -75,6 +76,33 @@ fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
   }
 }
 
+// make_command_with_args creates a leaf command that accepts optional positional arguments.
+fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Command {
+  cobra.Command {
+    Use:   use,
+    Short: short,
+    Annotations: Map.new<string, string>(),
+    PersistentPreRun:    Some(noop_run as RunFn),
+    PersistentPreRunE:   None,
+    PreRun:              Some(noop_run as RunFn),
+    PreRunE:             None,
+    Run:                 Some(run),
+    RunE:                None,
+    PostRun:             Some(noop_run as RunFn),
+    PostRunE:            None,
+    PersistentPostRun:   Some(noop_run as RunFn),
+    PersistentPostRunE:  None,
+    ValidArgsFunction:   None,
+    FParseErrWhitelist:  fparse_err_whitelist(),
+    CompletionOptions:   completion_options(),
+    SilenceErrors:       true,
+    SilenceUsage:        true,
+    SuggestionsMinimumDistance: 2,
+    ..,
+  }
+}
+
+// make_group creates a command group that receives subcommands.
 fn make_group(use: string, short: string) -> cobra.Command {
   cobra.Command {
     Use:   use,
@@ -101,6 +129,9 @@ fn make_group(use: string, short: string) -> cobra.Command {
   }
 }
 
+// ---------------------------------------------------------------------------
+// build command
+// ---------------------------------------------------------------------------
 
 fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
   let release_flag = match cmd.Flags().GetBool("release") {
@@ -148,8 +179,9 @@ fn new_build_cmd() -> cobra.Command {
 // verify commands
 // ---------------------------------------------------------------------------
 
-fn run_verify_root(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  let result = verify.verify_root(".")
+fn run_verify_root(cmd: Ref<cobra.Command>, args: Slice<string>) {
+  let start = if args.length() > 0 { args[0] } else { "." }
+  let result = verify.verify_root(start)
   let icon = if result.ok { "✓" } else { "✗" }
   cmd.Println(f"{icon}  {result.label}: {result.detail}")
 }
@@ -159,7 +191,7 @@ fn new_verify_cmd() -> cobra.Command {
     "verify",
     "Verify Cappuccino project structure",
   )
-  let root_cmd = make_command("root", "Locate the project root", run_verify_root)
+  let root_cmd = make_command_with_args("root [path]", "Locate the project root", run_verify_root)
   verify_cmd.AddCommand(&root_cmd)
   verify_cmd
 }
