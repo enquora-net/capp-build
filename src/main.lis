@@ -133,7 +133,8 @@ fn make_group(use: string, short: string) -> cobra.Command {
 // build command
 // ---------------------------------------------------------------------------
 
-fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
+  let source_root = if args.length() > 0 { args[0] } else { "." }
   let release_flag = match cmd.Flags().GetBool("release") {
     Ok(v)  => v,
     Err(_) => false,
@@ -153,7 +154,7 @@ fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
 
   let cfg = build.BuildConfig {
     mode:        mode,
-    source_root: ".",
+    source_root: source_root,
     grammar:     "",
   }
 
@@ -164,8 +165,8 @@ fn run_build(cmd: Ref<cobra.Command>, _args: Slice<string>) {
 }
 
 fn new_build_cmd() -> cobra.Command {
-  let mut cmd = make_command(
-    "build",
+  let mut cmd = make_command_with_args(
+    "build [path]",
     "Compile Objective-J source",
     run_build,
   )
