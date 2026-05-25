@@ -1,0 +1,72 @@
+//**
+// build/phase02_walk.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 2: WalkSourceTree
+//
+// Traverses the project directory, classifies every file by its role in the
+// build pipeline, and produces the SourceTree consumed by all downstream phases.
+//
+// **
+import "go:fmt"
+
+// The classification drives which downstream phases consume the file:
+// ObjectiveJ and Javascript are parsed; InterfaceBuilder compiled separately;
+// graphics and resources are copied to the output.
+pub enum SourceKind {
+  ObjectiveJ,
+  Javascript,
+  InterfaceBuilder,
+  Graphic,
+  Resource,
+}
+
+pub struct SourceFile {
+  pub path: string,
+  pub kind: SourceKind,
+}
+
+// Downstream phases index into this rather than re-walking the filesystem.
+pub struct SourceTree {
+  pub files: Slice<SourceFile>,
+  pub diags: Slice<Diagnostic>,
+}
+
+// run_walk_source_tree traverses the source tree rooted at ctx.root.path,
+// classifying each encountered file by its SourceKind and collecting the
+// results into a SourceTree.
+//
+// Excluded from the walk:
+//   Frameworks/   — framework source is consumed via import resolution only
+//   build/        — build artefact output directories
+//   .cappuccino/  — toolchain metadata directory
+//
+// Classification rules (by file extension):
+//   .j                       => ObjectiveJ
+//   .js                      => Javascript
+//   .xib                     => InterfaceBuilder
+//   .png .jpg .svg .icns .tiff => Graphic
+//   (all others)             => Resource
+pub fn run_walk_source_tree(_ctx: Ref<BuildContext>) -> Result<SourceTree, error> {
+  let phase = BuildPhase.WalkSourceTree
+  fmt.Println(f"  {phase_name(phase)}")
+  let mut diags: Slice<Diagnostic> = []
+  let files: Slice<SourceFile> = []
+
+  // TODO: walk ctx.root.path using filepath.WalkDir, skipping excluded
+  //       directories (Frameworks/, build/, .cappuccino/)
+  diags = diags.append(diag_info(phase, "TODO: walk source tree excluding Frameworks/ build/ .cappuccino/"))
+
+  // TODO: classify each file by extension into the appropriate SourceKind
+  diags = diags.append(diag_info(phase, "TODO: classify files by SourceKind"))
+
+  // TODO: emit a Warning diagnostic for any file whose extension is
+  //       unrecognised but whose parent directory suggests it is intentional
+  //       source (e.g. files directly under Resources/)
+  diags = diags.append(diag_info(phase, "TODO: warn on unrecognised extensions in source directories"))
+
+  Ok(SourceTree { files: files, diags: diags })
+}

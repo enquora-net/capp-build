@@ -1,0 +1,56 @@
+//**
+// build/phase08_link.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 8: Link
+//
+// Assembles the generated files into a deployable build product: a directory
+// containing the compiled JavaScript, framework resources, application
+// resources, and the index.html entry point in the layout expected by the
+// Cappuccino runtime.  Also produces a build manifest for incremental rebuild
+// support.
+//
+// **
+import "go:fmt"
+
+pub struct LinkResult {
+  pub output: string,
+  pub diags:  Slice<Diagnostic>,
+}
+
+// The build manifest records input paths and content hashes so that
+// subsequent builds can determine which phases must re-run.
+pub fn run_link(ctx: Ref<BuildContext>) -> Result<LinkResult, error> {
+  let phase = BuildPhase.Link
+  fmt.Println(f"  {phase_name(phase)}")
+  let mut diags: Slice<Diagnostic> = []
+
+  // TODO: create the output directory structure under ctx.root.path/build/
+  diags = diags.append(diag_info(phase, "TODO: create output directory structure"))
+
+  // TODO: copy ctx.code_gen.files into the output directory
+  diags = diags.append(diag_info(phase, "TODO: copy generated JavaScript files to output"))
+
+  // TODO: copy framework resources from Frameworks/ into the output
+  diags = diags.append(diag_info(phase, "TODO: copy framework resources"))
+
+  // TODO: copy application resources (graphics, compiled xib output,
+  //       Info.plist) into the output directory
+  diags = diags.append(diag_info(phase, "TODO: copy application resources"))
+
+  // TODO: write index.html to the output root, adjusting script references
+  //       to reflect the output layout
+  diags = diags.append(diag_info(phase, "TODO: write index.html with adjusted script references"))
+
+  // TODO: write a build manifest (JSON) recording input paths and content
+  //       hashes for incremental rebuild support
+  diags = diags.append(diag_info(phase, "TODO: write build manifest for incremental rebuilds"))
+
+  Ok(LinkResult {
+    output: ctx.root.path,
+    diags:  diags,
+  })
+}

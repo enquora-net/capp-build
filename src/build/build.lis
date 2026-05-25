@@ -2,109 +2,128 @@
 // build/build.lis
 // capp-build
 //
-// Exported library surface for the Cappuccino source compiler.
-// Consumed by main.lis (CLI) and the orchestration application.
-//
 // Created by David Richardson on Thursday, May 22, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
+// Pipeline declaration and orchestration.
+// Consumed by main.lis (CLI) and the orchestration application.
+//
+// Root discovery and build context live in context.lis.
+// Diagnostic infrastructure lives in diagnostics.lis.
+// Phase implementations live in phase01_validate.lis through phase08_link.lis.
+//
 // **
-import "go:errors"
-import "go:os"
-import "go:path/filepath"
+
+// ---------------------------------------------------------------------------
+// BuildPhase
+// ---------------------------------------------------------------------------
+
+// The `BuildPhase` type defines the complete set of pipeline phases.
+// The compiler confirms that each operation has, in fact, an implementation
+// and that it is run in the correct order by the execution machinery.
+// Described in ARCHITECTURE.md.
+pub enum BuildPhase {
+  ValidateProjectStructure,
+  WalkSourceTree,
+  ParseSources,
+  ResolveImports,
+  TopologicalSort,
+  TypeCheck,
+  CodeGenerate,
+  Link,
+}
+
+// Implements the guarantee the `BuildPhase` defines: if a ninth phase is added
+// to BuildPhase and this match is not updated, the build fails.  The same
+// protection applies at every other match site in the codebase — no handling
+// site can be silently skipped.
+pub fn phase_name(phase: BuildPhase) -> string {
+  match phase {
+    BuildPhase.ValidateProjectStructure => "validate project structure",
+    BuildPhase.WalkSourceTree           => "walk source tree",
+    BuildPhase.ParseSources             => "parse sources",
+    BuildPhase.ResolveImports           => "resolve imports",
+    BuildPhase.TopologicalSort          => "topological sort",
+    BuildPhase.TypeCheck                => "type check",
+    BuildPhase.CodeGenerate             => "code generate",
+    BuildPhase.Link                     => "link",
+  }
+}
 
 // ---------------------------------------------------------------------------
 // BuildMode / BuildConfig / BuildResult
 // ---------------------------------------------------------------------------
 
-// BuildMode controls the compilation target.
+// Debug:   compile with source maps, no optimisation
+// Release: compile with optimisation, no source maps
+// Clean:   remove build artefacts without compiling
 pub enum BuildMode {
   Debug,
   Release,
   Clean,
 }
 
-// BuildConfig is the complete specification for a build operation.
 pub struct BuildConfig {
   pub mode:        BuildMode,
   pub source_root: string,
   pub grammar:     string,
 }
 
-// BuildResult is the outcome of a build operation.
 pub struct BuildResult {
   pub ok:      bool,
   pub message: string,
+  pub diags:   Slice<Diagnostic>,
 }
 
 // ---------------------------------------------------------------------------
-// Project root discovery
+// Build pipeline
 // ---------------------------------------------------------------------------
 
-// ProjectRoot holds the resolved, absolute path of the Cappuccino project root.
-pub struct ProjectRoot {
-  pub path: string,
-}
-
-// is_project_root returns true if dir contains any recognised project root sentinel:
-//   Frameworks/Foundation  — standard application layout
-//   Info.plist             — framework source or Info.plist-rooted application
-fn is_project_root(dir: string) -> bool {
-  let frameworks = filepath.Join(dir, "Frameworks", "Foundation")
-  match os.Stat(frameworks) {
-    Ok(_)  => return true,
-    Err(_) => (),
-  }
-  let info_plist = filepath.Join(dir, "Info.plist")
-  match os.Stat(info_plist) {
-    Ok(_)  => true,
-    Err(_) => false,
-  }
-}
-
-// find_project_root resolves the project root from start.
-// start may be relative (e.g. ".") or absolute.
-// Walks upward until is_project_root is satisfied.
-// Returns Err if no qualifying ancestor exists before the filesystem root.
-pub fn find_project_root(start: string) -> Result<ProjectRoot, error> {
-  let abs = filepath.Abs(start)?
-  let mut dir = abs
-  loop {
-    if is_project_root(dir) {
-      return Ok(ProjectRoot { path: dir })
-    }
-    let parent = filepath.Dir(dir)
-    if parent == dir {
-      return Err(errors.New("no Cappuccino project root found: no Frameworks/Foundation or Info.plist in any ancestor directory"))
-    }
-    dir = parent
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Build context
-// ---------------------------------------------------------------------------
-
-// BuildContext accumulates the resolved outputs of each pipeline phase.
-// It is constructed once at the start of a build and threaded through every
-// subsequent phase, ensuring no phase recomputes what a prior phase has
-// already resolved.  Fields are added as phases are implemented.
-pub struct BuildContext {
-  pub config: BuildConfig,
-  pub root:   ProjectRoot,
-}
-
-// ---------------------------------------------------------------------------
-// Build pipeline entry point
-// ---------------------------------------------------------------------------
-
-// build executes a compilation pass as described by cfg.
-// Phase 1: locate the project root and construct the build context.
+// A phase returning Err halts the pipeline; Warning-level diagnostics do not.
 pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   let root = find_project_root(cfg.source_root)?
-  let ctx  = BuildContext { config: cfg, root: root }
+
+  let mut ctx = BuildContext {
+    config: cfg,
+    root:   root,
+    ..
+  }
+
+  // Phase 1: validate project structure
+  let validation = run_validate_project_structure(&ctx)?
+  ctx.validation = Some(validation)
+
+  // Phase 2: walk source tree
+  let tree = run_walk_source_tree(&ctx)?
+  ctx.tree = Some(tree)
+
+  // Phase 3: parse sources
+  let parsed = run_parse_sources(&ctx)?
+  ctx.parsed = Some(parsed)
+
+  // Phase 4: resolve imports
+  let imports = run_resolve_imports(&ctx)?
+  ctx.imports = Some(imports)
+
+  // Phase 5: topological sort
+  let sorted = run_topological_sort(&ctx)?
+  ctx.sorted = Some(sorted)
+
+  // Phase 6: type check
+  let type_info = run_type_check(&ctx)?
+  ctx.type_info = Some(type_info)
+
+  // Phase 7: code generate
+  let code_gen = run_code_generate(&ctx)?
+  ctx.code_gen = Some(code_gen)
+
+  // Phase 8: link
+  let linked = run_link(&ctx)?
+  ctx.linked = Some(linked)
+
   Ok(BuildResult {
     ok:      true,
-    message: f"project root: {ctx.root.path}",
+    message: f"build complete: {ctx.root.path}",
+    ..
   })
 }

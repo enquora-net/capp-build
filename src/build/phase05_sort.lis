@@ -1,0 +1,46 @@
+//**
+// build/phase05_sort.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 5: TopologicalSort
+//
+// Orders the files in the import graph so that every dependency precedes the
+// files that depend on it.  The resulting order is the authoritative
+// compilation sequence for phases 6, 7, and 8.
+//
+// **
+import "go:fmt"
+
+// Every file is guaranteed to appear after all files it imports.
+pub struct SortedUnits {
+  pub order: Slice<string>,
+  pub diags: Slice<Diagnostic>,
+}
+
+// run_topological_sort orders the files in ctx.imports such that every
+// dependency precedes the files that depend on it.
+//
+// A cycle in ctx.imports is a fatal condition; it should have been detected
+// and reported in Phase 4.  If one is encountered here, an Error diagnostic
+// is emitted and the function returns Err rather than looping indefinitely.
+// This is a defensive guard, not the primary detection mechanism.
+pub fn run_topological_sort(_ctx: Ref<BuildContext>) -> Result<SortedUnits, error> {
+  let phase = BuildPhase.TopologicalSort
+  fmt.Println(f"  {phase_name(phase)}")
+  let mut diags: Slice<Diagnostic> = []
+  let order: Slice<string> = []
+
+  // TODO: implement Kahn's algorithm over ctx.imports.edges:
+  //       build an in-degree map, seed the queue with zero-in-degree nodes,
+  //       emit each dequeued node to `order`, decrement successors
+  diags = diags.append(diag_info(phase, "TODO: topological sort via Kahn's algorithm"))
+
+  // TODO: if the algorithm terminates with unprocessed nodes, a cycle exists;
+  //       emit an Error diagnostic identifying the involved files and return Err
+  diags = diags.append(diag_info(phase, "TODO: cycle detection guard — emit Error and return Err on cycle"))
+
+  Ok(SortedUnits { order: order, diags: diags })
+}

@@ -1,0 +1,78 @@
+//**
+// build/context.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Project root discovery and build context.
+//
+// Both live here rather than in build.lis because they are internal pipeline
+// plumbing rather than public API.  BuildContext additionally references
+// result types from every phase file, making it a cross-cutting concern.
+//
+// **
+import "go:errors"
+import "go:os"
+import "go:path/filepath"
+
+// ---------------------------------------------------------------------------
+// Project root discovery
+// ---------------------------------------------------------------------------
+
+pub struct ProjectRoot {
+  pub path: string,
+}
+
+// Recognised sentinels:
+//   Frameworks/Foundation  — standard application layout
+//   Info.plist             — framework source or Info.plist-rooted application
+fn is_project_root(dir: string) -> bool {
+  let frameworks = filepath.Join(dir, "Frameworks", "Foundation")
+  match os.Stat(frameworks) {
+    Ok(_)  => return true,
+    Err(_) => (),
+  }
+  let info_plist = filepath.Join(dir, "Info.plist")
+  match os.Stat(info_plist) {
+    Ok(_)  => true,
+    Err(_) => false,
+  }
+}
+
+// Walks upward from start until a project root sentinel is found.
+// Returns Err if no qualifying ancestor exists before the filesystem root.
+pub fn find_project_root(start: string) -> Result<ProjectRoot, error> {
+  let abs = filepath.Abs(start)?
+  let mut dir = abs
+  loop {
+    if is_project_root(dir) {
+      return Ok(ProjectRoot { path: dir })
+    }
+    let parent = filepath.Dir(dir)
+    if parent == dir {
+      return Err(errors.New("no Cappuccino project root found: no Frameworks/Foundation or Info.plist in any ancestor directory"))
+    }
+    dir = parent
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Build context
+// ---------------------------------------------------------------------------
+
+// Each phase output field is Option-typed.  None indicates the phase has not
+// yet executed; Some indicates it completed and its result is available to
+// downstream phases.  No phase begins until all predecessor fields are Some.
+pub struct BuildContext {
+  pub config:     BuildConfig,
+  pub root:       ProjectRoot,
+  pub validation: Option<ValidationResult>,
+  pub tree:       Option<SourceTree>,
+  pub parsed:     Option<ParsedUnits>,
+  pub imports:    Option<ImportGraph>,
+  pub sorted:     Option<SortedUnits>,
+  pub type_info:  Option<TypeCheckResult>,
+  pub code_gen:   Option<CodeGenOutput>,
+  pub linked:     Option<LinkResult>,
+}

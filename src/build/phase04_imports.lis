@@ -1,0 +1,74 @@
+//**
+// build/phase04_imports.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 4: ResolveImports
+//
+// Traverses the parse trees and resolves every @import directive to an
+// absolute path, constructing the full directed dependency graph of the
+// project.  Three distinct failure classes are diagnosed separately, as
+// described in ARCHITECTURE.md: absent files, cyclic dependencies, and
+// conditionally valid imports.
+//
+// **
+import "go:fmt"
+
+// Both fields hold resolved absolute paths, not raw @import strings.
+pub struct ImportEdge {
+  pub from: string,
+  pub to:   string,
+}
+
+// Sole input to phase05.
+pub struct ImportGraph {
+  pub edges: Slice<ImportEdge>,
+  pub diags: Slice<Diagnostic>,
+}
+
+// run_resolve_imports traverses the parse trees in ctx.parsed and resolves
+// every @import directive to an absolute path, constructing the full
+// dependency graph.
+//
+// Diagnostics are emitted for three distinct failure classes:
+//
+//   Ambiguity / Absence:   a referenced file does not exist; the diagnostic
+//                          distinguishes a likely typo from a missing build
+//                          artefact from a path-configuration error
+//
+//   Cyclic dependency:     A → B → A is detected and reported as an
+//                          actionable error rather than entering an
+//                          infinite resolution loop
+//
+//   Conditional validity:  imports guarded by preprocessor conditionals or
+//                          build-configuration flags that cannot be statically
+//                          resolved are flagged as Warning-level diagnostics
+pub fn run_resolve_imports(_ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
+  let phase = BuildPhase.ResolveImports
+  fmt.Println(f"  {phase_name(phase)}")
+  let mut diags: Slice<Diagnostic> = []
+  let edges: Slice<ImportEdge> = []
+
+  // TODO: traverse ctx.parsed.units and extract @import directives from
+  //       each CST
+  diags = diags.append(diag_info(phase, "TODO: extract @import directives from parse trees"))
+
+  // TODO: resolve each import path relative to the importing file, then
+  //       relative to Frameworks/, and finally against the project root
+  diags = diags.append(diag_info(phase, "TODO: resolve import paths in priority order"))
+
+  // TODO: emit a distinct Error diagnostic for each missing file,
+  //       classifying the likely cause (typo / absent file / bad path)
+  diags = diags.append(diag_info(phase, "TODO: diagnose missing imports with cause classification"))
+
+  // TODO: detect cycles using DFS over the emerging edge set; emit an
+  //       Error diagnostic identifying the cycle members
+  diags = diags.append(diag_info(phase, "TODO: detect and diagnose cyclic imports"))
+
+  // TODO: flag conditionally valid imports as Warning diagnostics
+  diags = diags.append(diag_info(phase, "TODO: warn on conditionally valid imports"))
+
+  Ok(ImportGraph { edges: edges, diags: diags })
+}

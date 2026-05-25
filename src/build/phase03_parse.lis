@@ -1,0 +1,49 @@
+//**
+// build/phase03_parse.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 3: ParseSources
+//
+// Invokes capp-parse over every ObjectiveJ and Javascript file in the source
+// tree, collecting the resulting concrete syntax trees.  Parse failures are
+// accumulated as diagnostics rather than aborting on the first error, so the
+// full set of syntactic defects is reported in a single pass.
+//
+// **
+import "go:fmt"
+
+// The CST is opaque at this level; consumed by phase04 and phase06.
+pub struct ParsedUnit {
+  pub source: SourceFile,
+  // TODO: tree: CSTNode  — typed tree-sitter CST from capp-parse
+}
+
+pub struct ParsedUnits {
+  pub units: Slice<ParsedUnit>,
+  pub diags: Slice<Diagnostic>,
+}
+
+// A file that fails to parse produces an Error-level diagnostic and is omitted
+// from the output; the phase does not halt on the first failure.
+pub fn run_parse_sources(_ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
+  let phase = BuildPhase.ParseSources
+  fmt.Println(f"  {phase_name(phase)}")
+  let mut diags: Slice<Diagnostic> = []
+  let units: Slice<ParsedUnit> = []
+
+  // TODO: filter ctx.tree.files to ObjectiveJ and Javascript entries
+  diags = diags.append(diag_info(phase, "TODO: filter source tree to parseable file kinds"))
+
+  // TODO: for each file, invoke capp-parse via native Go interface
+  //       (preferred) or subprocess with JSON output (fallback)
+  diags = diags.append(diag_info(phase, "TODO: invoke capp-parse per source file"))
+
+  // TODO: collect parse diagnostics; do not abort on first error —
+  //       accumulate all syntactic defects before returning
+  diags = diags.append(diag_info(phase, "TODO: accumulate parse diagnostics across all files"))
+
+  Ok(ParsedUnits { units: units, diags: diags })
+}

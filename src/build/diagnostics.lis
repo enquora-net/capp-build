@@ -1,0 +1,65 @@
+//**
+// build/diagnostics.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Diagnostic infrastructure shared across all pipeline phases.
+//
+// Phases accumulate Diagnostics rather than aborting on the first failure,
+// so the full set of defects is surfaced in a single build pass.
+//
+// **
+
+pub enum DiagLevel {
+  Info,
+  Warning,
+  Error,
+}
+
+pub struct Diagnostic {
+  pub phase:   BuildPhase,
+  pub level:   DiagLevel,
+  pub message: string,
+  pub file:    Option<string>,
+  pub line:    Option<int>,
+}
+
+pub fn diag_info(phase: BuildPhase, message: string) -> Diagnostic {
+  Diagnostic {
+    phase:   phase,
+    level:   DiagLevel.Info,
+    message: message,
+    ..
+  }
+}
+
+pub fn diag_warn(phase: BuildPhase, message: string) -> Diagnostic {
+  Diagnostic {
+    phase:   phase,
+    level:   DiagLevel.Warning,
+    message: message,
+    ..
+  }
+}
+
+pub fn diag_error(phase: BuildPhase, message: string) -> Diagnostic {
+  Diagnostic {
+    phase:   phase,
+    level:   DiagLevel.Error,
+    message: message,
+    ..
+  }
+}
+
+// Use when a phase can attribute a defect to a specific file and line number.
+pub fn diag_error_at(phase: BuildPhase, message: string, file: string, line: int) -> Diagnostic {
+  Diagnostic {
+    phase:   phase,
+    level:   DiagLevel.Error,
+    message: message,
+    file:    Some(file),
+    line:    Some(line),
+  }
+}

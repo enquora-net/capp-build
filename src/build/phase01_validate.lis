@@ -1,0 +1,60 @@
+//**
+// build/phase01_validate.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 1: ValidateProjectStructure
+//
+// Verifies the existence and validity of required project artefacts before
+// any source file is touched.  All defects are collected as diagnostics in
+// a single pass rather than aborting on the first failure.
+//
+// **
+import "go:fmt"
+
+// A result with no Error-level diagnostics indicates a structurally valid project.
+pub struct ValidationResult {
+  pub diags: Slice<Diagnostic>,
+}
+
+// Required artefacts:
+//   - Info.plist (existence and structural validity)
+//   - Frameworks/AppKit and Frameworks/Foundation (concrete or symlink)
+//   - MainMenu.xib if the ApplicationDelegate is configured to load one
+//   - main.j and index.html entry points
+pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<ValidationResult, error> {
+  let phase = BuildPhase.ValidateProjectStructure
+  fmt.Println(f"✓  {ctx.root.path}")
+  let mut diags: Slice<Diagnostic> = []
+
+  // Root discovery succeeded before this phase ran; ctx.root.path is the
+  // validated project root.  All subsequent checks are relative to it.
+  diags = diags.append(diag_info(phase, f"project root: {ctx.root.path}"))
+
+  // TODO: verify Info.plist exists at ctx.root.path
+  diags = diags.append(diag_info(phase, "TODO: verify Info.plist exists"))
+
+  // TODO: parse Info.plist and validate required keys (CFBundleName,
+  //       CFBundleIdentifier, NSPrincipalClass, etc.)
+  diags = diags.append(diag_info(phase, "TODO: validate Info.plist structure"))
+
+  // TODO: verify Frameworks/AppKit exists (concrete or symlink)
+  diags = diags.append(diag_info(phase, "TODO: verify Frameworks/AppKit"))
+
+  // TODO: verify Frameworks/Foundation exists (concrete or symlink)
+  diags = diags.append(diag_info(phase, "TODO: verify Frameworks/Foundation"))
+
+  // TODO: verify main.j exists at the project root
+  diags = diags.append(diag_info(phase, "TODO: verify main.j entry point"))
+
+  // TODO: verify index.html exists at the project root
+  diags = diags.append(diag_info(phase, "TODO: verify index.html entry point"))
+
+  // TODO: read Info.plist to determine whether an ApplicationDelegate is
+  //       configured; if so, verify MainMenu.xib exists
+  diags = diags.append(diag_info(phase, "TODO: verify MainMenu.xib if ApplicationDelegate requires it"))
+
+  Ok(ValidationResult { diags: diags })
+}

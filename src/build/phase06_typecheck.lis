@@ -1,0 +1,56 @@
+//**
+// build/phase06_typecheck.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 6: TypeCheck
+//
+// Verifies the internal consistency of the parsed and sorted units.  Files
+// are processed in dependency order so that every type referenced by a file
+// is resolved before that file is checked.
+//
+// **
+import "go:fmt"
+
+// The absence of Error-level diagnostics indicates a type-correct program.
+// Every Error diagnostic carries precise provenance: file, line, cause.
+pub struct TypeCheckResult {
+  pub diags: Slice<Diagnostic>,
+}
+
+// Files are processed in ctx.sorted.order so all imported types are resolved
+// before the file that depends on them is checked.
+//
+// Scope of checking for Objective-J:
+//   - Message send resolution against known class interfaces
+//   - Selector signature verification at call sites
+//   - Variable scope and usage validity
+//   - Protocol conformance
+pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error> {
+  let phase = BuildPhase.TypeCheck
+  fmt.Println(f"  {phase_name(phase)}")
+  let mut diags: Slice<Diagnostic> = []
+
+  // TODO: build a symbol table from the sorted parse trees, processing
+  //       files in ctx.sorted.order so imports are resolved before use
+  diags = diags.append(diag_info(phase, "TODO: build symbol table in dependency order"))
+
+  // TODO: resolve message sends against known class interfaces;
+  //       emit Error diagnostics for unresolved selectors
+  diags = diags.append(diag_info(phase, "TODO: resolve message send types"))
+
+  // TODO: verify selector argument counts and labels at each call site
+  diags = diags.append(diag_info(phase, "TODO: verify selector signatures at call sites"))
+
+  // TODO: check variable declarations, assignments, and scope;
+  //       emit Error diagnostics for use-before-declare and shadowing
+  diags = diags.append(diag_info(phase, "TODO: check variable scope and usage"))
+
+  // TODO: verify that classes declared as conforming to a protocol
+  //       implement all required methods
+  diags = diags.append(diag_info(phase, "TODO: verify protocol conformance"))
+
+  Ok(TypeCheckResult { diags: diags })
+}
