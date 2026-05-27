@@ -158,8 +158,12 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
     Some(i) => i.edges.length(),
     None    => 0,
   }
+  let dep_count = match ctx.imports {
+    Some(i) => i.framework_deps.length(),
+    None    => 0,
+  }
 
-  fmt.Println(f"  {file_count} source files  {unit_count} parsed  {edge_count} import edges")
+  fmt.Println(f"  {file_count} source files  {unit_count} parsed  {edge_count} import edges  {dep_count} framework deps")
 
   Ok(BuildResult {
     ok:      true,

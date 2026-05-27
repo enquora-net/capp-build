@@ -17,24 +17,125 @@ import "go:os"
 import "go:path/filepath"
 
 // ---------------------------------------------------------------------------
+// ValidatedProject — the root project type
+// ---------------------------------------------------------------------------
+
+// ValidatedProject is the proof object produced by phase 1 and carried through
+// the remainder of the pipeline.  It unifies project identity (PlistMeta,
+// common to all project kinds) with kind-specific structural evidence
+// (ProjectDetails).
+//
+// Its presence in BuildContext.project guarantees that the project root is
+// structurally valid and that all downstream phases may proceed.  Its absence
+// means phase 1 encountered errors; the pipeline will not advance.
+//
+// Downstream phases pattern match on project.details to branch on project kind
+// and extract the structural evidence they need — ApplicationDetails for phase
+// 8's application assembly path, nothing additional for framework archive paths.
+pub struct ValidatedProject {
+  pub meta:    PlistMeta,
+  pub details: ProjectDetails,
+}
+
+// ---------------------------------------------------------------------------
+// ProjectDetails — the kind discriminant
+// ---------------------------------------------------------------------------
+
+// ProjectDetails is the kind discriminant for a validated project.
+// The variant encodes the project kind; the payload encodes the structural
+// evidence specific to that kind.
+//
+// Application carries ApplicationDetails because it consumes framework bundles.
+// Framework and Theme carry no additional structural requirements beyond
+// PlistMeta; their source trees are validated by phase 2 (WalkSourceTree).
+// Both are open for extension without disturbing ValidatedProject.
+pub enum ProjectDetails {
+  Application(ApplicationDetails),
+  Framework,
+  Theme,
+}
+
+// ---------------------------------------------------------------------------
+// ApplicationDetails — structural evidence for Application projects
+// ---------------------------------------------------------------------------
+
+// ApplicationDetails carries the structural evidence specific to Application
+// projects.  It exists because Application projects occupy the consumer end
+// of the build hierarchy: they consume pre-built framework bundles rather than
+// producing them.  Every other project kind (Framework, Theme) produces a
+// bundle; only Application requires pre-built bundles to be present.
+//
+// This distinction is the central architectural fact of the Cappuccino build
+// model and the primary driver of phase 8 branching.
+pub struct ApplicationDetails {
+  pub frameworks: FrameworkRoots,
+}
+
+// ---------------------------------------------------------------------------
+// FrameworkRoots — validated framework bundle paths
+// ---------------------------------------------------------------------------
+
+// FrameworkRoots carries validated absolute paths to the pre-built framework
+// bundles required by Application projects.  Constructed only when both
+// directories exist on disk; their absence is a phase 1 error.
+//
+// Phase 8 (Archive) reads these paths to locate Foundation.sj and AppKit.sj,
+// which are assembled into the application deliverable in dependency load order.
+pub struct FrameworkRoots {
+  pub foundation: string,   // absolute path to Frameworks/Foundation
+  pub app_kit:    string,   // absolute path to Frameworks/AppKit
+}
+
+// ---------------------------------------------------------------------------
+// PlistMeta — project identity
+// ---------------------------------------------------------------------------
+
+// PlistMeta carries the required Info.plist keys common to every project type.
+// It is a property of the project itself, not of any particular build target.
+// Constructed only when all three keys are present; their absence is a phase 1
+// error.  CPBundlePackageType is the authoritative source for ProjectDetails.
+pub struct PlistMeta {
+  pub package_type: string,   // CPBundlePackageType — "APPL", "FMWK", or "THME"
+  pub name:         string,   // CPBundleName
+  pub identifier:   string,   // CPBundleIdentifier
+}
+
+// ---------------------------------------------------------------------------
+// ProjectKind — convenience enum
+// ---------------------------------------------------------------------------
+
+// ProjectKind is a convenience enum for contexts that need only the kind
+// without the payload, derivable from any ProjectDetails variant.
+pub enum ProjectKind {
+  Application,
+  Framework,
+  Theme,
+}
+
+// ---------------------------------------------------------------------------
 // Project root discovery
 // ---------------------------------------------------------------------------
 
+// ProjectRoot carries only the validated path.  Project kind is determined
+// authoritatively by phase 1 from Info.plist and encoded in
+// BuildContext.project.details as a ProjectDetails variant.
 pub struct ProjectRoot {
   pub path: string,
 }
 
-// Recognised sentinels:
-//   Frameworks/Foundation  — standard application layout
-//   Info.plist             — framework source or Info.plist-rooted application
+// is_project_root returns true when dir contains a Cappuccino project root
+// sentinel.  Used only for upward directory traversal; the authoritative
+// project kind comes from Info.plist, not from the sentinel.
+//
+// Sentinels:
+//   Frameworks/Foundation  — Application project root
+//   Info.plist             — Framework or Theme project root
 fn is_project_root(dir: string) -> bool {
-  let frameworks = filepath.Join(dir, "Frameworks", "Foundation")
-  match os.Stat(frameworks) {
+  match os.Stat(filepath.Join(dir, "Frameworks", "Foundation")) {
     Ok(_)  => return true,
     Err(_) => (),
   }
-  let info_plist = filepath.Join(dir, "Info.plist")
-  match os.Stat(info_plist) {
+  match os.Stat(filepath.Join(dir, "Info.plist")) {
     Ok(_)  => true,
     Err(_) => false,
   }
@@ -64,9 +165,14 @@ pub fn find_project_root(start: string) -> Result<ProjectRoot, error> {
 // Each phase output field is Option-typed.  None indicates the phase has not
 // yet executed; Some indicates it completed and its result is available to
 // downstream phases.  No phase begins until all predecessor fields are Some.
+//
+// BuildContext.project is the primary project type, set by phase 1.
+// Its presence guarantees structural validity; its details variant drives
+// phase-specific branching throughout the pipeline.
 pub struct BuildContext {
   pub config:     BuildConfig,
   pub root:       ProjectRoot,
+  pub project:    Option<ValidatedProject>,
   pub validation: Option<ValidationResult>,
   pub tree:       Option<SourceTree>,
   pub parsed:     Option<ParsedUnits>,

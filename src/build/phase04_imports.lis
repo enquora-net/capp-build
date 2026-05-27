@@ -7,15 +7,25 @@
 //
 // Phase 4: ResolveImports
 //
-// Resolves every @import directive to an absolute path and builds the full
-// directed dependency graph via a fixed-point iteration.  Each pass identifies
-// files newly reachable through imports not yet in the graph, parses them,
-// extracts their own imports, and continues until no new files are discovered.
+// Classifies every @import directive by its syntactic form and builds the
+// intra-project dependency graph through fixed-point iteration over
+// quote-form imports.
 //
-// Three failure classes are diagnosed separately:
-//   Absent file     — the resolved path does not exist on disk
-//   Cyclic import   — detected in phase 5 as a defensive guard
-//   Conditional     — imports inside preprocessor blocks (flagged as warnings)
+// The angle-bracket / quote-form distinction is the definitive semantic
+// boundary, corresponding directly to Objective-C's #import convention:
+//
+//   @import "AppController.j"          — quote form: local, intra-project
+//   @import <Foundation/CPObject.j>    — angle-bracket form: external framework
+//
+// Quote-form imports resolve to absolute paths within the source tree and
+// are added to the dependency graph as ImportEdges.  Fixed-point iteration
+// follows them transitively until no new files are discovered.  The resulting
+// edge set is the sole input to phase 5 (TopologicalSort).
+//
+// Angle-bracket imports are recorded as FrameworkDeps without any attempt at
+// source resolution.  They are passed forward to phase 8 (Archive), which
+// locates the corresponding pre-built .sj bundles and incorporates them into
+// the output.  They never enter the dependency graph or the parse frontier.
 //
 // **
 import "go:errors"
@@ -24,16 +34,32 @@ import "go:os"
 import "go:path/filepath"
 import "go:github.com/enquora-net/capp-parse"
 
-// Both fields hold resolved absolute paths, not raw @import strings.
+// ImportEdge represents a resolved quote-form dependency between two source
+// files within the project.  Both fields are absolute paths.
+// The edge set feeds phase 5 (TopologicalSort).
 pub struct ImportEdge {
   pub from: string,
   pub to:   string,
 }
 
-// Sole input to phase05.
+// FrameworkDep records a single angle-bracket import.  The framework name
+// and intra-framework path are preserved separately to allow phase 8 to
+// locate the correct .sj bundle and, in future, to support type checking
+// against framework headers.
+// The dep set feeds phase 8 (Archive).
+pub struct FrameworkDep {
+  pub framework: string,  // e.g. "Foundation"
+  pub path:      string,  // e.g. "CPObject.j" or "Foundation.j"
+}
+
+// ImportGraph is the output of phase 4 and the input to phases 5 and 8.
+//
+//   edges         — quote-form dependencies; define compilation order
+//   framework_deps — angle-bracket dependencies; define link-time inputs
 pub struct ImportGraph {
-  pub edges: Slice<ImportEdge>,
-  pub diags: Slice<Diagnostic>,
+  pub edges:          Slice<ImportEdge>,
+  pub framework_deps: Slice<FrameworkDep>,
+  pub diags:          Slice<Diagnostic>,
 }
 
 // path_known returns true when target already appears in the known slice.
@@ -41,55 +67,30 @@ fn path_known(known: Slice<string>, target: string) -> bool {
   known.filter(|p| p == target).length() > 0
 }
 
-// resolve_import converts a single RawImport to an absolute path on disk.
-// Framework imports resolve under frameworks_root; local imports resolve
-// relative to the directory of the importing file.
-fn resolve_import(
-  imp:             RawImport,
-  from_path:       string,
-  frameworks_root: string,
-) -> Option<string> {
-  let candidate = match imp {
-    RawImport.Framework(framework, path) =>
-      filepath.Join(frameworks_root, framework, path),
-    RawImport.Local(path) =>
-      filepath.Join(filepath.Dir(from_path), path),
-  }
+// dep_known returns true when dep already appears in the framework_deps slice.
+fn dep_known(deps: Slice<FrameworkDep>, framework: string, path: string) -> bool {
+  deps.filter(|d| d.framework == framework && d.path == path).length() > 0
+}
+
+// resolve_local resolves a quote-form import path relative to the importing
+// file and confirms the result exists on disk.
+fn resolve_local(path: string, from_path: string) -> Option<string> {
+  let candidate = filepath.Join(filepath.Dir(from_path), path)
   match os.Stat(candidate) {
     Ok(_)  => Some(candidate),
     Err(_) => None,
   }
 }
 
-// import_label returns a human-readable representation of a RawImport for
-// use in diagnostic messages.
-fn import_label(imp: RawImport) -> string {
-  match imp {
-    RawImport.Framework(fw, p) => f"<{fw}/{p}>",
-    RawImport.Local(p)         => f"\"{p}\"",
-  }
-}
-
-// run_resolve_imports resolves all @import directives from ctx.parsed and
-// performs a fixed-point iteration to discover transitively imported files.
 pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
   let phase = BuildPhase.ResolveImports
-  let mut diags: Slice<Diagnostic> = []
-  let mut edges: Slice<ImportEdge> = []
+  let mut diags:         Slice<Diagnostic>  = []
+  let mut edges:         Slice<ImportEdge>  = []
+  let mut framework_deps: Slice<FrameworkDep> = []
 
   let parsed = match ctx.parsed {
     Some(p) => p,
     None    => return Err(errors.New("resolve imports: parsed units unavailable")),
-  }
-
-  // Framework imports resolve against Frameworks/ at the project root for
-  // applications.  For framework source trees (AppKit, Foundation) identified
-  // by Info.plist rather than Frameworks/Foundation, the sibling directory
-  // layout applies and the parent directory is the frameworks root.
-  let frameworks_candidate = filepath.Join(ctx.root.path, "Frameworks")
-  let frameworks_root = match os.Stat(frameworks_candidate) {
-    Ok(_)  => frameworks_candidate,
-    Err(_) => filepath.Dir(ctx.root.path),
   }
 
   // known tracks absolute paths already in the graph to prevent re-parsing.
@@ -98,7 +99,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     known = known.append(unit.source.path)
   }
 
-  // frontier holds the units whose imports have not yet been resolved.
+  // frontier holds units whose quote-form imports have not yet been followed.
   let mut frontier: Slice<ParsedUnit> = parsed.units
 
   loop {
@@ -108,22 +109,40 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
 
     for unit in frontier {
       for imp in unit.imports {
-        match resolve_import(imp, unit.source.path, frameworks_root) {
-          Some(to_path) => {
-            edges = edges.append(ImportEdge { from: unit.source.path, to: to_path })
-            if !path_known(known, to_path) {
-              known     = known.append(to_path)
-              new_paths = new_paths.append(to_path)
+        match imp {
+
+          // Quote-form: local dependency.  Resolve on disk, add to the
+          // dependency graph, and schedule for transitive discovery.
+          RawImport.Local(path) => {
+            match resolve_local(path, unit.source.path) {
+              Some(to_path) => {
+                edges = edges.append(ImportEdge { from: unit.source.path, to: to_path })
+                if !path_known(known, to_path) {
+                  known     = known.append(to_path)
+                  new_paths = new_paths.append(to_path)
+                }
+              },
+              None => {
+                diags = diags.append(diag_error_at(
+                  phase,
+                  f"unresolvable import \"{path}\"",
+                  unit.source.path,
+                  0,
+                ))
+              },
             }
           },
-          None => {
-            diags = diags.append(diag_error_at(
-              phase,
-              f"unresolvable import {import_label(imp)}",
-              unit.source.path,
-              0,
-            ))
+
+          // Angle-bracket form: external framework dependency.  Record for
+          // phase 8; do not resolve to source or enter the parse frontier.
+          RawImport.Framework(framework, path) => {
+            if !dep_known(framework_deps, framework, path) {
+              framework_deps = framework_deps.append(
+                FrameworkDep { framework: framework, path: path }
+              )
+            }
           },
+
         }
       }
     }
@@ -176,7 +195,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     frontier = next_frontier
   }
 
-  fmt.Println(f"✓  resolve imports: {edges.length()} edges")
+  fmt.Println(f"✓  resolve imports: {edges.length()} edges  {framework_deps.length()} framework deps")
 
-  Ok(ImportGraph { edges: edges, diags: diags })
+  Ok(ImportGraph { edges: edges, framework_deps: framework_deps, diags: diags })
 }

@@ -7,54 +7,232 @@
 //
 // Phase 1: ValidateProjectStructure
 //
-// Verifies the existence and validity of required project artefacts before
-// any source file is touched.  All defects are collected as diagnostics in
-// a single pass rather than aborting on the first failure.
+// Validates the project root and constructs a ValidatedProject — the primary
+// project type carried through the remainder of the pipeline.
+//
+// ValidatedProject is a proof object: its presence in BuildContext.project
+// guarantees that the project is structurally valid.  It unifies project
+// identity (PlistMeta) with kind-specific structural evidence (ProjectDetails).
+//
+// Three typed constructors enforce the structural contracts:
+//
+//   parse_plist_meta         — constructs PlistMeta only when all required
+//                              Info.plist keys are present
+//
+//   validate_framework_roots — constructs FrameworkRoots only when both
+//                              Frameworks/Foundation and Frameworks/AppKit
+//                              exist on disk
+//
+//   validate_application     — constructs ApplicationDetails, which requires
+//                              FrameworkRoots plus main.j and index.html;
+//                              its existence proves an Application project
+//                              is ready for compilation
+//
+// Each constructor returns Result<T, Slice<string>>, accumulating all
+// defects before returning so the developer sees the full picture.
+// No mutable references are threaded through helper functions.
+//
+// Info.plist is mandatory for all supported project types.
 //
 // **
 import "go:fmt"
+import "go:os"
+import "go:path/filepath"
+import "go:strings"
 
-// A result with no Error-level diagnostics indicates a structurally valid project.
 pub struct ValidationResult {
   pub diags: Slice<Diagnostic>,
 }
 
-// Required artefacts:
-//   - Info.plist (existence and structural validity)
-//   - Frameworks/AppKit and Frameworks/Foundation (concrete or symlink)
-//   - MainMenu.xib if the ApplicationDelegate is configured to load one
-//   - main.j and index.html entry points
+// ---------------------------------------------------------------------------
+// Plist string extraction
+// ---------------------------------------------------------------------------
+
+// plist_string searches an XML plist for <key>key</key> and returns the
+// immediately following <string>value</string>, or None if absent.
+//
+// strings.Index returns Option<int> in Lisette, eliminating Go's -1 sentinel.
+// The ? operator propagates None through the chain idiomatically.
+//
+// Cappuccino plists are well-formed XML produced by the scaffolding tool or
+// Xcode.  howett.net/plist will replace this scanner when plist inspection
+// becomes more broadly load-bearing across the toolchain.
+fn plist_string(content: string, key: string) -> Option<string> {
+  let key_tag    = f"<key>{key}</key>"
+  let key_idx    = strings.Index(content, key_tag)?
+  let after_key  = content.substring((key_idx + key_tag.length())..)
+  let open_idx   = strings.Index(after_key, "<string>")?
+  let after_open = after_key.substring((open_idx + 8)..)
+  let close_idx  = strings.Index(after_open, "</string>")?
+  Some(strings.TrimSpace(after_open.substring(..close_idx)))
+}
+
+// ---------------------------------------------------------------------------
+// Typed constructors
+// ---------------------------------------------------------------------------
+
+// parse_plist_meta constructs PlistMeta from plist content.
+// All three required keys are checked before construction occurs.
+// PlistMeta can only be constructed in the branch where all are present.
+// Returns Err with all missing-key messages when any are absent.
+fn parse_plist_meta(content: string) -> Result<PlistMeta, Slice<string>> {
+  let pt = plist_string(content, "CPBundlePackageType")
+  let nm = plist_string(content, "CPBundleName")
+  let id = plist_string(content, "CPBundleIdentifier")
+
+  match (pt, nm, id) {
+    (Some(package_type), Some(name), Some(identifier)) =>
+      Ok(PlistMeta {
+        package_type: package_type,
+        name:         name,
+        identifier:   identifier,
+      }),
+    (pt_opt, nm_opt, id_opt) => {
+      let mut errs: Slice<string> = []
+      match pt_opt {
+        None    => errs = errs.append("missing required key: CPBundlePackageType"),
+        Some(_) => (),
+      }
+      match nm_opt {
+        None    => errs = errs.append("missing required key: CPBundleName"),
+        Some(_) => (),
+      }
+      match id_opt {
+        None    => errs = errs.append("missing required key: CPBundleIdentifier"),
+        Some(_) => (),
+      }
+      Err(errs)
+    },
+  }
+}
+
+// validate_framework_roots constructs FrameworkRoots for an Application project.
+// FrameworkRoots can only be constructed in the branch where both paths exist.
+// Returns Err with all missing-path messages when either is absent.
+fn validate_framework_roots(root: string) -> Result<FrameworkRoots, Slice<string>> {
+  let foundation = filepath.Join(root, "Frameworks", "Foundation")
+  let app_kit    = filepath.Join(root, "Frameworks", "AppKit")
+
+  let fnd_ok = match os.Stat(foundation) { Ok(_) => true, Err(_) => false }
+  let ak_ok  = match os.Stat(app_kit)    { Ok(_) => true, Err(_) => false }
+
+  match (fnd_ok, ak_ok) {
+    (true, true) =>
+      Ok(FrameworkRoots { foundation: foundation, app_kit: app_kit }),
+    _ => {
+      let mut errs: Slice<string> = []
+      if !fnd_ok { errs = errs.append("Frameworks/Foundation not found — required for Application projects") }
+      if !ak_ok  { errs = errs.append("Frameworks/AppKit not found — required for Application projects") }
+      Err(errs)
+    },
+  }
+}
+
+// validate_application constructs ApplicationDetails for an Application project.
+// ApplicationDetails can only be constructed when FrameworkRoots is valid AND
+// the required entry points exist.  All defects are accumulated before
+// returning so the developer sees the full picture.
+// Returns Err with all missing-element messages when any are absent.
+fn validate_application(root: string) -> Result<ApplicationDetails, Slice<string>> {
+  let mut errs: Slice<string> = []
+
+  let fwk = match validate_framework_roots(root) {
+    Ok(f)      => Some(f),
+    Err(errs2) => {
+      for e in errs2 { errs = errs.append(e) }
+      None
+    },
+  }
+
+  let main_ok = match os.Stat(filepath.Join(root, "main.j"))     { Ok(_) => true, Err(_) => false }
+  let idx_ok  = match os.Stat(filepath.Join(root, "index.html"))  { Ok(_) => true, Err(_) => false }
+
+  if !main_ok { errs = errs.append("main.j not found — required for Application projects") }
+  if !idx_ok  { errs = errs.append("index.html not found — required for Application projects") }
+
+  if errs.length() > 0 {
+    return Err(errs)
+  }
+
+  // All checks passed.  fwk is guaranteed Some: the only path to None is
+  // through validate_framework_roots returning Err, which populates errs
+  // and is caught by the early return above.
+  match fwk {
+    Some(frameworks) => Ok(ApplicationDetails { frameworks: frameworks }),
+    None             => Err(["internal: framework roots unavailable after clean validation"]),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase entry point
+// ---------------------------------------------------------------------------
+
 pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<ValidationResult, error> {
   let phase = BuildPhase.ValidateProjectStructure
-  fmt.Println(f"✓  {ctx.root.path}")
   let mut diags: Slice<Diagnostic> = []
+  let root = ctx.root.path
 
-  // Root discovery succeeded before this phase ran; ctx.root.path is the
-  // validated project root.  All subsequent checks are relative to it.
-  diags = diags.append(diag_info(phase, f"project root: {ctx.root.path}"))
+  // Info.plist — mandatory entry condition for all supported project types
+  let plist_path = filepath.Join(root, "Info.plist")
+  match os.Stat(plist_path) {
+    Ok(_)  => (),
+    Err(_) => {
+      diags = diags.append(diag_error(phase,
+        "Info.plist not found — required for all Cappuccino projects"))
+      return Ok(ValidationResult { diags: diags })
+    },
+  }
 
-  // TODO: verify Info.plist exists at ctx.root.path
-  diags = diags.append(diag_info(phase, "TODO: verify Info.plist exists"))
+  let content = match os.ReadFile(plist_path) {
+    Ok(data) => data as string,
+    Err(e)   => {
+      diags = diags.append(diag_error(phase, f"Info.plist unreadable: {e}"))
+      return Ok(ValidationResult { diags: diags })
+    },
+  }
 
-  // TODO: parse Info.plist and validate required keys (CFBundleName,
-  //       CFBundleIdentifier, NSPrincipalClass, etc.)
-  diags = diags.append(diag_info(phase, "TODO: validate Info.plist structure"))
+  // Construct PlistMeta — all required keys must be present
+  let meta = match parse_plist_meta(content) {
+    Ok(m)     => m,
+    Err(errs) => {
+      for e in errs { diags = diags.append(diag_error(phase, e)) }
+      return Ok(ValidationResult { diags: diags })
+    },
+  }
 
-  // TODO: verify Frameworks/AppKit exists (concrete or symlink)
-  diags = diags.append(diag_info(phase, "TODO: verify Frameworks/AppKit"))
+  // Match on CPBundlePackageType to select the appropriate ProjectDetails
+  // constructor.  The variant IS the kind; construction only succeeds when
+  // all structural evidence for that kind is present.
+  let details = match meta.package_type {
 
-  // TODO: verify Frameworks/Foundation exists (concrete or symlink)
-  diags = diags.append(diag_info(phase, "TODO: verify Frameworks/Foundation"))
+    "APPL" => match validate_application(root) {
+      Ok(app)   => Some(ProjectDetails.Application(app)),
+      Err(errs) => {
+        for e in errs { diags = diags.append(diag_error(phase, e)) }
+        None
+      },
+    },
 
-  // TODO: verify main.j exists at the project root
-  diags = diags.append(diag_info(phase, "TODO: verify main.j entry point"))
+    "FMWK" => Some(ProjectDetails.Framework),
 
-  // TODO: verify index.html exists at the project root
-  diags = diags.append(diag_info(phase, "TODO: verify index.html entry point"))
+    "THME" => Some(ProjectDetails.Theme),
 
-  // TODO: read Info.plist to determine whether an ApplicationDelegate is
-  //       configured; if so, verify MainMenu.xib exists
-  diags = diags.append(diag_info(phase, "TODO: verify MainMenu.xib if ApplicationDelegate requires it"))
+    _ => {
+      diags = diags.append(diag_error(phase,
+        f"Info.plist: unrecognised CPBundlePackageType \"{meta.package_type}\""))
+      None
+    },
 
+  }
+
+  // Construct ValidatedProject only when both meta and details are present.
+  // Its presence in BuildContext.project is the guarantee that the project
+  // is structurally valid and the pipeline may proceed.
+  match details {
+    Some(d) => ctx.project = Some(ValidatedProject { meta: meta, details: d }),
+    None    => (),
+  }
+
+  fmt.Println(f"✓  validate: {root}")
   Ok(ValidationResult { diags: diags })
 }
