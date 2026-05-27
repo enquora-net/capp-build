@@ -2,18 +2,19 @@
 // main.lis
 // capp-build
 //
+// Created by David Richardson on Thursday, April 9, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
 // CLI entry point. Thin consumer of the build, verify, and smoke library packages.
 // Wires the cobra command surface and delegates all logic to sub-packages.
 //
 // Command surface:
-//   capp-build build [--debug|--release|--clean]
+//   capp-build build [--mode debug|release|clean] [--http2]
 //   capp-build verify root [path]
 //   capp-build smoke cobra
 //   capp-build smoke capp
 //   capp-build smoke all
 //
-// Created by David Richardson on Thursday, April 9, 2026.
-// Copyright (c) 2026 David Richardson. All rights reserved.
 //
 // **
 import "go:fmt"
@@ -135,25 +136,36 @@ fn make_group(use: string, short: string) -> cobra.Command {
 
 fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   let source_root = if args.length() > 0 { args[0] } else { "." }
-  let release_flag = match cmd.Flags().GetBool("release") {
+
+  let mode_str = match cmd.Flags().GetString("mode") {
     Ok(v)  => v,
-    Err(_) => false,
+    Err(_) => "debug",
   }
-  let clean_flag = match cmd.Flags().GetBool("clean") {
+
+  let mode = match mode_str {
+    "release" => build.BuildMode.Release,
+    "clean"   => build.BuildMode.Clean,
+    "debug"   => build.BuildMode.Debug,
+    _         => {
+      cmd.Println(f"unknown mode '{mode_str}': must be debug, release, or clean")
+      return
+    },
+  }
+
+  let http2_flag = match cmd.Flags().GetBool("http2") {
     Ok(v)  => v,
     Err(_) => false,
   }
 
-  let mode = if clean_flag {
-    build.BuildMode.Clean
-  } else if release_flag {
-    build.BuildMode.Release
+  let delivery = if http2_flag {
+    build.DeliveryContext.HTTP2
   } else {
-    build.BuildMode.Debug
+    build.DeliveryContext.HTTP1
   }
 
   let cfg = build.BuildConfig {
     mode:        mode,
+    delivery:    delivery,
     source_root: source_root,
     grammar:     "",
   }
@@ -170,9 +182,8 @@ fn new_build_cmd() -> cobra.Command {
     "Compile Objective-J source",
     run_build,
   )
-  let _ = cmd.Flags().Bool("debug",   false, "compile in debug mode (default)")
-  let _ = cmd.Flags().Bool("release", false, "compile in release mode")
-  let _ = cmd.Flags().Bool("clean",   false, "clean build artifacts")
+  let _ = cmd.Flags().String("mode", "debug", "build mode: debug, release, clean")
+  let _ = cmd.Flags().Bool("http2", false, "target HTTP/2 delivery (default: HTTP/1.x)")
   cmd
 }
 

@@ -52,7 +52,7 @@ pub struct SourceTree {
 //   (all others)             => Resource
 pub fn run_walk_source_tree(_ctx: Ref<BuildContext>) -> Result<SourceTree, error> {
   let phase = BuildPhase.WalkSourceTree
-  fmt.Println(f"  {phase_name(phase)}")
+  fmt.Println("  walk source tree")
   let mut diags: Slice<Diagnostic> = []
   let files: Slice<SourceFile> = []
 

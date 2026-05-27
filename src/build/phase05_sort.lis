@@ -29,7 +29,7 @@ pub struct SortedUnits {
 // This is a defensive guard, not the primary detection mechanism.
 pub fn run_topological_sort(_ctx: Ref<BuildContext>) -> Result<SortedUnits, error> {
   let phase = BuildPhase.TopologicalSort
-  fmt.Println(f"  {phase_name(phase)}")
+  fmt.Println("  topological sort")
   let mut diags: Slice<Diagnostic> = []
   let order: Slice<string> = []
 

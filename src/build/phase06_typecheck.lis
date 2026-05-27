@@ -30,7 +30,7 @@ pub struct TypeCheckResult {
 //   - Protocol conformance
 pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error> {
   let phase = BuildPhase.TypeCheck
-  fmt.Println(f"  {phase_name(phase)}")
+  fmt.Println("  type check")
   let mut diags: Slice<Diagnostic> = []
 
   // TODO: build a symbol table from the sorted parse trees, processing

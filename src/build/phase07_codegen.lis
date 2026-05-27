@@ -30,7 +30,7 @@ pub struct CodeGenOutput {
 //   Clean:   no output; artefact directories are removed
 pub fn run_code_generate(_ctx: Ref<BuildContext>) -> Result<CodeGenOutput, error> {
   let phase = BuildPhase.CodeGenerate
-  fmt.Println(f"  {phase_name(phase)}")
+  fmt.Println("  code generate")
   let mut diags: Slice<Diagnostic> = []
   let files: Slice<string> = []
 

@@ -33,20 +33,58 @@ pub enum BuildPhase {
   Link,
 }
 
-// Implements the guarantee the `BuildPhase` defines: if a ninth phase is added
-// to BuildPhase and this match is not updated, the build fails.  The same
-// protection applies at every other match site in the codebase — no handling
-// site can be silently skipped.
-pub fn phase_name(phase: BuildPhase) -> string {
-  match phase {
-    BuildPhase.ValidateProjectStructure => "validate project structure",
-    BuildPhase.WalkSourceTree           => "walk source tree",
-    BuildPhase.ParseSources             => "parse sources",
-    BuildPhase.ResolveImports           => "resolve imports",
-    BuildPhase.TopologicalSort          => "topological sort",
-    BuildPhase.TypeCheck                => "type check",
-    BuildPhase.CodeGenerate             => "code generate",
-    BuildPhase.Link                     => "link",
+// Adding a variant to BuildPhase without a corresponding arm in run() is a
+// compile error.  This is the binding between declaration and execution.
+// all() declares execution order; run() enforces completeness.
+impl BuildPhase {
+  fn all() -> Slice<BuildPhase> {
+    [
+      BuildPhase.ValidateProjectStructure,
+      BuildPhase.WalkSourceTree,
+      BuildPhase.ParseSources,
+      BuildPhase.ResolveImports,
+      BuildPhase.TopologicalSort,
+      BuildPhase.TypeCheck,
+      BuildPhase.CodeGenerate,
+      BuildPhase.Link,
+    ]
+  }
+
+  fn run(self, ctx: Ref<BuildContext>) -> Result<(), error> {
+    match self {
+      BuildPhase.ValidateProjectStructure => {
+        ctx.validation = Some(run_validate_project_structure(ctx)?)
+        Ok(())
+      },
+      BuildPhase.WalkSourceTree => {
+        ctx.tree = Some(run_walk_source_tree(ctx)?)
+        Ok(())
+      },
+      BuildPhase.ParseSources => {
+        ctx.parsed = Some(run_parse_sources(ctx)?)
+        Ok(())
+      },
+      BuildPhase.ResolveImports => {
+        ctx.imports = Some(run_resolve_imports(ctx)?)
+        Ok(())
+      },
+      BuildPhase.TopologicalSort => {
+        ctx.sorted = Some(run_topological_sort(ctx)?)
+        Ok(())
+      },
+      BuildPhase.TypeCheck => {
+        ctx.type_info = Some(run_type_check(ctx)?)
+        Ok(())
+      },
+      BuildPhase.CodeGenerate => {
+        ctx.code_gen = Some(run_code_generate(ctx)?)
+        Ok(())
+      },
+      BuildPhase.Link => {
+        ctx.linked = Some(run_link(ctx)?)
+        Ok(())
+      },
+    }
   }
 }
 
@@ -63,8 +101,20 @@ pub enum BuildMode {
   Clean,
 }
 
+// The delivery context is a property of the target environment, not the
+// compilation mode.  It governs phase 8 output structure independently of
+// whether the build is Debug, Release, or any future mode.
+//
+// HTTP1: concatenated, minified output — default; works on any server
+// HTTP2: per-file output — exploits multiplexing and fine-grained caching
+pub enum DeliveryContext {
+  HTTP1,
+  HTTP2,
+}
+
 pub struct BuildConfig {
-  pub mode:        BuildMode,
+  pub mode:     BuildMode,
+  pub delivery: DeliveryContext,
   pub source_root: string,
   pub grammar:     string,
 }
@@ -80,6 +130,8 @@ pub struct BuildResult {
 // ---------------------------------------------------------------------------
 
 // A phase returning Err halts the pipeline; Warning-level diagnostics do not.
+// The slice literal below is the single authoritative declaration of execution
+// order.  Completeness is enforced by BuildPhase.run above.
 pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   let root = find_project_root(cfg.source_root)?
 
@@ -89,37 +141,9 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
     ..
   }
 
-  // Phase 1: validate project structure
-  let validation = run_validate_project_structure(&ctx)?
-  ctx.validation = Some(validation)
-
-  // Phase 2: walk source tree
-  let tree = run_walk_source_tree(&ctx)?
-  ctx.tree = Some(tree)
-
-  // Phase 3: parse sources
-  let parsed = run_parse_sources(&ctx)?
-  ctx.parsed = Some(parsed)
-
-  // Phase 4: resolve imports
-  let imports = run_resolve_imports(&ctx)?
-  ctx.imports = Some(imports)
-
-  // Phase 5: topological sort
-  let sorted = run_topological_sort(&ctx)?
-  ctx.sorted = Some(sorted)
-
-  // Phase 6: type check
-  let type_info = run_type_check(&ctx)?
-  ctx.type_info = Some(type_info)
-
-  // Phase 7: code generate
-  let code_gen = run_code_generate(&ctx)?
-  ctx.code_gen = Some(code_gen)
-
-  // Phase 8: link
-  let linked = run_link(&ctx)?
-  ctx.linked = Some(linked)
+  for phase in BuildPhase.all() {
+    phase.run(&ctx)?
+  }
 
   Ok(BuildResult {
     ok:      true,

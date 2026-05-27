@@ -47,7 +47,7 @@ pub struct ImportGraph {
 //                          resolved are flagged as Warning-level diagnostics
 pub fn run_resolve_imports(_ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
   let phase = BuildPhase.ResolveImports
-  fmt.Println(f"  {phase_name(phase)}")
+  fmt.Println("  resolve imports")
   let mut diags: Slice<Diagnostic> = []
   let edges: Slice<ImportEdge> = []
 

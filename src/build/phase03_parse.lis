@@ -30,7 +30,7 @@ pub struct ParsedUnits {
 // from the output; the phase does not halt on the first failure.
 pub fn run_parse_sources(_ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
   let phase = BuildPhase.ParseSources
-  fmt.Println(f"  {phase_name(phase)}")
+  fmt.Println("  parse sources")
   let mut diags: Slice<Diagnostic> = []
   let units: Slice<ParsedUnit> = []
 
