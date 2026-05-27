@@ -12,6 +12,9 @@
 //
 // **
 import "go:fmt"
+import "go:path/filepath"
+import "go:strings"
+import "go:github.com/enquora-net/capp-parse"
 
 // The classification drives which downstream phases consume the file:
 // ObjectiveJ and Javascript are parsed; InterfaceBuilder compiled separately;
@@ -35,6 +38,24 @@ pub struct SourceTree {
   pub diags: Slice<Diagnostic>,
 }
 
+// classify returns the SourceKind for a file based on its extension.
+fn classify(path: string) -> SourceKind {
+  match strings.ToLower(filepath.Ext(path)) {
+    ".j"    => SourceKind.ObjectiveJ,
+    ".sj"   => SourceKind.ObjectiveJ,
+    ".js"   => SourceKind.Javascript,
+    ".xib"  => SourceKind.InterfaceBuilder,
+    ".png"  => SourceKind.Graphic,
+    ".jpg"  => SourceKind.Graphic,
+    ".jpeg" => SourceKind.Graphic,
+    ".svg"  => SourceKind.Graphic,
+    ".icns" => SourceKind.Graphic,
+    ".tiff" => SourceKind.Graphic,
+    ".gif"  => SourceKind.Graphic,
+    _       => SourceKind.Resource,
+  }
+}
+
 // run_walk_source_tree traverses the source tree rooted at ctx.root.path,
 // classifying each encountered file by its SourceKind and collecting the
 // results into a SourceTree.
@@ -43,30 +64,25 @@ pub struct SourceTree {
 //   Frameworks/   — framework source is consumed via import resolution only
 //   build/        — build artefact output directories
 //   .cappuccino/  — toolchain metadata directory
-//
-// Classification rules (by file extension):
-//   .j                       => ObjectiveJ
-//   .js                      => Javascript
-//   .xib                     => InterfaceBuilder
-//   .png .jpg .svg .icns .tiff => Graphic
-//   (all others)             => Resource
-pub fn run_walk_source_tree(_ctx: Ref<BuildContext>) -> Result<SourceTree, error> {
-  let phase = BuildPhase.WalkSourceTree
-  fmt.Println("  walk source tree")
-  let mut diags: Slice<Diagnostic> = []
-  let files: Slice<SourceFile> = []
+pub fn run_walk_source_tree(ctx: Ref<BuildContext>) -> Result<SourceTree, error> {
+  let diags: Slice<Diagnostic> = []
 
-  // TODO: walk ctx.root.path using filepath.WalkDir, skipping excluded
-  //       directories (Frameworks/, build/, .cappuccino/)
-  diags = diags.append(diag_info(phase, "TODO: walk source tree excluding Frameworks/ build/ .cappuccino/"))
+  let skip = ["Frameworks", "build", ".cappuccino"]
+  let paths = capp.SourcePaths(ctx.root.path, capp.ModeAuto, skip)?
 
-  // TODO: classify each file by extension into the appropriate SourceKind
-  diags = diags.append(diag_info(phase, "TODO: classify files by SourceKind"))
+  let mut files: Slice<SourceFile> = []
+  for path in paths {
+    files = files.append(SourceFile { path: path, kind: classify(path) })
+  }
 
-  // TODO: emit a Warning diagnostic for any file whose extension is
-  //       unrecognised but whose parent directory suggests it is intentional
-  //       source (e.g. files directly under Resources/)
-  diags = diags.append(diag_info(phase, "TODO: warn on unrecognised extensions in source directories"))
+  let objj_count = files.filter(|f| {
+    match f.kind {
+      SourceKind.ObjectiveJ => true,
+      _                     => false,
+    }
+  }).length()
+
+  fmt.Println(f"✓  walk source tree: {files.length()} files ({objj_count} Objective-J)")
 
   Ok(SourceTree { files: files, diags: diags })
 }

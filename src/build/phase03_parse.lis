@@ -8,17 +8,28 @@
 // Phase 3: ParseSources
 //
 // Invokes capp-parse over every ObjectiveJ and Javascript file in the source
-// tree, collecting the resulting concrete syntax trees.  Parse failures are
-// accumulated as diagnostics rather than aborting on the first error, so the
-// full set of syntactic defects is reported in a single pass.
+// tree, collecting import directives from each CST.  Trees are held live only
+// for the duration of extraction; ParsedUnit retains the typed RawImport
+// values, not the tree itself.  Parse failures are accumulated as diagnostics
+// rather than aborting on the first error.
 //
 // **
+import "go:errors"
 import "go:fmt"
+import "go:strings"
+import "go:github.com/enquora-net/capp-parse"
 
-// The CST is opaque at this level; consumed by phase04 and phase06.
+// RawImport represents an @import directive before path resolution.
+// Framework carries the angle-bracket form: framework name and relative path.
+// Local carries the quoted form: the raw path string.
+pub enum RawImport {
+  Framework(string, string),
+  Local(string),
+}
+
 pub struct ParsedUnit {
-  pub source: SourceFile,
-  // TODO: tree: CSTNode  — typed tree-sitter CST from capp-parse
+  pub source:  SourceFile,
+  pub imports: Slice<RawImport>,
 }
 
 pub struct ParsedUnits {
@@ -26,24 +37,113 @@ pub struct ParsedUnits {
   pub diags: Slice<Diagnostic>,
 }
 
-// A file that fails to parse produces an Error-level diagnostic and is omitted
-// from the output; the phase does not halt on the first failure.
-pub fn run_parse_sources(_ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
+// extract_imports walks a CSTNode depth-first and returns all @import
+// directives as typed RawImport values.  The node and its descendants are
+// consumed transiently; only the semantic values are retained.
+pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
+  if node.IsNull() {
+    return []
+  }
+
+  if node.Kind() == capp.NodeKindObjjImport {
+    match node.ChildByFieldName(capp.FieldImportPath) {
+      Some(path_node) => {
+        let kind = path_node.Kind()
+        let text = path_node.Text()
+        if kind == capp.NodeKindSystemLibString && text.length() > 2 {
+          // text is <Foundation/CPObject.j> — strip surrounding < >
+          let inner = text.substring(1..text.length() - 1)
+          match strings.Index(inner, "/") {
+            Some(slash) => {
+              let framework = inner.substring(0..slash)
+              let path      = inner.substring(slash + 1..inner.length())
+              return [RawImport.Framework(framework, path)]
+            },
+            None => return [],
+          }
+        } else if kind == capp.NodeKindString && text.length() > 2 {
+          // text is "MyClass.j" — strip surrounding quotation marks
+          let inner = text.substring(1..text.length() - 1)
+          return [RawImport.Local(inner)]
+        }
+        return []
+      },
+      None => return [],
+    }
+  }
+
+  // Not an import node — recurse into children
+  let mut result: Slice<RawImport> = []
+  for i in 0..node.ChildCount() {
+    for imp in extract_imports(node.Child(i)) {
+      result = result.append(imp)
+    }
+  }
+  result
+}
+
+// run_parse_sources parses every ObjectiveJ and Javascript file in the source
+// tree in a single parallel batch, extracts @import directives from each CST,
+// and returns the typed ParsedUnits.  The CSTs are released before returning.
+pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
   let phase = BuildPhase.ParseSources
-  fmt.Println("  parse sources")
   let mut diags: Slice<Diagnostic> = []
-  let units: Slice<ParsedUnit> = []
 
-  // TODO: filter ctx.tree.files to ObjectiveJ and Javascript entries
-  diags = diags.append(diag_info(phase, "TODO: filter source tree to parseable file kinds"))
+  let tree = match ctx.tree {
+    Some(t) => t,
+    None    => return Err(errors.New("parse sources: source tree unavailable")),
+  }
 
-  // TODO: for each file, invoke capp-parse via native Go interface
-  //       (preferred) or subprocess with JSON output (fallback)
-  diags = diags.append(diag_info(phase, "TODO: invoke capp-parse per source file"))
+  let mut paths: Slice<string> = []
+  for file in tree.files {
+    match file.kind {
+      SourceKind.ObjectiveJ => paths = paths.append(file.path),
+      SourceKind.Javascript => paths = paths.append(file.path),
+      _                     => (),
+    }
+  }
 
-  // TODO: collect parse diagnostics; do not abort on first error —
-  //       accumulate all syntactic defects before returning
-  diags = diags.append(diag_info(phase, "TODO: accumulate parse diagnostics across all files"))
+  if paths.length() == 0 {
+    return Ok(ParsedUnits { units: [], diags: diags })
+  }
+
+  let cfg = capp.ProjectConfig {
+    Root:        "",
+    Paths:       paths,
+    Mode:        capp.ModeAuto,
+    GrammarPath: ctx.config.grammar,
+    Workers:     0,
+    ..
+  }
+
+  let pr = capp.ParseProject(cfg)?
+  defer pr.Close()
+
+  let mut units: Slice<ParsedUnit> = []
+
+  for file_opt in pr.Files {
+    match file_opt {
+      None => (),
+      Some(file) => {
+        if file.HasError() {
+          for e in file.Errors {
+            diags = diags.append(diag_error_at(
+              phase,
+              e.Message,
+              file.Path,
+              e.Row as int,
+            ))
+          }
+        } else {
+          let imports = extract_imports(file.Root())
+          let source  = SourceFile { path: file.Path, kind: classify(file.Path) }
+          units = units.append(ParsedUnit { source: source, imports: imports })
+        }
+      },
+    }
+  }
+
+  fmt.Println(f"✓  parse sources: {units.length()} units")
 
   Ok(ParsedUnits { units: units, diags: diags })
 }

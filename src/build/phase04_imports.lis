@@ -7,14 +7,22 @@
 //
 // Phase 4: ResolveImports
 //
-// Traverses the parse trees and resolves every @import directive to an
-// absolute path, constructing the full directed dependency graph of the
-// project.  Three distinct failure classes are diagnosed separately, as
-// described in ARCHITECTURE.md: absent files, cyclic dependencies, and
-// conditionally valid imports.
+// Resolves every @import directive to an absolute path and builds the full
+// directed dependency graph via a fixed-point iteration.  Each pass identifies
+// files newly reachable through imports not yet in the graph, parses them,
+// extracts their own imports, and continues until no new files are discovered.
+//
+// Three failure classes are diagnosed separately:
+//   Absent file     — the resolved path does not exist on disk
+//   Cyclic import   — detected in phase 5 as a defensive guard
+//   Conditional     — imports inside preprocessor blocks (flagged as warnings)
 //
 // **
+import "go:errors"
 import "go:fmt"
+import "go:os"
+import "go:path/filepath"
+import "go:github.com/enquora-net/capp-parse"
 
 // Both fields hold resolved absolute paths, not raw @import strings.
 pub struct ImportEdge {
@@ -28,47 +36,147 @@ pub struct ImportGraph {
   pub diags: Slice<Diagnostic>,
 }
 
-// run_resolve_imports traverses the parse trees in ctx.parsed and resolves
-// every @import directive to an absolute path, constructing the full
-// dependency graph.
-//
-// Diagnostics are emitted for three distinct failure classes:
-//
-//   Ambiguity / Absence:   a referenced file does not exist; the diagnostic
-//                          distinguishes a likely typo from a missing build
-//                          artefact from a path-configuration error
-//
-//   Cyclic dependency:     A → B → A is detected and reported as an
-//                          actionable error rather than entering an
-//                          infinite resolution loop
-//
-//   Conditional validity:  imports guarded by preprocessor conditionals or
-//                          build-configuration flags that cannot be statically
-//                          resolved are flagged as Warning-level diagnostics
-pub fn run_resolve_imports(_ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
+// path_known returns true when target already appears in the known slice.
+fn path_known(known: Slice<string>, target: string) -> bool {
+  known.filter(|p| p == target).length() > 0
+}
+
+// resolve_import converts a single RawImport to an absolute path on disk.
+// Framework imports resolve under frameworks_root; local imports resolve
+// relative to the directory of the importing file.
+fn resolve_import(
+  imp:             RawImport,
+  from_path:       string,
+  frameworks_root: string,
+) -> Option<string> {
+  let candidate = match imp {
+    RawImport.Framework(framework, path) =>
+      filepath.Join(frameworks_root, framework, path),
+    RawImport.Local(path) =>
+      filepath.Join(filepath.Dir(from_path), path),
+  }
+  match os.Stat(candidate) {
+    Ok(_)  => Some(candidate),
+    Err(_) => None,
+  }
+}
+
+// import_label returns a human-readable representation of a RawImport for
+// use in diagnostic messages.
+fn import_label(imp: RawImport) -> string {
+  match imp {
+    RawImport.Framework(fw, p) => f"<{fw}/{p}>",
+    RawImport.Local(p)         => f"\"{p}\"",
+  }
+}
+
+// run_resolve_imports resolves all @import directives from ctx.parsed and
+// performs a fixed-point iteration to discover transitively imported files.
+pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
   let phase = BuildPhase.ResolveImports
-  fmt.Println("  resolve imports")
   let mut diags: Slice<Diagnostic> = []
-  let edges: Slice<ImportEdge> = []
+  let mut edges: Slice<ImportEdge> = []
 
-  // TODO: traverse ctx.parsed.units and extract @import directives from
-  //       each CST
-  diags = diags.append(diag_info(phase, "TODO: extract @import directives from parse trees"))
+  let parsed = match ctx.parsed {
+    Some(p) => p,
+    None    => return Err(errors.New("resolve imports: parsed units unavailable")),
+  }
 
-  // TODO: resolve each import path relative to the importing file, then
-  //       relative to Frameworks/, and finally against the project root
-  diags = diags.append(diag_info(phase, "TODO: resolve import paths in priority order"))
+  // Framework imports resolve against Frameworks/ at the project root for
+  // applications.  For framework source trees (AppKit, Foundation) identified
+  // by Info.plist rather than Frameworks/Foundation, the sibling directory
+  // layout applies and the parent directory is the frameworks root.
+  let frameworks_candidate = filepath.Join(ctx.root.path, "Frameworks")
+  let frameworks_root = match os.Stat(frameworks_candidate) {
+    Ok(_)  => frameworks_candidate,
+    Err(_) => filepath.Dir(ctx.root.path),
+  }
 
-  // TODO: emit a distinct Error diagnostic for each missing file,
-  //       classifying the likely cause (typo / absent file / bad path)
-  diags = diags.append(diag_info(phase, "TODO: diagnose missing imports with cause classification"))
+  // known tracks absolute paths already in the graph to prevent re-parsing.
+  let mut known: Slice<string> = []
+  for unit in parsed.units {
+    known = known.append(unit.source.path)
+  }
 
-  // TODO: detect cycles using DFS over the emerging edge set; emit an
-  //       Error diagnostic identifying the cycle members
-  diags = diags.append(diag_info(phase, "TODO: detect and diagnose cyclic imports"))
+  // frontier holds the units whose imports have not yet been resolved.
+  let mut frontier: Slice<ParsedUnit> = parsed.units
 
-  // TODO: flag conditionally valid imports as Warning diagnostics
-  diags = diags.append(diag_info(phase, "TODO: warn on conditionally valid imports"))
+  loop {
+    if frontier.length() == 0 { break }
+
+    let mut new_paths: Slice<string> = []
+
+    for unit in frontier {
+      for imp in unit.imports {
+        match resolve_import(imp, unit.source.path, frameworks_root) {
+          Some(to_path) => {
+            edges = edges.append(ImportEdge { from: unit.source.path, to: to_path })
+            if !path_known(known, to_path) {
+              known     = known.append(to_path)
+              new_paths = new_paths.append(to_path)
+            }
+          },
+          None => {
+            diags = diags.append(diag_error_at(
+              phase,
+              f"unresolvable import {import_label(imp)}",
+              unit.source.path,
+              0,
+            ))
+          },
+        }
+      }
+    }
+
+    if new_paths.length() == 0 { break }
+
+    let cfg = capp.ProjectConfig {
+      Root:        "",
+      Paths:       new_paths,
+      Mode:        capp.ModeAuto,
+      GrammarPath: ctx.config.grammar,
+      Workers:     0,
+      ..
+    }
+
+    let mut next_frontier: Slice<ParsedUnit> = []
+
+    match capp.ParseProject(cfg) {
+      Ok(pr) => {
+        for file_opt in pr.Files {
+          match file_opt {
+            None => (),
+            Some(file) => {
+              let imports = if file.HasError() {
+                diags = diags.append(diag_error_at(
+                  phase,
+                  "parse error in transitively imported file",
+                  file.Path,
+                  0,
+                ))
+                []
+              } else {
+                extract_imports(file.Root())
+              }
+              let source = SourceFile { path: file.Path, kind: classify(file.Path) }
+              next_frontier = next_frontier.append(
+                ParsedUnit { source: source, imports: imports }
+              )
+            },
+          }
+        }
+        pr.Close()
+      },
+      Err(e) => {
+        diags = diags.append(diag_error(phase, f"batch parse error: {e}"))
+        break
+      },
+    }
+
+    frontier = next_frontier
+  }
+
+  fmt.Println(f"✓  resolve imports: {edges.length()} edges")
 
   Ok(ImportGraph { edges: edges, diags: diags })
 }

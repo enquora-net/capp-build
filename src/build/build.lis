@@ -13,6 +13,7 @@
 // Phase implementations live in phase01_validate.lis through phase08_link.lis.
 //
 // **
+import "go:fmt"
 
 // ---------------------------------------------------------------------------
 // BuildPhase
@@ -144,6 +145,21 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   for phase in BuildPhase.all() {
     phase.run(&ctx)?
   }
+
+  let file_count = match ctx.tree {
+    Some(t) => t.files.length(),
+    None    => 0,
+  }
+  let unit_count = match ctx.parsed {
+    Some(p) => p.units.length(),
+    None    => 0,
+  }
+  let edge_count = match ctx.imports {
+    Some(i) => i.edges.length(),
+    None    => 0,
+  }
+
+  fmt.Println(f"  {file_count} source files  {unit_count} parsed  {edge_count} import edges")
 
   Ok(BuildResult {
     ok:      true,
