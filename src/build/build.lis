@@ -53,35 +53,35 @@ impl BuildPhase {
 
   fn run(self, ctx: Ref<BuildContext>) -> Result<(), error> {
     match self {
-      BuildPhase.ValidateProjectStructure => {
+      ValidateProjectStructure => {
         ctx.validation = Some(run_validate_project_structure(ctx)?)
         Ok(())
       },
-      BuildPhase.WalkSourceTree => {
+      WalkSourceTree => {
         ctx.tree = Some(run_walk_source_tree(ctx)?)
         Ok(())
       },
-      BuildPhase.ParseSources => {
+      ParseSources => {
         ctx.parsed = Some(run_parse_sources(ctx)?)
         Ok(())
       },
-      BuildPhase.ResolveImports => {
+      ResolveImports => {
         ctx.imports = Some(run_resolve_imports(ctx)?)
         Ok(())
       },
-      BuildPhase.TopologicalSort => {
+      TopologicalSort => {
         ctx.sorted = Some(run_topological_sort(ctx)?)
         Ok(())
       },
-      BuildPhase.TypeCheck => {
+      TypeCheck => {
         ctx.type_info = Some(run_type_check(ctx)?)
         Ok(())
       },
-      BuildPhase.Compile => {
+      Compile => {
         ctx.compiled = Some(run_compile(ctx)?)
         Ok(())
       },
-      BuildPhase.Archive => {
+      Archive => {
         ctx.archived = Some(run_archive(ctx)?)
         Ok(())
       },
