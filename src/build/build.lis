@@ -10,7 +10,7 @@
 //
 // Root discovery and build context live in context.lis.
 // Diagnostic infrastructure lives in diagnostics.lis.
-// Phase implementations live in phase01_validate.lis through phase08_link.lis.
+// Phase implementations live in phase01_validate.lis through phase08_archive.lis.
 //
 // **
 import "go:fmt"
@@ -30,8 +30,8 @@ pub enum BuildPhase {
   ResolveImports,
   TopologicalSort,
   TypeCheck,
-  CodeGenerate,
-  Link,
+  Compile,
+  Archive,
 }
 
 // Adding a variant to BuildPhase without a corresponding arm in run() is a
@@ -46,8 +46,8 @@ impl BuildPhase {
       BuildPhase.ResolveImports,
       BuildPhase.TopologicalSort,
       BuildPhase.TypeCheck,
-      BuildPhase.CodeGenerate,
-      BuildPhase.Link,
+      BuildPhase.Compile,
+      BuildPhase.Archive,
     ]
   }
 
@@ -77,12 +77,12 @@ impl BuildPhase {
         ctx.type_info = Some(run_type_check(ctx)?)
         Ok(())
       },
-      BuildPhase.CodeGenerate => {
-        ctx.code_gen = Some(run_code_generate(ctx)?)
+      BuildPhase.Compile => {
+        ctx.compiled = Some(run_compile(ctx)?)
         Ok(())
       },
-      BuildPhase.Link => {
-        ctx.linked = Some(run_link(ctx)?)
+      BuildPhase.Archive => {
+        ctx.archived = Some(run_archive(ctx)?)
         Ok(())
       },
     }

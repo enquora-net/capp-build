@@ -1,0 +1,72 @@
+//**
+// build/phase08_archive.lis
+// capp-build
+//
+// Created by David Richardson on Monday, May 25, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 8: Archive
+//
+// Produces the build output artifact from the compiled records delivered
+// by phase 7.  The form of the artifact depends on the project type:
+//
+//   Framework:   a .sj bundle in the static blob format, written to the
+//                appropriate environment subdirectory
+//                (e.g. ObjJ.environment/Foundation.sj).  Each compiled
+//                record becomes a p/t pair in the bundle.
+//
+//   Application: an assembled deliverable directory containing framework
+//                .sj bundles in load order, the application's compiled
+//                output, copied resources, and the index.html entry point.
+//
+// In both cases the output is self-contained and ready for consumption:
+// by another framework's build (Framework) or by a browser (Application).
+//
+// **
+import "go:fmt"
+
+pub struct ArchiveResult {
+  pub output: string,
+  pub diags:  Slice<Diagnostic>,
+}
+
+pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
+  let phase = BuildPhase.Archive
+  fmt.Println("  archive")
+  let mut diags: Slice<Diagnostic> = []
+
+  // TODO: determine project type from ctx and branch to the appropriate
+  //       archive strategy (Framework or Application)
+  diags = diags.append(diag_info(phase, "TODO: determine project type and select archive strategy"))
+
+  // Framework path:
+  // TODO: create the environment output directory
+  //       (e.g. build/Foundation/ObjJ.environment/)
+  diags = diags.append(diag_info(phase, "TODO: create environment output directory for framework"))
+
+  // TODO: write @STATIC;1.0; bundle header
+  diags = diags.append(diag_info(phase, "TODO: write bundle header"))
+
+  // TODO: for each CompiledRecord in ctx.compiled.records, write a
+  //       p/<name_len>/<name> record followed by a t/<record_len>/<record>
+  diags = diags.append(diag_info(phase, "TODO: write p/t record pairs for each compiled file"))
+
+  // TODO: write e; bundle terminator
+  diags = diags.append(diag_info(phase, "TODO: write bundle terminator"))
+
+  // Application path:
+  // TODO: write framework .sj bundles to output in dependency order
+  diags = diags.append(diag_info(phase, "TODO: write framework bundles in load order"))
+
+  // TODO: copy application resources and write index.html
+  diags = diags.append(diag_info(phase, "TODO: copy resources and write index.html"))
+
+  // TODO: write build manifest recording input hashes for incremental
+  //       rebuild support by make
+  diags = diags.append(diag_info(phase, "TODO: write build manifest for make incremental rebuilds"))
+
+  Ok(ArchiveResult {
+    output: ctx.root.path,
+    diags:  diags,
+  })
+}

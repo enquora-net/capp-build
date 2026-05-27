@@ -73,6 +73,6 @@ pub struct BuildContext {
   pub imports:    Option<ImportGraph>,
   pub sorted:     Option<SortedUnits>,
   pub type_info:  Option<TypeCheckResult>,
-  pub code_gen:   Option<CodeGenOutput>,
-  pub linked:     Option<LinkResult>,
+  pub compiled:   Option<CompileOutput>,
+  pub archived:   Option<ArchiveResult>,
 }
