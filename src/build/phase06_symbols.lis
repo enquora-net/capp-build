@@ -1,0 +1,152 @@
+//**
+// build/phase06_symbols.lis
+// capp-build
+//
+// Created by David Richardson on Thursday, May 29, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 6: BuildSymbolTable
+//
+// Walks the sorted parse trees and constructs a complete symbol table for
+// the project.  Files are processed in ctx.sorted.order so that every class
+// and protocol referenced by a file is recorded before that file is visited.
+//
+// The symbol table is the shared foundation for phase 7 (TypeCheck) and
+// phase 8 (Compile).  Phase 7 checks against it; phase 8 drives code
+// generation from it.  Neither pass rebuilds it; both receive it read-only
+// via ctx.symbols.
+//
+// Content extracted from each file:
+//   — @implementation declarations: class name, superclass, ivar list,
+//     method signatures (name, type indicator, return type, parameter types)
+//   — @protocol declarations: protocol name, required and optional methods
+//   — @class forward declarations: name only, resolved in a later file
+//   — @typedef declarations: name only
+//
+// The tree-sitter grammar exposes all of these as named nodes with typed
+// fields (see grammar.js: objj_class_implementation, objj_protocol_declaration,
+// objj_method_definition, objj_instance_variable, objj_field_definition).
+// Position information is carried through to every symbol for phase 7
+// diagnostic attribution and editor invocation.
+//
+// **
+import "go:fmt"
+
+// ---------------------------------------------------------------------------
+// Symbol table types
+// ---------------------------------------------------------------------------
+
+// SymbolTable is the output of phase 6 and a read-only input to phases 7 and 8.
+pub struct SymbolTable {
+  pub classes:   Slice<ClassSymbol>,
+  pub protocols: Slice<ProtocolSymbol>,
+  pub forwards:  Slice<ForwardSymbol>,
+  pub typedefs:  Slice<TypedefSymbol>,
+  pub diags:     Slice<Diagnostic>,
+}
+
+// ClassSymbol records a single @implementation declaration.
+pub struct ClassSymbol {
+  pub name:       string,
+  pub superclass: Option<string>,
+  pub category:   Option<string>,       // Some when this is a category implementation
+  pub protocols:  Slice<string>,        // protocol names from the conformance list
+  pub ivars:      Slice<IvarSymbol>,
+  pub methods:    Slice<MethodSymbol>,
+  pub file:       string,               // absolute path of the defining file
+  pub line:       int,                  // 1-based line of @implementation
+  pub col:        int,                  // 1-based column of @implementation
+}
+
+// IvarSymbol records a single instance variable declaration.
+pub struct IvarSymbol {
+  pub name:       string,
+  pub type_name:  string,
+  pub file:       string,
+  pub line:       int,
+  pub col:        int,
+}
+
+// MethodSymbol records a single method definition or declaration.
+// is_class_method distinguishes + (class) from - (instance) methods.
+pub struct MethodSymbol {
+  pub selector:        string,           // full selector, e.g. "setFrame:display:"
+  pub is_class_method: bool,
+  pub return_type:     string,
+  pub param_types:     Slice<string>,
+  pub file:            string,
+  pub line:            int,
+  pub col:             int,
+}
+
+// ProtocolSymbol records a single @protocol declaration.
+pub struct ProtocolSymbol {
+  pub name:     string,
+  pub methods:  Slice<MethodSymbol>,
+  pub file:     string,
+  pub line:     int,
+  pub col:      int,
+}
+
+// ForwardSymbol records a single @class forward declaration.
+pub struct ForwardSymbol {
+  pub name: string,
+  pub file: string,
+  pub line: int,
+  pub col:  int,
+}
+
+// TypedefSymbol records a single @typedef declaration.
+pub struct TypedefSymbol {
+  pub name: string,
+  pub file: string,
+  pub line: int,
+  pub col:  int,
+}
+
+// ---------------------------------------------------------------------------
+// Phase entry point
+// ---------------------------------------------------------------------------
+
+pub fn run_build_symbol_table(_ctx: Ref<BuildContext>) -> Result<SymbolTable, error> {
+  let phase = BuildPhase.BuildSymbolTable
+  fmt.Println("  build symbol table")
+  let mut diags: Slice<Diagnostic> = []
+
+  // TODO: iterate ctx.sorted.order; for each path retrieve the
+  //       corresponding ParsedUnit and walk its CST
+
+  // TODO: for each objj_class_implementation node extract:
+  //         name (field: name), superclass (field: superclass),
+  //         category (field: category), protocol list (field: protocols),
+  //         ivar block (objj_instance_variables → objj_field_definition),
+  //         method definitions (objj_method_definition)
+  diags = diags.append(diag_info(phase, "TODO: extract class symbols from @implementation nodes"))
+
+  // TODO: for each objj_method_definition node reconstruct the full
+  //       selector string from objj_method_parameter_part name_part fields
+  //       and extract return type, parameter types, and +/- indicator
+  diags = diags.append(diag_info(phase, "TODO: reconstruct method selectors and signatures"))
+
+  // TODO: for each objj_protocol_declaration node extract:
+  //         name, required/optional method declarations
+  diags = diags.append(diag_info(phase, "TODO: extract protocol symbols from @protocol nodes"))
+
+  // TODO: for each objj_class_forward_declaration node record a ForwardSymbol
+  diags = diags.append(diag_info(phase, "TODO: record @class forward declarations"))
+
+  // TODO: for each objj_typedef node record a TypedefSymbol
+  diags = diags.append(diag_info(phase, "TODO: record @typedef declarations"))
+
+  // TODO: detect duplicate class definitions (same name, not a category)
+  //       and emit Error diagnostics with both definition sites
+  diags = diags.append(diag_info(phase, "TODO: detect duplicate class definitions"))
+
+  Ok(SymbolTable {
+    classes:   [],
+    protocols: [],
+    forwards:  [],
+    typedefs:  [],
+    diags:     diags,
+  })
+}

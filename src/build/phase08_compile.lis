@@ -1,16 +1,17 @@
 //**
-// build/phase07_compile.lis
+// build/phase08_compile.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 7: Compile
+// Phase 8: Compile
 //
 // Transforms each dependency-ordered Objective-J source file into a
-// per-file static record: the @STATIC;1.0; format consumed by phase 8.
+// per-file static record: the @STATIC;1.0; format consumed by phase 9.
 // Each record encodes the file's import declarations followed by its
-// compiled JavaScript payload.
+// compiled JavaScript payload.  ctx.symbols provides the name resolution
+// and type information required for code generation.
 //
 // The form of the JavaScript payload is governed by the build mode:
 //
@@ -21,12 +22,12 @@
 // During the bootstrap period this phase is satisfied externally: the
 // existing jake toolchain produces the per-file static records manually.
 // The native Objective-J to JavaScript compiler will replace that process
-// when complete, without structural change to this phase or phase 8.
+// when complete, without structural change to this phase or phase 9.
 //
 // **
 import "go:fmt"
 
-// CompileOutput is the input to phase 8 (Archive).
+// CompileOutput is the input to phase 9 (Archive).
 // Each entry in `records` is a complete per-file static record string
 // in @STATIC;1.0; format, paired with the source-relative filename
 // used as the `p` record in the enclosing bundle.
@@ -47,7 +48,8 @@ pub fn run_compile(_ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   let records: Slice<CompiledRecord> = []
 
   // TODO: iterate ctx.sorted.order and compile each source file in
-  //       dependency order, producing one CompiledRecord per file
+  //       dependency order using ctx.symbols for name resolution,
+  //       producing one CompiledRecord per file
   diags = diags.append(diag_info(phase, "TODO: compile each source file to a per-file static record"))
 
   // TODO: in Debug mode, include an S record (base64 source map) in

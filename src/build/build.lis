@@ -10,7 +10,7 @@
 //
 // Root discovery and build context live in context.lis.
 // Diagnostic infrastructure lives in diagnostics.lis.
-// Phase implementations live in phase01_validate.lis through phase08_archive.lis.
+// Phase implementations live in phase01_validate.lis through phase09_archive.lis.
 //
 // **
 import "go:fmt"
@@ -24,14 +24,15 @@ import "go:fmt"
 // and that it is run in the correct order by the execution machinery.
 // Described in ARCHITECTURE.md.
 pub enum BuildPhase {
-  ValidateProjectStructure,
-  WalkSourceTree,
-  ParseSources,
-  ResolveImports,
-  TopologicalSort,
-  TypeCheck,
-  Compile,
-  Archive,
+  ValidateProjectStructure,  // phase 1
+  WalkSourceTree,            // phase 2
+  ParseSources,              // phase 3
+  ResolveImports,            // phase 4
+  TopologicalSort,           // phase 5
+  BuildSymbolTable,          // phase 6
+  TypeCheck,                 // phase 7
+  Compile,                   // phase 8
+  Archive,                   // phase 9
 }
 
 // Adding a variant to BuildPhase without a corresponding arm in run() is a
@@ -45,6 +46,7 @@ impl BuildPhase {
       BuildPhase.ParseSources,
       BuildPhase.ResolveImports,
       BuildPhase.TopologicalSort,
+      BuildPhase.BuildSymbolTable,
       BuildPhase.TypeCheck,
       BuildPhase.Compile,
       BuildPhase.Archive,
@@ -71,6 +73,10 @@ impl BuildPhase {
       },
       TopologicalSort => {
         ctx.sorted = Some(run_topological_sort(ctx)?)
+        Ok(())
+      },
+      BuildSymbolTable => {
+        ctx.symbols = Some(run_build_symbol_table(ctx)?)
         Ok(())
       },
       TypeCheck => {

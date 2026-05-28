@@ -1,14 +1,14 @@
 //**
-// build/phase08_archive.lis
+// build/phase09_archive.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 8: Archive
+// Phase 9: Archive
 //
 // Produces the build output artifact from the compiled records delivered
-// by phase 7.  The form of the artifact depends on the project type:
+// by phase 8.  The form of the artifact depends on the project type:
 //
 //   Framework:   a .sj bundle in the static blob format, written to the
 //                appropriate environment subdirectory

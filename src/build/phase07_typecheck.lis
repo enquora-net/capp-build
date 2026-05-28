@@ -1,27 +1,29 @@
 //**
-// build/phase06_typecheck.lis
+// build/phase07_typecheck.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 6: TypeCheck
+// Phase 7: TypeCheck
 //
-// Verifies the internal consistency of the parsed and sorted units.  Files
-// are processed in dependency order so that every type referenced by a file
-// is resolved before that file is checked.
+// Verifies the internal consistency of the parsed and sorted units against
+// the symbol table constructed by phase 6.  Files are processed in
+// dependency order so that every type referenced by a file is resolved
+// before that file is checked.
 //
 // **
 import "go:fmt"
 
 // The absence of Error-level diagnostics indicates a type-correct program.
-// Every Error diagnostic carries precise provenance: file, line, cause.
+// Every Error diagnostic carries precise provenance: file, line, col, cause.
 pub struct TypeCheckResult {
   pub diags: Slice<Diagnostic>,
 }
 
 // Files are processed in ctx.sorted.order so all imported types are resolved
-// before the file that depends on them is checked.
+// before the file that depends on them is checked.  ctx.symbols is the
+// read-only symbol table produced by phase 6.
 //
 // Scope of checking for Objective-J:
 //   - Message send resolution against known class interfaces
@@ -33,13 +35,9 @@ pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error>
   fmt.Println("  type check")
   let mut diags: Slice<Diagnostic> = []
 
-  // TODO: build a symbol table from the sorted parse trees, processing
-  //       files in ctx.sorted.order so imports are resolved before use
-  diags = diags.append(diag_info(phase, "TODO: build symbol table in dependency order"))
-
-  // TODO: resolve message sends against known class interfaces;
+  // TODO: resolve message sends against known class interfaces in ctx.symbols;
   //       emit Error diagnostics for unresolved selectors
-  diags = diags.append(diag_info(phase, "TODO: resolve message send types"))
+  diags = diags.append(diag_info(phase, "TODO: resolve message send types against symbol table"))
 
   // TODO: verify selector argument counts and labels at each call site
   diags = diags.append(diag_info(phase, "TODO: verify selector signatures at call sites"))
@@ -49,7 +47,7 @@ pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error>
   diags = diags.append(diag_info(phase, "TODO: check variable scope and usage"))
 
   // TODO: verify that classes declared as conforming to a protocol
-  //       implement all required methods
+  //       implement all required methods from ctx.symbols.protocols
   diags = diags.append(diag_info(phase, "TODO: verify protocol conformance"))
 
   Ok(TypeCheckResult { diags: diags })
