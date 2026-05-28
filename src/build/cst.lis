@@ -1,0 +1,1574 @@
+//**
+// build/cst.lis
+// capp-build
+//
+// Created by David Richardson on Thursday, May 29, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Concrete syntax tree — full-fidelity typed model of the Objective-J grammar.
+//
+// This module is a near-mechanical transliteration of the tree-sitter grammar
+// (tree-sitter-objj/grammar.js, a superset of tree-sitter-javascript) into
+// algebraic data types.  It is the durable, typed representation of parsed
+// source.  A single lowering pass (lower.lis) converts capp-parse's untyped
+// CSTNode into this tree; every downstream consumer — symbol table (phase 6),
+// type check (phase 7), compile (phase 8) — pattern matches over these types
+// and never touches the untyped CST again.  String-keyed, position-fragile
+// node access is thereby confined to exactly one module.
+//
+// Modelling conventions (applied uniformly):
+//   — Every node struct carries `pos: Position`.  Positions are 0-based
+//     (tree-sitter native: row and column both count from zero).  The
+//     diagnostics layer normalises to 1-based at emission.
+//   — `choice` / supertype / hidden-choice rules become sum types (enum).
+//   — `seq` rules with named fields become product types (struct).
+//   — `repeat(X)`  → Slice<X>;  `repeat1(X)` → Slice<X> (non-empty by grammar,
+//     noted where it matters);  `optional(X)` → Option<X>.
+//   — Operators become enums rather than raw strings.
+//   — Literal/keyword tokens carry no data beyond position unless they bear
+//     text (identifiers, numbers, string fragments).
+//   — Rules disabled in the Objective-J grammar (`array`, `decorator`, and all
+//     `jsx_*`, each overridden to `choice()`) are omitted: the parser cannot
+//     produce them.  `native_array` is the array form throughout.
+//   — `choice($.expression, $.primary_expression)` collapses to `Expression`;
+//     primary expressions are reachable through Expression.Primary, and the
+//     distinction is a parser-precedence artifact with no distinct CST node.
+//   — Hidden rules (`_objj_literal`, `_bracket_expression`, `_expressions`,
+//     `_lhs_expression`, `_destructuring_pattern`, `_module_export_name`) are
+//     modelled as enums; tree-sitter inlines them, but the alternation is
+//     exactly a sum type and naming it aids the consumer.
+//   — `comment` / `html_comment` are grammar `extras`: they may appear between
+//     any two tokens and are not structurally placed.  Types are provided for
+//     completeness; the lowering pass attaches them out of band if at all.
+//
+// Field naming: the grammar's `type` field is rendered `field_type`,
+// `return_type`, or `parameter_type` to avoid any collision with a reserved
+// word.  The +/- method indicator is `scope` (Class | Instance).
+//
+// **
+
+// ===========================================================================
+// Position
+// ===========================================================================
+
+// Position is the 0-based start location of a node, as reported by tree-sitter.
+pub struct Position {
+  pub row: int, // 0-based line
+  pub col: int, // 0-based column
+}
+
+// ===========================================================================
+// Leaf tokens
+// ===========================================================================
+
+pub struct Identifier {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct PrivatePropertyIdentifier {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct NumberLiteral {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct HashBangLine {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct Comment {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct ThisLiteral {
+  pub pos: Position,
+}
+
+pub struct SuperLiteral {
+  pub pos: Position,
+}
+
+pub struct TrueLiteral {
+  pub pos: Position,
+}
+
+pub struct FalseLiteral {
+  pub pos: Position,
+}
+
+pub struct NullLiteral {
+  pub pos: Position,
+}
+
+pub struct UndefinedLiteral {
+  pub pos: Position,
+}
+
+pub struct ImportToken {
+  pub pos: Position,
+} // the bare `import` token rule
+
+// String literals are sequences of raw fragments and escape sequences.
+pub struct StringLiteral {
+  pub parts: Slice<StringPart>,
+  pub pos: Position,
+}
+
+pub enum StringPart {
+  Fragment(StringFragment),
+  Escape(EscapeSequence),
+}
+
+pub struct StringFragment {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct EscapeSequence {
+  pub text: string,
+  pub pos: Position,
+}
+
+// Template strings interleave fragments, escapes, and `${ ... }` substitutions.
+pub struct TemplateString {
+  pub parts: Slice<TemplatePart>,
+  pub pos: Position,
+}
+
+pub enum TemplatePart {
+  Fragment(StringFragment),
+  Escape(EscapeSequence),
+  Substitution(TemplateSubstitution),
+}
+
+pub struct TemplateSubstitution {
+  pub expression: Expressions,
+  pub pos: Position,
+}
+
+pub struct Regex {
+  pub pattern: RegexPattern,
+  pub flags: Option<RegexFlags>,
+  pub pos: Position,
+}
+
+pub struct RegexPattern {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct RegexFlags {
+  pub text: string,
+  pub pos: Position,
+}
+
+// system_lib_string is the <Framework/File.j> token of an angle-bracket import.
+pub struct SystemLibString {
+  pub text: string,
+  pub pos: Position,
+}
+
+// objj_selector_identifier resolves to an `identifier` CST node (the grammar
+// aliases many keywords to identifier in selector position); it is modelled as
+// a text-bearing leaf so selector reconstruction is a pure string operation.
+pub struct ObjjSelectorIdentifier {
+  pub text: string,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Operators
+// ===========================================================================
+
+pub enum BinaryOp {
+  LogicalAnd,
+  LogicalOr,
+  ShiftRight,
+  UnsignedShiftRight,
+  ShiftLeft,
+  BitAnd,
+  BitXor,
+  BitOr,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Mod,
+  Exp,
+  LessThan,
+  LessEqual,
+  Equal,
+  StrictEqual,
+  NotEqual,
+  StrictNotEqual,
+  GreaterEqual,
+  GreaterThan,
+  NullishCoalesce,
+  Instanceof,
+  In,
+}
+
+pub enum UnaryOp {
+  Not,
+  BitNot,
+  Negate,
+  Plus,
+  Typeof,
+  Void,
+  Delete,
+}
+
+pub enum UpdateOp {
+  Increment,
+  Decrement,
+}
+
+// Standard assignment plus the operators permitted on @deref assignment targets.
+pub enum AssignmentOp {
+  Assign,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Mod,
+  BitAnd,
+  BitOr,
+  BitXor,
+  ShiftLeft,
+  ShiftRight,
+  UnsignedShiftRight,
+}
+
+pub enum AugmentedAssignmentOp {
+  Add,
+  Sub,
+  Mul,
+  Div,
+  Mod,
+  BitXor,
+  BitAnd,
+  BitOr,
+  ShiftRight,
+  UnsignedShiftRight,
+  ShiftLeft,
+  Exp,
+  LogicalAnd,
+  LogicalOr,
+  NullishCoalesce,
+}
+
+// ===========================================================================
+// Program
+// ===========================================================================
+
+pub struct Program {
+  pub hash_bang: Option<HashBangLine>,
+  pub body: Slice<Statement>,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Statements
+// ===========================================================================
+
+pub enum Statement {
+  Export(ExportStatement),
+  Import(ImportStatement),
+  Debugger(DebuggerStatement),
+  Expression(ExpressionStatement),
+  Declaration(Declaration),
+  BlockScope(StatementBlock),
+  If(IfStatement),
+  Switch(SwitchStatement),
+  For(ForStatement),
+  ForIn(ForInStatement),
+  While(WhileStatement),
+  Do(DoStatement),
+  Try(TryStatement),
+  With(WithStatement),
+  Break(BreakStatement),
+  Continue(ContinueStatement),
+  Return(ReturnStatement),
+  Throw(ThrowStatement),
+  Empty(EmptyStatement),
+  Labeled(LabeledStatement),
+  // Objective-J additions to the statement supertype
+  ObjjImport(ObjjImport),
+  ObjjGlobal(ObjjGlobalDeclaration),
+  ObjjClassForward(ObjjClassForwardDeclaration),
+  ObjjTypedef(ObjjTypedef),
+  ObjjProtocol(ObjjProtocolDeclaration),
+  ObjjClassImpl(ObjjClassImplementation),
+  PreprocIf(PreprocIfBlock),
+  PreprocDirective(PreprocDirective),
+}
+
+pub struct DebuggerStatement {
+  pub pos: Position,
+}
+
+pub struct EmptyStatement {
+  pub pos: Position,
+}
+
+pub struct ExpressionStatement {
+  pub expression: Ref<Expressions>,
+  pub pos: Position,
+}
+
+pub struct StatementBlock {
+  pub body: Slice<Statement>,
+  pub pos: Position,
+}
+
+pub struct IfStatement {
+  pub condition: ParenthesizedExpression,
+  pub consequence: Ref<Statement>,
+  pub alternative: Option<ElseClause>,
+  pub pos: Position,
+}
+
+pub struct ElseClause {
+  pub body: Ref<Statement>,
+  pub pos: Position,
+}
+
+pub struct SwitchStatement {
+  pub value: ParenthesizedExpression,
+  pub body: SwitchBody,
+  pub pos: Position,
+}
+
+pub struct SwitchBody {
+  pub entries: Slice<SwitchEntry>,
+  pub pos: Position,
+}
+
+pub enum SwitchEntry {
+  Case(SwitchCase),
+  Default(SwitchDefault),
+}
+
+pub struct SwitchCase {
+  pub value: Ref<Expressions>,
+  pub body: Slice<Statement>,
+  pub pos: Position,
+}
+
+pub struct SwitchDefault {
+  pub body: Slice<Statement>,
+  pub pos: Position,
+}
+
+pub struct ForStatement {
+  pub initializer: ForInitializer,
+  pub condition: ForCondition,
+  pub increment: Option<Expressions>,
+  pub body: Ref<Statement>,
+  pub pos: Position,
+}
+
+pub enum ForInitializer {
+  Lexical(LexicalDeclaration),
+  Variable(VariableDeclaration),
+  Expression(Ref<Expressions>),
+  Empty(EmptyStatement),
+}
+
+pub enum ForCondition {
+  Expression(Ref<Expressions>),
+  Empty(EmptyStatement),
+}
+
+pub struct ForInStatement {
+  pub is_await: bool,
+  pub header: ForHeader,
+  pub body: Ref<Statement>,
+  pub pos: Position,
+}
+
+pub struct ForHeader {
+  pub binding: ForBinding,
+  pub operator: ForOperator,
+  pub right: Ref<Expressions>,
+  pub pos: Position,
+}
+
+pub enum ForOperator {
+  In,
+  Of,
+}
+
+pub enum ForBinding {
+  Plain(ForPlainBinding),
+  Declared(ForDeclaredBinding),
+}
+
+pub struct ForPlainBinding {
+  pub left: ForLeft,
+  pub pos: Position,
+}
+
+pub enum ForLeft {
+  Lhs(LhsExpression),
+  Parenthesized(ParenthesizedExpression),
+}
+
+pub struct ForDeclaredBinding {
+  pub kind: VariableKind,
+  pub left: ForDeclaredLeft,
+  pub initializer: Option<Initializer>,
+  pub pos: Position,
+}
+
+pub enum ForDeclaredLeft {
+  Identifier(Identifier),
+  Destructuring(DestructuringPattern),
+}
+
+pub struct WhileStatement {
+  pub condition: ParenthesizedExpression,
+  pub body: Ref<Statement>,
+  pub pos: Position,
+}
+
+pub struct DoStatement {
+  pub body: Ref<Statement>,
+  pub condition: ParenthesizedExpression,
+  pub pos: Position,
+}
+
+pub struct WithStatement {
+  pub object: ParenthesizedExpression,
+  pub body: Ref<Statement>,
+  pub pos: Position,
+}
+
+pub struct TryStatement {
+  pub body: StatementBlock,
+  pub handler: Option<CatchClause>,
+  pub finalizer: Option<FinallyClause>,
+  pub pos: Position,
+}
+
+pub struct CatchClause {
+  pub parameter: Option<CatchParameter>,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub enum CatchParameter {
+  Identifier(Identifier),
+  Destructuring(DestructuringPattern),
+}
+
+pub struct FinallyClause {
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub struct BreakStatement {
+  pub label: Option<Identifier>,
+  pub pos: Position,
+}
+
+pub struct ContinueStatement {
+  pub label: Option<Identifier>,
+  pub pos: Position,
+}
+
+pub struct ReturnStatement {
+  pub value: Option<Expressions>,
+  pub pos: Position,
+}
+
+pub struct ThrowStatement {
+  pub value: Ref<Expressions>,
+  pub pos: Position,
+}
+
+pub struct LabeledStatement {
+  pub label: Identifier,
+  pub body: Ref<Statement>,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Imports / exports
+// ===========================================================================
+
+pub struct ImportStatement {
+  pub clause: Option<ImportClause>, // None for the bare `import "source"` form
+  pub source: StringLiteral,
+  pub attribute: Option<ImportAttribute>,
+  pub pos: Position,
+}
+
+pub enum ImportClause {
+  Namespace(NamespaceImport),
+  Named(NamedImports),
+  Default(DefaultImportClause),
+}
+
+pub struct DefaultImportClause {
+  pub name: Identifier,
+  pub extra: Option<NamedBinding>,
+  pub pos: Position,
+}
+
+pub enum NamedBinding {
+  Namespace(NamespaceImport),
+  Named(NamedImports),
+}
+
+pub struct NamespaceImport {
+  pub alias: Identifier,
+  pub pos: Position,
+}
+
+pub struct NamedImports {
+  pub specifiers: Slice<ImportSpecifier>,
+  pub pos: Position,
+}
+
+pub struct ImportSpecifier {
+  pub name: ModuleExportName,
+  pub alias: Option<Identifier>,
+  pub pos: Position,
+}
+
+pub struct ImportAttribute {
+  pub object: Object,
+  pub pos: Position,
+}
+
+pub enum ExportStatement {
+  All(ExportAll),
+  Namespace(ExportNamespaceClause),
+  Named(ExportNamed),
+  Declaration(Declaration),
+  DefaultDeclaration(Declaration),
+  DefaultValue(Expression),
+}
+
+pub struct ExportAll {
+  pub source: StringLiteral,
+  pub pos: Position,
+}
+
+pub struct ExportNamespaceClause {
+  pub name: ModuleExportName,
+  pub source: StringLiteral,
+  pub pos: Position,
+}
+
+pub struct ExportNamed {
+  pub clause: ExportClause,
+  pub source: Option<StringLiteral>,
+  pub pos: Position,
+}
+
+pub struct ExportClause {
+  pub specifiers: Slice<ExportSpecifier>,
+  pub pos: Position,
+}
+
+pub struct ExportSpecifier {
+  pub name: ModuleExportName,
+  pub alias: Option<ModuleExportName>,
+  pub pos: Position,
+}
+
+pub enum ModuleExportName {
+  Identifier(Identifier),
+  String(StringLiteral),
+  Default(Position),
+}
+
+// ===========================================================================
+// Declarations
+// ===========================================================================
+
+pub enum Declaration {
+  Function(FunctionDeclaration),
+  GeneratorFunction(GeneratorFunctionDeclaration),
+  Class(ClassDeclaration),
+  Lexical(LexicalDeclaration),
+  Variable(VariableDeclaration),
+  Using(UsingDeclaration),
+}
+
+pub struct FunctionDeclaration {
+  pub is_async: bool,
+  pub name: Identifier,
+  pub parameters: FormalParameters,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub struct GeneratorFunctionDeclaration {
+  pub is_async: bool,
+  pub name: Identifier,
+  pub parameters: FormalParameters,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub struct ClassDeclaration {
+  pub name: Identifier,
+  pub heritage: Option<ClassHeritage>,
+  pub body: ClassBody,
+  pub pos: Position,
+}
+
+pub struct ClassHeritage {
+  pub parent: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct LexicalDeclaration {
+  pub kind: LexicalKind,
+  pub declarators: Slice<VariableDeclarator>,
+  pub pos: Position,
+}
+
+pub enum LexicalKind {
+  Let,
+  Const,
+}
+
+pub struct VariableDeclaration {
+  pub declarators: Slice<VariableDeclarator>,
+  pub pos: Position,
+}
+
+pub struct UsingDeclaration {
+  pub is_await: bool,
+  pub declarators: Slice<VariableDeclarator>,
+  pub pos: Position,
+}
+
+pub struct VariableDeclarator {
+  pub name: VariableDeclaratorName,
+  pub initializer: Option<Initializer>,
+  pub pos: Position,
+}
+
+pub enum VariableDeclaratorName {
+  Identifier(Identifier),
+  Destructuring(DestructuringPattern),
+}
+
+pub enum VariableKind {
+  Var,
+  Let,
+  Const,
+  Using,
+  AwaitUsing,
+}
+
+pub struct Initializer {
+  pub value: Ref<Expression>,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Expressions
+// ===========================================================================
+
+// _expressions: a single expression or a comma sequence.
+pub enum Expressions {
+  Single(Expression),
+  Sequence(SequenceExpression),
+}
+
+pub struct SequenceExpression {
+  pub items: Slice<Expression>,
+  pub pos: Position,
+}
+
+pub enum Expression {
+  Primary(PrimaryExpression),
+  Assignment(AssignmentExpression),
+  AugmentedAssignment(AugmentedAssignmentExpression),
+  Await(AwaitExpression),
+  Unary(UnaryExpression),
+  Binary(BinaryExpression),
+  Ternary(TernaryExpression),
+  Update(UpdateExpression),
+  New(NewExpression),
+  Yield(YieldExpression),
+}
+
+pub enum PrimaryExpression {
+  Subscript(SubscriptExpression),
+  Member(MemberExpression),
+  Parenthesized(ParenthesizedExpression),
+  Identifier(Identifier),
+  Undefined(UndefinedLiteral),
+  This(ThisLiteral),
+  Super(SuperLiteral),
+  Number(NumberLiteral),
+  String(StringLiteral),
+  Template(TemplateString),
+  Regex(Regex),
+  True(TrueLiteral),
+  False(FalseLiteral),
+  Null(NullLiteral),
+  Object(Object),
+  Function(FunctionExpression),
+  Arrow(ArrowFunction),
+  Generator(GeneratorFunction),
+  Class(ClassExpression),
+  MetaProperty(MetaProperty),
+  Call(CallExpression),
+  // Objective-J additions to the primary_expression supertype.
+  // _objj_literal (hidden) is inlined as its three alternatives.
+  ObjjDictionary(ObjjDictionaryLiteral),
+  ObjjArray(ObjjArrayLiteral),
+  ObjjString(ObjjStringLiteral),
+  ObjjSelector(ObjjSelectorExpression),
+  ObjjProtocol(ObjjProtocolExpression),
+  // _bracket_expression (hidden) is inlined as message expression or native array.
+  ObjjMessage(ObjjMessageExpression),
+  NativeArray(NativeArray),
+  ObjjRef(ObjjRefExpression),
+  ObjjDeref(ObjjDerefExpression),
+}
+
+pub struct ParenthesizedExpression {
+  pub expression: Ref<Expressions>,
+  pub pos: Position,
+}
+
+pub struct SubscriptExpression {
+  pub object: Ref<Expression>,
+  pub optional_chain: bool,
+  pub index: Ref<Expressions>,
+  pub pos: Position,
+}
+
+pub struct MemberExpression {
+  pub object: MemberObject,
+  pub optional_chain: bool, // true when accessed via ?.
+  pub property: MemberProperty,
+  pub pos: Position,
+}
+
+pub enum MemberObject {
+  Expression(Ref<Expression>),
+  Import(ImportToken),
+}
+
+pub enum MemberProperty {
+  Private(PrivatePropertyIdentifier),
+  Property(Identifier),
+}
+
+pub enum AssignmentExpression {
+  Standard(StandardAssignment),
+  ObjjDeref(ObjjDerefAssignment),
+}
+
+pub struct StandardAssignment {
+  pub left: AssignmentTarget,
+  pub right: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub enum AssignmentTarget {
+  Parenthesized(Ref<ParenthesizedExpression>),
+  Lhs(Ref<LhsExpression>),
+}
+
+pub struct ObjjDerefAssignment {
+  pub left: ObjjDerefExpression,
+  pub operator: AssignmentOp,
+  pub right: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct AugmentedAssignmentExpression {
+  pub left: AugmentedAssignmentTarget,
+  pub operator: AugmentedAssignmentOp,
+  pub right: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub enum AugmentedAssignmentTarget {
+  Member(Ref<MemberExpression>),
+  Subscript(Ref<SubscriptExpression>),
+  Identifier(Identifier),
+  Parenthesized(Ref<ParenthesizedExpression>),
+}
+
+pub struct AwaitExpression {
+  pub argument: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct UnaryExpression {
+  pub operator: UnaryOp,
+  pub argument: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct BinaryExpression {
+  pub left: BinaryLeft,
+  pub operator: BinaryOp,
+  pub right: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub enum BinaryLeft {
+  Expression(Ref<Expression>),
+  PrivateProperty(PrivatePropertyIdentifier),
+}
+
+pub struct TernaryExpression {
+  pub condition: Ref<Expression>,
+  pub consequence: Ref<Expression>,
+  pub alternative: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct UpdateExpression {
+  pub operator: UpdateOp,
+  pub argument: Ref<Expression>,
+  pub is_prefix: bool,
+  pub pos: Position,
+}
+
+pub struct NewExpression {
+  pub constructor: NewConstructor,
+  pub arguments: Option<Arguments>,
+  pub pos: Position,
+}
+
+pub enum NewConstructor {
+  Primary(Ref<PrimaryExpression>),
+  New(Ref<NewExpression>),
+}
+
+pub struct YieldExpression {
+  pub argument: Option<Ref<Expression>>,
+  pub is_delegate: bool, // the `yield*` form
+  pub pos: Position,
+}
+
+// ---------------------------------------------------------------------------
+// Object / array / functions / calls
+// ---------------------------------------------------------------------------
+
+pub struct Object {
+  pub members: Slice<ObjectMember>,
+  pub pos: Position,
+}
+
+pub enum ObjectMember {
+  Pair(Pair),
+  Spread(SpreadElement),
+  Method(MethodDefinition),
+  Shorthand(Identifier),
+}
+
+pub struct Pair {
+  pub key: PropertyName,
+  pub value: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub enum PropertyName {
+  Identifier(Identifier),
+  Private(PrivatePropertyIdentifier),
+  String(StringLiteral),
+  Number(NumberLiteral),
+  Computed(ComputedPropertyName),
+  ObjjString(ObjjStringLiteral), // Objective-J addition to _property_name
+}
+
+pub struct ComputedPropertyName {
+  pub expression: Ref<Expression>,
+  pub pos: Position,
+}
+
+// native_array is the Objective-J array form (base `array` is disabled).
+pub struct NativeArray {
+  pub elements: Slice<ArrayElement>,
+  pub pos: Position,
+}
+
+pub enum ArrayElement {
+  Expression(Ref<Expression>),
+  Spread(SpreadElement),
+}
+
+pub struct SpreadElement {
+  pub argument: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct FunctionExpression {
+  pub is_async: bool,
+  pub name: Option<Identifier>,
+  pub parameters: FormalParameters,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub struct GeneratorFunction {
+  pub is_async: bool,
+  pub name: Option<Identifier>,
+  pub parameters: FormalParameters,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub struct ArrowFunction {
+  pub is_async: bool,
+  pub parameters: ArrowParameters,
+  pub body: ArrowBody,
+  pub pos: Position,
+}
+
+pub enum ArrowParameters {
+  Single(Identifier),
+  List(FormalParameters),
+}
+
+pub enum ArrowBody {
+  Expression(Ref<Expression>),
+  Block(StatementBlock),
+}
+
+pub struct ClassExpression {
+  pub name: Option<Identifier>,
+  pub heritage: Option<ClassHeritage>,
+  pub body: ClassBody,
+  pub pos: Position,
+}
+
+pub struct ClassBody {
+  pub members: Slice<ClassMember>,
+  pub pos: Position,
+}
+
+pub enum ClassMember {
+  Method(MethodDefinition),
+  Field(FieldDefinition),
+  StaticBlock(ClassStaticBlock),
+}
+
+pub struct FieldDefinition {
+  pub is_static: bool,
+  pub property: PropertyName,
+  pub initializer: Option<Initializer>,
+  pub pos: Position,
+}
+
+pub struct MethodDefinition {
+  pub is_static: bool,
+  pub is_async: bool,
+  pub accessor: Option<MethodAccessor>, // get / set / *
+  pub name: PropertyName,
+  pub parameters: FormalParameters,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub enum MethodAccessor {
+  Get,
+  Set,
+  Generator,
+}
+
+pub struct ClassStaticBlock {
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub struct FormalParameters {
+  pub parameters: Slice<FormalParameter>,
+  pub pos: Position,
+}
+
+pub enum FormalParameter {
+  Pattern(Pattern),
+  Assignment(AssignmentPattern),
+}
+
+pub enum CallExpression {
+  Call(PlainCall),
+  TemplateCall(TemplateCall),
+  OptionalCall(OptionalCall),
+}
+
+pub struct PlainCall {
+  pub callee: CallTarget,
+  pub arguments: Arguments,
+  pub pos: Position,
+}
+
+pub enum CallTarget {
+  Expression(Ref<Expression>),
+  Import(ImportToken),
+}
+
+pub struct TemplateCall {
+  pub callee: TemplateCallTarget,
+  pub arguments: TemplateString,
+  pub pos: Position,
+}
+
+pub enum TemplateCallTarget {
+  Primary(Ref<PrimaryExpression>),
+  New(Ref<NewExpression>),
+}
+
+pub struct OptionalCall {
+  pub callee: Ref<PrimaryExpression>,
+  pub arguments: Arguments,
+  pub pos: Position,
+}
+
+pub struct Arguments {
+  pub items: Slice<Argument>,
+  pub pos: Position,
+}
+
+pub enum Argument {
+  Expression(Ref<Expression>),
+  Spread(SpreadElement),
+}
+
+pub enum MetaProperty {
+  NewTarget(Position),
+  ImportMeta(Position),
+}
+
+// ===========================================================================
+// Patterns
+// ===========================================================================
+
+pub enum Pattern {
+  Lhs(LhsExpression),
+  Rest(RestPattern),
+}
+
+pub struct RestPattern {
+  pub argument: Ref<LhsExpression>,
+  pub pos: Position,
+}
+
+pub enum LhsExpression {
+  Member(Ref<MemberExpression>),
+  Subscript(Ref<SubscriptExpression>),
+  Identifier(Identifier),
+  Undefined(UndefinedLiteral),
+  Destructuring(Ref<DestructuringPattern>),
+}
+
+pub enum DestructuringPattern {
+  Object(ObjectPattern),
+  Array(ArrayPattern),
+}
+
+pub struct ObjectPattern {
+  pub members: Slice<ObjectPatternMember>,
+  pub pos: Position,
+}
+
+pub enum ObjectPatternMember {
+  Pair(PairPattern),
+  Rest(RestPattern),
+  Assignment(ObjectAssignmentPattern),
+  Shorthand(Identifier),
+}
+
+pub struct PairPattern {
+  pub key: PropertyName,
+  pub value: PairPatternValue,
+  pub pos: Position,
+}
+
+pub enum PairPatternValue {
+  Pattern(Ref<Pattern>),
+  Assignment(Ref<AssignmentPattern>),
+}
+
+pub struct ObjectAssignmentPattern {
+  pub left: ObjectAssignmentLeft,
+  pub right: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub enum ObjectAssignmentLeft {
+  Shorthand(Identifier),
+  Destructuring(Ref<DestructuringPattern>),
+}
+
+pub struct ArrayPattern {
+  pub elements: Slice<ArrayPatternElement>,
+  pub pos: Position,
+}
+
+pub enum ArrayPatternElement {
+  Pattern(Ref<Pattern>),
+  Assignment(Ref<AssignmentPattern>),
+}
+
+pub struct AssignmentPattern {
+  pub left: Ref<Pattern>,
+  pub right: Ref<Expression>,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Objective-J — class implementation
+// ===========================================================================
+
+pub struct ObjjClassImplementation {
+  pub name: Identifier,
+  pub superclass: Option<Identifier>,
+  pub category: Option<Identifier>,
+  pub protocols: Option<ObjjProtocolReferenceList>,
+  pub ivars: Option<ObjjInstanceVariables>,
+  pub members: Slice<ObjjImplementationMember>,
+  pub pos: Position,
+}
+
+pub struct ObjjProtocolReferenceList {
+  pub protocols: Slice<Identifier>,
+  pub pos: Position,
+}
+
+pub struct ObjjInstanceVariables {
+  pub members: Slice<ObjjIvarMember>,
+  pub pos: Position,
+}
+
+pub enum ObjjIvarMember {
+  Variable(ObjjInstanceVariable),
+  PreprocIf(PreprocIvarIfBlock),
+}
+
+pub enum ObjjInstanceVariable {
+  Visibility(ObjjVisibilitySpecifier),
+  Field(ObjjFieldDefinition),
+}
+
+pub enum ObjjVisibilitySpecifier {
+  Private(Position),
+  Protected(Position),
+  Package(Position),
+  Public(Position),
+}
+
+pub struct ObjjFieldDefinition {
+  pub modifiers: Slice<ObjjIvarModifier>, // empty when no modifiers
+  pub field_type: ObjjType,
+  pub name: Identifier,
+  pub accessors: Option<ObjjAccessorsDirective>,
+  pub pos: Position,
+}
+
+pub enum ObjjIvarModifier {
+  Outlet(Position),
+  IBOutlet(Position),
+  Weak(Position),
+  Strong(Position),
+}
+
+pub struct ObjjAccessorsDirective {
+  pub attributes: Slice<ObjjAccessorAttribute>,
+  pub pos: Position,
+}
+
+pub enum ObjjAccessorAttribute {
+  KeyValue(ObjjAccessorKeyValue), // property = name
+  Flag(Identifier), // bare attribute, e.g. readonly
+}
+
+pub struct ObjjAccessorKeyValue {
+  pub key: Identifier,
+  pub value: ObjjAccessorName,
+  pub pos: Position,
+}
+
+pub enum ObjjAccessorName {
+  Simple(Identifier), // name
+  Setter(ObjjAccessorSetter), // name:
+  Keyword(ObjjAccessorKeyword), // name:part:...:
+}
+
+pub struct ObjjAccessorSetter {
+  pub name: Identifier,
+  pub pos: Position,
+}
+
+pub struct ObjjAccessorKeyword {
+  pub head: Identifier,
+  pub parts: Slice<Identifier>,
+  pub pos: Position,
+}
+
+pub enum ObjjImplementationMember {
+  Method(ObjjMethodDefinition),
+  PreprocDirective(PreprocDirective),
+  Global(ObjjGlobalDeclaration),
+  Variable(VariableDeclaration),
+  Function(FunctionDeclaration),
+  GeneratorFunction(GeneratorFunctionDeclaration),
+  Empty(EmptyStatement),
+}
+
+// ===========================================================================
+// Objective-J — types
+// ===========================================================================
+
+pub enum ObjjType {
+  Protocol(ObjjProtocolType), // Identifier<ProtocolList>
+  MultiWord(ObjjMultiWordType), // unsigned long long, etc.
+  Id(ObjjIdType), // id, id<Protocol>
+  Named(Identifier), // plain type name
+}
+
+pub struct ObjjProtocolType {
+  pub name: Identifier,
+  pub protocols: ObjjProtocolReferenceList,
+  pub pos: Position,
+}
+
+pub struct ObjjIdType {
+  pub protocols: Option<ObjjProtocolReferenceList>,
+  pub pos: Position,
+}
+
+pub enum ObjjMultiWordType {
+  UnsignedChar(Position),
+  UnsignedShort(Position),
+  UnsignedInt(Position),
+  UnsignedLong(Position),
+  SignedChar(Position),
+  SignedShort(Position),
+  SignedInt(Position),
+  SignedLong(Position),
+  LongLong(Position),
+  LongDouble(Position),
+  UnsignedLongLong(Position),
+  Unsigned(Position),
+  Signed(Position),
+  Long(Position),
+  Short(Position),
+  Char(Position),
+  Int(Position),
+}
+
+// ===========================================================================
+// Objective-J — protocols
+// ===========================================================================
+
+pub struct ObjjProtocolDeclaration {
+  pub name: Identifier,
+  pub protocols: Option<ObjjProtocolReferenceList>,
+  pub members: Slice<ObjjProtocolMember>,
+  pub pos: Position,
+}
+
+pub enum ObjjProtocolMember {
+  Optional(Position),
+  Required(Position),
+  Method(ObjjMethodDeclaration),
+}
+
+pub struct ObjjProtocolExpression {
+  pub protocol: Identifier,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Objective-J — methods
+// ===========================================================================
+
+pub enum ObjjMethodScope {
+  Class,
+  Instance,
+} // + and - respectively
+
+pub struct ObjjMethodDeclaration {
+  pub scope: ObjjMethodScope,
+  pub return_type: ObjjMethodType,
+  pub selector: ObjjMethodSelector,
+  pub pos: Position,
+}
+
+pub struct ObjjMethodDefinition {
+  pub scope: ObjjMethodScope,
+  pub return_type: ObjjMethodType,
+  pub selector: ObjjMethodSelector,
+  pub body: StatementBlock,
+  pub pos: Position,
+}
+
+pub enum ObjjMethodSelector {
+  Unary(ObjjSelectorIdentifier),
+  Keyword(Slice<ObjjMethodParameterPart>), // non-empty (repeat1)
+}
+
+pub struct ObjjMethodType {
+  pub is_async: bool,
+  pub return_kind: ObjjMethodTypeKind,
+  pub pos: Position,
+}
+
+pub enum ObjjMethodTypeKind {
+  Action(Position),
+  Void(Position),
+  Type(ObjjType),
+}
+
+pub struct ObjjMethodParameterPart {
+  pub name_part: Option<ObjjSelectorIdentifier>,
+  pub parameter_type: Option<ObjjMethodType>,
+  pub parameter_name: Identifier,
+  pub is_variadic: bool, // trailing , ...
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Objective-J — message and selector expressions
+// ===========================================================================
+
+pub struct ObjjMessageExpression {
+  pub receiver: Ref<Expression>,
+  pub selector: ObjjMessageSelector,
+  pub pos: Position,
+}
+
+pub enum ObjjMessageSelector {
+  Unary(ObjjSelectorIdentifier),
+  Keyword(Slice<ObjjMessageKeywordArgument>), // non-empty (repeat1)
+}
+
+pub struct ObjjMessageKeywordArgument {
+  pub keyword: Option<ObjjSelectorIdentifier>,
+  pub arguments: Slice<Expression>, // non-empty (commaSep1)
+  pub pos: Position,
+}
+
+pub struct ObjjSelectorExpression {
+  pub name: ObjjSelectorName,
+  pub pos: Position,
+}
+
+pub enum ObjjSelectorName {
+  Unary(ObjjSelectorIdentifier),
+  Keyword(Slice<ObjjSelectorNamePart>), // non-empty (repeat1); each is identifier:
+}
+
+pub struct ObjjSelectorNamePart {
+  pub name: ObjjSelectorIdentifier,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Objective-J — literals
+// ===========================================================================
+
+pub struct ObjjStringLiteral {
+  pub value: StringLiteral,
+  pub pos: Position,
+}
+
+pub struct ObjjArrayLiteral {
+  pub array: NativeArray,
+  pub pos: Position,
+}
+
+pub struct ObjjDictionaryLiteral {
+  pub pairs: Slice<ObjjDictionaryPair>,
+  pub pos: Position,
+}
+
+pub struct ObjjDictionaryPair {
+  pub key: Ref<Expression>, // grammar restricts to a subset; all are Expression nodes
+  pub value: Ref<Expression>, // grammar restricts to a subset; all are Expression nodes
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Objective-J — ref / deref
+// ===========================================================================
+
+pub struct ObjjRefExpression {
+  pub argument: Ref<Expression>,
+  pub pos: Position,
+}
+
+pub struct ObjjDerefExpression {
+  pub argument: Ref<Expression>,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Objective-J — directives
+// ===========================================================================
+
+pub struct ObjjImport {
+  pub path: ObjjImportPath,
+  pub pos: Position,
+}
+
+pub enum ObjjImportPath {
+  System(SystemLibString), // @import <Framework/File.j>
+  Local(StringLiteral), // @import "File.j"
+}
+
+pub struct ObjjGlobalDeclaration {
+  pub name: Identifier,
+  pub pos: Position,
+}
+
+pub struct ObjjClassForwardDeclaration {
+  pub name: Identifier,
+  pub pos: Position,
+}
+
+pub struct ObjjTypedef {
+  pub name: Identifier,
+  pub pos: Position,
+}
+
+// ===========================================================================
+// Preprocessor
+// ===========================================================================
+
+pub struct PreprocIfBlock {
+  pub if_line: PreprocIfLine,
+  pub body: Slice<PreprocBlockItem>,
+  pub else_branch: Option<PreprocElseBranch>,
+  pub endif: PreprocEndifLine,
+  pub pos: Position,
+}
+
+pub struct PreprocElseBranch {
+  pub else_line: PreprocElseLine,
+  pub body: Slice<PreprocBlockItem>,
+  pub pos: Position,
+}
+
+pub enum PreprocBlockItem {
+  Nested(PreprocIfBlock),
+  Directive(PreprocDirective),
+  Statement(Statement),
+}
+
+pub struct PreprocIvarIfBlock {
+  pub if_line: PreprocIfLine,
+  pub body: Slice<PreprocIvarItem>,
+  pub else_branch: Option<PreprocIvarElseBranch>,
+  pub endif: PreprocEndifLine,
+  pub pos: Position,
+}
+
+pub struct PreprocIvarElseBranch {
+  pub else_line: PreprocElseLine,
+  pub body: Slice<PreprocIvarItem>,
+  pub pos: Position,
+}
+
+pub enum PreprocIvarItem {
+  Variable(ObjjInstanceVariable),
+  Nested(PreprocIvarIfBlock),
+  Directive(PreprocDirective),
+}
+
+pub struct PreprocIfLine {
+  pub condition: PreprocCondition,
+  pub pos: Position,
+}
+
+pub struct PreprocElseLine {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct PreprocEndifLine {
+  pub text: string,
+  pub pos: Position,
+}
+
+pub struct PreprocCondition {
+  pub disjunction: PreprocDisjunction,
+  pub pos: Position,
+}
+
+pub struct PreprocDisjunction {
+  pub conjunctions: Slice<PreprocConjunction>,
+  pub pos: Position,
+}
+
+pub struct PreprocConjunction {
+  pub negations: Slice<PreprocNegation>,
+  pub pos: Position,
+}
+
+pub enum PreprocNegation {
+  Not(PreprocNegationInner),
+  Primary(PreprocPrimary),
+}
+
+pub struct PreprocNegationInner {
+  pub operand: Ref<PreprocNegation>,
+  pub pos: Position,
+}
+
+pub enum PreprocPrimary {
+  Comparison(PreprocComparison),
+  Call(PreprocCall),
+  Identifier(Identifier),
+  Grouped(PreprocGrouped),
+}
+
+pub struct PreprocComparison {
+  pub left: Identifier,
+  pub operator: PreprocCompareOp,
+  pub right: PreprocOperand,
+  pub pos: Position,
+}
+
+pub enum PreprocCompareOp {
+  Equal,
+  NotEqual,
+  LessThan,
+  GreaterThan,
+  LessEqual,
+  GreaterEqual,
+}
+
+pub enum PreprocOperand {
+  Identifier(Identifier),
+  Number(NumberLiteral),
+}
+
+pub struct PreprocCall {
+  pub callee: Identifier,
+  pub arguments: Slice<Identifier>,
+  pub pos: Position,
+}
+
+pub struct PreprocGrouped {
+  pub condition: Ref<PreprocCondition>,
+  pub pos: Position,
+}
+
+pub struct PreprocDirective {
+  pub text: string,
+  pub pos: Position,
+}

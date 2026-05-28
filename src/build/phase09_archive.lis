@@ -27,7 +27,7 @@ import "go:fmt"
 
 pub struct ArchiveResult {
   pub output: string,
-  pub diags:  Slice<Diagnostic>,
+  pub diags: Slice<Diagnostic>,
 }
 
 pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
@@ -37,36 +37,51 @@ pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
 
   // TODO: determine project type from ctx and branch to the appropriate
   //       archive strategy (Framework or Application)
-  diags = diags.append(diag_info(phase, "TODO: determine project type and select archive strategy"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: determine project type and select archive strategy",
+  ))
 
   // Framework path:
   // TODO: create the environment output directory
   //       (e.g. build/Foundation/ObjJ.environment/)
-  diags = diags.append(diag_info(phase, "TODO: create environment output directory for framework"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: create environment output directory for framework",
+  ))
 
   // TODO: write @STATIC;1.0; bundle header
   diags = diags.append(diag_info(phase, "TODO: write bundle header"))
 
   // TODO: for each CompiledRecord in ctx.compiled.records, write a
   //       p/<name_len>/<name> record followed by a t/<record_len>/<record>
-  diags = diags.append(diag_info(phase, "TODO: write p/t record pairs for each compiled file"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: write p/t record pairs for each compiled file",
+  ))
 
   // TODO: write e; bundle terminator
   diags = diags.append(diag_info(phase, "TODO: write bundle terminator"))
 
   // Application path:
   // TODO: write framework .sj bundles to output in dependency order
-  diags = diags.append(diag_info(phase, "TODO: write framework bundles in load order"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: write framework bundles in load order",
+  ))
 
   // TODO: copy application resources and write index.html
-  diags = diags.append(diag_info(phase, "TODO: copy resources and write index.html"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: copy resources and write index.html",
+  ))
 
   // TODO: write build manifest recording input hashes for incremental
   //       rebuild support by make
-  diags = diags.append(diag_info(phase, "TODO: write build manifest for make incremental rebuilds"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: write build manifest for make incremental rebuilds",
+  ))
 
-  Ok(ArchiveResult {
-    output: ctx.root.path,
-    diags:  diags,
-  })
+  Ok(ArchiveResult { output: ctx.root.path, diags })
 }

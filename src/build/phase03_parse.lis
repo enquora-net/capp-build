@@ -16,8 +16,8 @@
 // **
 import "go:errors"
 import "go:fmt"
-import "go:strings"
 import "go:github.com/enquora-net/capp-parse"
+import "go:strings"
 
 // RawImport represents an @import directive before path resolution.
 // Framework carries the angle-bracket form: framework name and relative path.
@@ -25,12 +25,12 @@ import "go:github.com/enquora-net/capp-parse"
 // line and col are 0-based source positions of the @import node; normalised
 // to 1-based by diag_error_at and ImportEdge at their respective use sites.
 pub enum RawImport {
-  Framework(string, string, int, int),  // framework, path, line, col
-  Local(string, int, int),              // path, line, col
+  Framework(string, string, int, int), // framework, path, line, col
+  Local(string, int, int), // path, line, col
 }
 
 pub struct ParsedUnit {
-  pub source:  SourceFile,
+  pub source: SourceFile,
   pub imports: Slice<RawImport>,
 }
 
@@ -43,9 +43,7 @@ pub struct ParsedUnits {
 // directives as typed RawImport values.  The node and its descendants are
 // consumed transiently; only the semantic values are retained.
 pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
-  if node.IsNull() {
-    return []
-  }
+  if node.IsNull() { return [] }
 
   if node.Kind() == capp.NodeKindObjjImport {
     // Capture the position of the @import directive itself for diagnostics
@@ -63,7 +61,7 @@ pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
           match strings.Index(inner, "/") {
             Some(slash) => {
               let framework = inner.substring(0..slash)
-              let path      = inner.substring(slash + 1..inner.length())
+              let path = inner.substring(slash + 1..inner.length())
               return [RawImport.Framework(framework, path, row, col)]
             },
             None => return [],
@@ -98,7 +96,7 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
 
   let tree = match ctx.tree {
     Some(t) => t,
-    None    => return Err(errors.New("parse sources: source tree unavailable")),
+    None => return Err(errors.New("parse sources: source tree unavailable")),
   }
 
   let mut paths: Slice<string> = []
@@ -106,21 +104,19 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
     match file.kind {
       SourceKind.ObjectiveJ => paths = paths.append(file.path),
       SourceKind.Javascript => paths = paths.append(file.path),
-      _                     => (),
+      _ => (),
     }
   }
 
-  if paths.length() == 0 {
-    return Ok(ParsedUnits { units: [], diags: diags })
-  }
+  if paths.length() == 0 { return Ok(ParsedUnits { units: [], diags }) }
 
-  let cfg = capp.ProjectConfig {
-    Root:        "",
-    Paths:       paths,
-    Mode:        capp.ModeAuto,
+  let cfg = capp.ProjectConfig { 
+    Root: "",
+    Paths: paths,
+    Mode: capp.ModeAuto,
     GrammarPath: ctx.config.grammar,
-    Workers:     0,
-    ..
+    Workers: 0,
+    ..,
   }
 
   let pr = capp.ParseProject(cfg)?
@@ -138,14 +134,14 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
               phase,
               e.Message,
               file.Path,
-              e.Row    as int,
+              e.Row as int,
               e.Column as int,
             ))
           }
         } else {
           let imports = extract_imports(file.Root())
-          let source  = SourceFile { path: file.Path, kind: classify(file.Path) }
-          units = units.append(ParsedUnit { source: source, imports: imports })
+          let source = SourceFile { path: file.Path, kind: classify(file.Path) }
+          units = units.append(ParsedUnit { source, imports })
         }
       },
     }
@@ -153,5 +149,5 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
 
   fmt.Println(f"✓  parse sources: {units.length()} units")
 
-  Ok(ParsedUnits { units: units, diags: diags })
+  Ok(ParsedUnits { units, diags })
 }

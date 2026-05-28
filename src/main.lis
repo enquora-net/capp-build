@@ -19,6 +19,7 @@
 // **
 import "go:fmt"
 import "go:github.com/spf13/cobra"
+
 import "build"
 import "smoke"
 import "verify"
@@ -36,7 +37,7 @@ fn no_args(cmd: Ref<cobra.Command>, args: Slice<string>) -> Result<(), error> {
 fn noop_run(_cmd: Ref<cobra.Command>, _args: Slice<string>) {}
 
 fn completion_options() -> cobra.CompletionOptions {
-  cobra.CompletionOptions {
+  cobra.CompletionOptions { 
     DisableDefaultCmd: false,
     DisableNoDescFlag: false,
     DisableDescriptions: false,
@@ -52,26 +53,26 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
 
 // make_command creates a leaf command that accepts no positional arguments.
 fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
-  cobra.Command {
-    Use:   use,
+  cobra.Command { 
+    Use: use,
     Short: short,
-    Args:  Some(no_args as cobra.PositionalArgs),
+    Args: Some(no_args as cobra.PositionalArgs),
     Annotations: Map.new<string, string>(),
-    PersistentPreRun:    Some(noop_run as RunFn),
-    PersistentPreRunE:   None,
-    PreRun:              Some(noop_run as RunFn),
-    PreRunE:             None,
-    Run:                 Some(run),
-    RunE:                None,
-    PostRun:             Some(noop_run as RunFn),
-    PostRunE:            None,
-    PersistentPostRun:   Some(noop_run as RunFn),
-    PersistentPostRunE:  None,
-    ValidArgsFunction:   None,
-    FParseErrWhitelist:  fparse_err_whitelist(),
-    CompletionOptions:   completion_options(),
-    SilenceErrors:       true,
-    SilenceUsage:        true,
+    PersistentPreRun: Some(noop_run as RunFn),
+    PersistentPreRunE: None,
+    PreRun: Some(noop_run as RunFn),
+    PreRunE: None,
+    Run: Some(run),
+    RunE: None,
+    PostRun: Some(noop_run as RunFn),
+    PostRunE: None,
+    PersistentPostRun: Some(noop_run as RunFn),
+    PersistentPostRunE: None,
+    ValidArgsFunction: None,
+    FParseErrWhitelist: fparse_err_whitelist(),
+    CompletionOptions: completion_options(),
+    SilenceErrors: true,
+    SilenceUsage: true,
     SuggestionsMinimumDistance: 2,
     ..,
   }
@@ -79,25 +80,25 @@ fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
 
 // make_command_with_args creates a leaf command that accepts optional positional arguments.
 fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Command {
-  cobra.Command {
-    Use:   use,
+  cobra.Command { 
+    Use: use,
     Short: short,
     Annotations: Map.new<string, string>(),
-    PersistentPreRun:    Some(noop_run as RunFn),
-    PersistentPreRunE:   None,
-    PreRun:              Some(noop_run as RunFn),
-    PreRunE:             None,
-    Run:                 Some(run),
-    RunE:                None,
-    PostRun:             Some(noop_run as RunFn),
-    PostRunE:            None,
-    PersistentPostRun:   Some(noop_run as RunFn),
-    PersistentPostRunE:  None,
-    ValidArgsFunction:   None,
-    FParseErrWhitelist:  fparse_err_whitelist(),
-    CompletionOptions:   completion_options(),
-    SilenceErrors:       true,
-    SilenceUsage:        true,
+    PersistentPreRun: Some(noop_run as RunFn),
+    PersistentPreRunE: None,
+    PreRun: Some(noop_run as RunFn),
+    PreRunE: None,
+    Run: Some(run),
+    RunE: None,
+    PostRun: Some(noop_run as RunFn),
+    PostRunE: None,
+    PersistentPostRun: Some(noop_run as RunFn),
+    PersistentPostRunE: None,
+    ValidArgsFunction: None,
+    FParseErrWhitelist: fparse_err_whitelist(),
+    CompletionOptions: completion_options(),
+    SilenceErrors: true,
+    SilenceUsage: true,
     SuggestionsMinimumDistance: 2,
     ..,
   }
@@ -105,26 +106,26 @@ fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Comma
 
 // make_group creates a command group that receives subcommands.
 fn make_group(use: string, short: string) -> cobra.Command {
-  cobra.Command {
-    Use:   use,
+  cobra.Command { 
+    Use: use,
     Short: short,
-    Args:  Some(no_args as cobra.PositionalArgs),
+    Args: Some(no_args as cobra.PositionalArgs),
     Annotations: Map.new<string, string>(),
-    PersistentPreRun:    Some(noop_run as RunFn),
-    PersistentPreRunE:   None,
-    PreRun:              None,
-    PreRunE:             None,
-    Run:                 None,
-    RunE:                None,
-    PostRun:             None,
-    PostRunE:            None,
-    PersistentPostRun:   Some(noop_run as RunFn),
-    PersistentPostRunE:  None,
-    ValidArgsFunction:   None,
-    FParseErrWhitelist:  fparse_err_whitelist(),
-    CompletionOptions:   completion_options(),
-    SilenceErrors:       true,
-    SilenceUsage:        true,
+    PersistentPreRun: Some(noop_run as RunFn),
+    PersistentPreRunE: None,
+    PreRun: None,
+    PreRunE: None,
+    Run: None,
+    RunE: None,
+    PostRun: None,
+    PostRunE: None,
+    PersistentPostRun: Some(noop_run as RunFn),
+    PersistentPostRunE: None,
+    ValidArgsFunction: None,
+    FParseErrWhitelist: fparse_err_whitelist(),
+    CompletionOptions: completion_options(),
+    SilenceErrors: true,
+    SilenceUsage: true,
     SuggestionsMinimumDistance: 2,
     ..,
   }
@@ -138,22 +139,24 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   let source_root = if args.length() > 0 { args[0] } else { "." }
 
   let mode_str = match cmd.Flags().GetString("mode") {
-    Ok(v)  => v,
+    Ok(v) => v,
     Err(_) => "debug",
   }
 
   let mode = match mode_str {
     "release" => build.BuildMode.Release,
-    "clean"   => build.BuildMode.Clean,
-    "debug"   => build.BuildMode.Debug,
-    _         => {
-      cmd.Println(f"unknown mode '{mode_str}': must be debug, release, or clean")
+    "clean" => build.BuildMode.Clean,
+    "debug" => build.BuildMode.Debug,
+    _ => {
+      cmd.Println(
+        f"unknown mode '{mode_str}': must be debug, release, or clean",
+      )
       return
     },
   }
 
   let http2_flag = match cmd.Flags().GetBool("http2") {
-    Ok(v)  => v,
+    Ok(v) => v,
     Err(_) => false,
   }
 
@@ -163,16 +166,11 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
     build.DeliveryContext.HTTP1
   }
 
-  let cfg = build.BuildConfig {
-    mode:        mode,
-    delivery:    delivery,
-    source_root: source_root,
-    grammar:     "",
-  }
+  let cfg = build.BuildConfig { mode, delivery, source_root, grammar: "" }
 
   match build.build(cfg) {
     Ok(result) => cmd.Println(result.message),
-    Err(e)     => cmd.Println(f"build error: {e}"),
+    Err(e) => cmd.Println(f"build error: {e}"),
   }
 }
 
@@ -182,8 +180,12 @@ fn new_build_cmd() -> cobra.Command {
     "Compile Objective-J source",
     run_build,
   )
-  let _ = cmd.Flags().String("mode", "debug", "build mode: debug, release, clean")
-  let _ = cmd.Flags().Bool("http2", false, "target HTTP/2 delivery (default: HTTP/1.x)")
+  let _ = cmd
+    .Flags()
+    .String("mode", "debug", "build mode: debug, release, clean")
+  let _ = cmd
+    .Flags()
+    .Bool("http2", false, "target HTTP/2 delivery (default: HTTP/1.x)")
   cmd
 }
 
@@ -203,7 +205,11 @@ fn new_verify_cmd() -> cobra.Command {
     "verify",
     "Verify Cappuccino project structure",
   )
-  let root_cmd = make_command_with_args("root [path]", "Locate the project root", run_verify_root)
+  let root_cmd = make_command_with_args(
+    "root [path]",
+    "Locate the project root",
+    run_verify_root,
+  )
   verify_cmd.AddCommand(&root_cmd)
   verify_cmd
 }
@@ -220,35 +226,44 @@ fn run_smoke_cobra(cmd: Ref<cobra.Command>, _args: Slice<string>) {
 
 fn run_smoke_capp(cmd: Ref<cobra.Command>, _args: Slice<string>) {
   let grammar = match cmd.Flags().GetString("grammar") {
-    Ok(v)  => v,
+    Ok(v) => v,
     Err(_) => "",
   }
-  let result  = smoke.smoke_capp(grammar)
+  let result = smoke.smoke_capp(grammar)
   let icon = if result.ok { "✓" } else { "✗" }
   cmd.Println(f"{icon}  {result.name}: {result.note}")
 }
 
 fn run_smoke_all(cmd: Ref<cobra.Command>, _args: Slice<string>) {
   let grammar = match cmd.Flags().GetString("grammar") {
-    Ok(v)  => v,
+    Ok(v) => v,
     Err(_) => "",
   }
   smoke.smoke_all(grammar)
 }
 
 fn new_smoke_cmd() -> cobra.Command {
-  let mut smoke_cmd = make_group(
-    "smoke",
-    "Run interop smoke tests",
+  let mut smoke_cmd = make_group("smoke", "Run interop smoke tests")
+
+  let cobra_cmd = make_command(
+    "cobra",
+    "Smoke-test cobra interop",
+    run_smoke_cobra,
   )
 
-  let cobra_cmd = make_command("cobra", "Smoke-test cobra interop", run_smoke_cobra)
-
-  let mut capp_cmd = make_command("capp", "Smoke-test capp-parse interop", run_smoke_capp)
-  let _ = capp_cmd.Flags().String("grammar", "", "explicit path to grammar dylib")
+  let mut capp_cmd = make_command(
+    "capp",
+    "Smoke-test capp-parse interop",
+    run_smoke_capp,
+  )
+  let _ = capp_cmd
+    .Flags()
+    .String("grammar", "", "explicit path to grammar dylib")
 
   let mut all_cmd = make_command("all", "Run all smoke tests", run_smoke_all)
-  let _ = all_cmd.Flags().String("grammar", "", "explicit path to grammar dylib")
+  let _ = all_cmd
+    .Flags()
+    .String("grammar", "", "explicit path to grammar dylib")
 
   smoke_cmd.AddCommand(&cobra_cmd)
   smoke_cmd.AddCommand(&capp_cmd)
@@ -261,21 +276,18 @@ fn new_smoke_cmd() -> cobra.Command {
 // ---------------------------------------------------------------------------
 
 fn main() {
-  let mut root = make_group(
-    "capp-build",
-    "Cappuccino source compiler",
-  )
+  let mut root = make_group("capp-build", "Cappuccino source compiler")
 
-  let build_cmd  = new_build_cmd()
+  let build_cmd = new_build_cmd()
   let verify_cmd = new_verify_cmd()
-  let smoke_cmd  = new_smoke_cmd()
+  let smoke_cmd = new_smoke_cmd()
 
   root.AddCommand(&build_cmd)
   root.AddCommand(&verify_cmd)
   root.AddCommand(&smoke_cmd)
 
   match root.Execute() {
-    Ok(_)  => (),
+    Ok(_) => (),
     Err(e) => fmt.Println(f"error: {e}"),
   }
 }

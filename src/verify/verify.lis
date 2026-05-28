@@ -17,8 +17,8 @@ import "build"
 
 // VerifyResult is the outcome of a single structural verification.
 pub struct VerifyResult {
-  pub ok:     bool,
-  pub label:  string,
+  pub ok: bool,
+  pub label: string,
   pub detail: string,
 }
 
@@ -27,15 +27,11 @@ pub struct VerifyResult {
 // start may be relative or absolute; "." means the invocation directory.
 pub fn verify_root(start: string) -> VerifyResult {
   match build.find_project_root(start) {
-    Ok(root) => VerifyResult {
-      ok:     true,
-      label:  "project root",
+    Ok(root) => VerifyResult { 
+      ok: true,
+      label: "project root",
       detail: root.path,
     },
-    Err(e) => VerifyResult {
-      ok:     false,
-      label:  "project root",
-      detail: f"{e}",
-    },
+    Err(e) => VerifyResult { ok: false, label: "project root", detail: f"{e}" },
   }
 }

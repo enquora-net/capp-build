@@ -24,15 +24,15 @@ import "go:fmt"
 // and that it is run in the correct order by the execution machinery.
 // Described in ARCHITECTURE.md.
 pub enum BuildPhase {
-  ValidateProjectStructure,  // phase 1
-  WalkSourceTree,            // phase 2
-  ParseSources,              // phase 3
-  ResolveImports,            // phase 4
-  TopologicalSort,           // phase 5
-  BuildSymbolTable,          // phase 6
-  TypeCheck,                 // phase 7
-  Compile,                   // phase 8
-  Archive,                   // phase 9
+  ValidateProjectStructure, // phase 1
+  WalkSourceTree, // phase 2
+  ParseSources, // phase 3
+  ResolveImports, // phase 4
+  TopologicalSort, // phase 5
+  BuildSymbolTable, // phase 6
+  TypeCheck, // phase 7
+  Compile, // phase 8
+  Archive, // phase 9
 }
 
 // Adding a variant to BuildPhase without a corresponding arm in run() is a
@@ -120,16 +120,16 @@ pub enum DeliveryContext {
 }
 
 pub struct BuildConfig {
-  pub mode:     BuildMode,
+  pub mode: BuildMode,
   pub delivery: DeliveryContext,
   pub source_root: string,
-  pub grammar:     string,
+  pub grammar: string,
 }
 
 pub struct BuildResult {
-  pub ok:      bool,
+  pub ok: bool,
   pub message: string,
-  pub diags:   Slice<Diagnostic>,
+  pub diags: Slice<Diagnostic>,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,11 +142,7 @@ pub struct BuildResult {
 pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   let root = find_project_root(cfg.source_root)?
 
-  let mut ctx = BuildContext {
-    config: cfg,
-    root:   root,
-    ..
-  }
+  let mut ctx = BuildContext { config: cfg, root, .. }
 
   for phase in BuildPhase.all() {
     phase.run(&ctx)?
@@ -154,30 +150,28 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
 
   let file_count = match ctx.tree {
     Some(t) => t.files.length(),
-    None    => 0,
+    None => 0,
   }
   let unit_count = match ctx.parsed {
     Some(p) => p.units.length(),
-    None    => 0,
+    None => 0,
   }
   let edge_count = match ctx.imports {
     Some(i) => i.edges.length(),
-    None    => 0,
+    None => 0,
   }
   let dep_count = match ctx.imports {
     Some(i) => i.framework_deps.length(),
-    None    => 0,
+    None => 0,
   }
   let sorted_count = match ctx.sorted {
     Some(s) => s.order.length(),
-    None    => 0,
+    None => 0,
   }
 
-  fmt.Println(f"  {file_count} source files  {unit_count} parsed  {edge_count} import edges  {dep_count} framework deps  {sorted_count} sorted")
+  fmt.Println(
+    f"  {file_count} source files  {unit_count} parsed  {edge_count} import edges  {dep_count} framework deps  {sorted_count} sorted",
+  )
 
-  Ok(BuildResult {
-    ok:      true,
-    message: f"build complete: {ctx.root.path}",
-    ..
-  })
+  Ok(BuildResult { ok: true, message: f"build complete: {ctx.root.path}", .. })
 }

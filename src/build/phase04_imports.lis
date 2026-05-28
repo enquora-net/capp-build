@@ -30,9 +30,9 @@
 // **
 import "go:errors"
 import "go:fmt"
+import "go:github.com/enquora-net/capp-parse"
 import "go:os"
 import "go:path/filepath"
-import "go:github.com/enquora-net/capp-parse"
 
 // ImportEdge represents a resolved quote-form dependency between two source
 // files within the project.  Both from and to are absolute paths.
@@ -42,9 +42,9 @@ import "go:github.com/enquora-net/capp-parse"
 // The edge set feeds phase 5 (TopologicalSort).
 pub struct ImportEdge {
   pub from: string,
-  pub to:   string,
-  pub line: int,   // 1-based line of @import in from
-  pub col:  int,   // 1-based column of @import in from
+  pub to: string,
+  pub line: int, // 1-based line of @import in from
+  pub col: int, // 1-based column of @import in from
 }
 
 // FrameworkDep records a single angle-bracket import.  The framework name
@@ -53,8 +53,8 @@ pub struct ImportEdge {
 // against framework headers.
 // The dep set feeds phase 8 (Archive).
 pub struct FrameworkDep {
-  pub framework: string,  // e.g. "Foundation"
-  pub path:      string,  // e.g. "CPObject.j" or "Foundation.j"
+  pub framework: string, // e.g. "Foundation"
+  pub path: string, // e.g. "CPObject.j" or "Foundation.j"
 }
 
 // ImportGraph is the output of phase 4 and the input to phases 5 and 8.
@@ -62,9 +62,9 @@ pub struct FrameworkDep {
 //   edges         — quote-form dependencies; define compilation order
 //   framework_deps — angle-bracket dependencies; define link-time inputs
 pub struct ImportGraph {
-  pub edges:          Slice<ImportEdge>,
+  pub edges: Slice<ImportEdge>,
   pub framework_deps: Slice<FrameworkDep>,
-  pub diags:          Slice<Diagnostic>,
+  pub diags: Slice<Diagnostic>,
 }
 
 // path_known returns true when target already appears in the known slice.
@@ -82,20 +82,20 @@ fn dep_known(deps: Slice<FrameworkDep>, framework: string, path: string) -> bool
 fn resolve_local(path: string, from_path: string) -> Option<string> {
   let candidate = filepath.Join(filepath.Dir(from_path), path)
   match os.Stat(candidate) {
-    Ok(_)  => Some(candidate),
+    Ok(_) => Some(candidate),
     Err(_) => None,
   }
 }
 
 pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
   let phase = BuildPhase.ResolveImports
-  let mut diags:         Slice<Diagnostic>  = []
-  let mut edges:         Slice<ImportEdge>  = []
+  let mut diags: Slice<Diagnostic> = []
+  let mut edges: Slice<ImportEdge> = []
   let mut framework_deps: Slice<FrameworkDep> = []
 
   let parsed = match ctx.parsed {
     Some(p) => p,
-    None    => return Err(errors.New("resolve imports: parsed units unavailable")),
+    None => return Err(errors.New("resolve imports: parsed units unavailable")),
   }
 
   // known tracks absolute paths already in the graph to prevent re-parsing.
@@ -115,20 +115,21 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     for unit in frontier {
       for imp in unit.imports {
         match imp {
-
           // Quote-form: local dependency.  Resolve on disk, add to the
           // dependency graph, and schedule for transitive discovery.
           RawImport.Local(path, raw_line, raw_col) => {
             match resolve_local(path, unit.source.path) {
               Some(to_path) => {
-                edges = edges.append(ImportEdge {
-                  from: unit.source.path,
-                  to:   to_path,
-                  line: raw_line + 1,
-                  col:  raw_col  + 1,
-                })
+                edges = edges.append(
+                  ImportEdge { 
+                    from: unit.source.path,
+                    to: to_path,
+                    line: raw_line + 1,
+                    col: raw_col + 1,
+                  },
+                )
                 if !path_known(known, to_path) {
-                  known     = known.append(to_path)
+                  known = known.append(to_path)
                   new_paths = new_paths.append(to_path)
                 }
               },
@@ -150,24 +151,23 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
           RawImport.Framework(framework, path, _, _) => {
             if !dep_known(framework_deps, framework, path) {
               framework_deps = framework_deps.append(
-                FrameworkDep { framework: framework, path: path }
+                FrameworkDep { framework, path },
               )
             }
           },
-
         }
       }
     }
 
     if new_paths.length() == 0 { break }
 
-    let cfg = capp.ProjectConfig {
-      Root:        "",
-      Paths:       new_paths,
-      Mode:        capp.ModeAuto,
+    let cfg = capp.ProjectConfig { 
+      Root: "",
+      Paths: new_paths,
+      Mode: capp.ModeAuto,
       GrammarPath: ctx.config.grammar,
-      Workers:     0,
-      ..
+      Workers: 0,
+      ..,
     }
 
     let mut next_frontier: Slice<ParsedUnit> = []
@@ -184,7 +184,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
                     phase,
                     e.Message,
                     file.Path,
-                    e.Row    as int,
+                    e.Row as int,
                     e.Column as int,
                   ))
                 }
@@ -192,9 +192,12 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
               } else {
                 extract_imports(file.Root())
               }
-              let source = SourceFile { path: file.Path, kind: classify(file.Path) }
+              let source = SourceFile { 
+                path: file.Path,
+                kind: classify(file.Path),
+              }
               next_frontier = next_frontier.append(
-                ParsedUnit { source: source, imports: imports }
+                ParsedUnit { source, imports },
               )
             },
           }
@@ -210,7 +213,9 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     frontier = next_frontier
   }
 
-  fmt.Println(f"✓  resolve imports: {edges.length()} edges  {framework_deps.length()} framework deps")
+  fmt.Println(
+    f"✓  resolve imports: {edges.length()} edges  {framework_deps.length()} framework deps",
+  )
 
-  Ok(ImportGraph { edges: edges, framework_deps: framework_deps, diags: diags })
+  Ok(ImportGraph { edges, framework_deps, diags })
 }

@@ -37,10 +37,16 @@ pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error>
 
   // TODO: resolve message sends against known class interfaces in ctx.symbols;
   //       emit Error diagnostics for unresolved selectors
-  diags = diags.append(diag_info(phase, "TODO: resolve message send types against symbol table"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: resolve message send types against symbol table",
+  ))
 
   // TODO: verify selector argument counts and labels at each call site
-  diags = diags.append(diag_info(phase, "TODO: verify selector signatures at call sites"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: verify selector signatures at call sites",
+  ))
 
   // TODO: check variable declarations, assignments, and scope;
   //       emit Error diagnostics for use-before-declare and shadowing
@@ -50,5 +56,5 @@ pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error>
   //       implement all required methods from ctx.symbols.protocols
   diags = diags.append(diag_info(phase, "TODO: verify protocol conformance"))
 
-  Ok(TypeCheckResult { diags: diags })
+  Ok(TypeCheckResult { diags })
 }

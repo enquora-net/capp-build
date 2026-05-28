@@ -12,9 +12,9 @@
 //
 // **
 import "go:fmt"
+import "go:github.com/enquora-net/capp-parse"
 import "go:path/filepath"
 import "go:strings"
-import "go:github.com/enquora-net/capp-parse"
 
 // The classification drives which downstream phases consume the file:
 // ObjectiveJ and Javascript are parsed; InterfaceBuilder compiled separately;
@@ -41,18 +41,18 @@ pub struct SourceTree {
 // classify returns the SourceKind for a file based on its extension.
 fn classify(path: string) -> SourceKind {
   match strings.ToLower(filepath.Ext(path)) {
-    ".j"    => SourceKind.ObjectiveJ,
-    ".sj"   => SourceKind.ObjectiveJ,
-    ".js"   => SourceKind.Javascript,
-    ".xib"  => SourceKind.InterfaceBuilder,
-    ".png"  => SourceKind.Graphic,
-    ".jpg"  => SourceKind.Graphic,
+    ".j" => SourceKind.ObjectiveJ,
+    ".sj" => SourceKind.ObjectiveJ,
+    ".js" => SourceKind.Javascript,
+    ".xib" => SourceKind.InterfaceBuilder,
+    ".png" => SourceKind.Graphic,
+    ".jpg" => SourceKind.Graphic,
     ".jpeg" => SourceKind.Graphic,
-    ".svg"  => SourceKind.Graphic,
+    ".svg" => SourceKind.Graphic,
     ".icns" => SourceKind.Graphic,
     ".tiff" => SourceKind.Graphic,
-    ".gif"  => SourceKind.Graphic,
-    _       => SourceKind.Resource,
+    ".gif" => SourceKind.Graphic,
+    _ => SourceKind.Resource,
   }
 }
 
@@ -72,17 +72,21 @@ pub fn run_walk_source_tree(ctx: Ref<BuildContext>) -> Result<SourceTree, error>
 
   let mut files: Slice<SourceFile> = []
   for path in paths {
-    files = files.append(SourceFile { path: path, kind: classify(path) })
+    files = files.append(SourceFile { path, kind: classify(path) })
   }
 
-  let objj_count = files.filter(|f| {
-    match f.kind {
-      SourceKind.ObjectiveJ => true,
-      _                     => false,
-    }
-  }).length()
+  let objj_count = files
+    .filter(|f| {
+      match f.kind {
+        SourceKind.ObjectiveJ => true,
+        _ => false,
+      }
+    })
+    .length()
 
-  fmt.Println(f"✓  walk source tree: {files.length()} files ({objj_count} Objective-J)")
+  fmt.Println(
+    f"✓  walk source tree: {files.length()} files ({objj_count} Objective-J)",
+  )
 
-  Ok(SourceTree { files: files, diags: diags })
+  Ok(SourceTree { files, diags })
 }

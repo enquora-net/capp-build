@@ -33,12 +33,12 @@ import "go:fmt"
 // used as the `p` record in the enclosing bundle.
 pub struct CompileOutput {
   pub records: Slice<CompiledRecord>,
-  pub diags:   Slice<Diagnostic>,
+  pub diags: Slice<Diagnostic>,
 }
 
 pub struct CompiledRecord {
-  pub name:   string,  // source-relative filename, e.g. "CPObject.j"
-  pub record: string,  // complete @STATIC;1.0;...e; per-file record
+  pub name: string, // source-relative filename, e.g. "CPObject.j"
+  pub record: string, // complete @STATIC;1.0;...e; per-file record
 }
 
 pub fn run_compile(_ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
@@ -50,18 +50,30 @@ pub fn run_compile(_ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   // TODO: iterate ctx.sorted.order and compile each source file in
   //       dependency order using ctx.symbols for name resolution,
   //       producing one CompiledRecord per file
-  diags = diags.append(diag_info(phase, "TODO: compile each source file to a per-file static record"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: compile each source file to a per-file static record",
+  ))
 
   // TODO: in Debug mode, include an S record (base64 source map) in
   //       each per-file static record
-  diags = diags.append(diag_info(phase, "TODO: include source map S records in debug mode"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: include source map S records in debug mode",
+  ))
 
   // TODO: in Release mode, apply dead-code elimination, constant folding,
   //       and identifier minification to each JavaScript payload
-  diags = diags.append(diag_info(phase, "TODO: apply optimisations in release mode"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: apply optimisations in release mode",
+  ))
 
   // TODO: in Clean mode, enumerate and remove build artefact directories
-  diags = diags.append(diag_info(phase, "TODO: remove artefact directories in clean mode"))
+  diags = diags.append(diag_info(
+    phase,
+    "TODO: remove artefact directories in clean mode",
+  ))
 
-  Ok(CompileOutput { records: records, diags: diags })
+  Ok(CompileOutput { records, diags })
 }

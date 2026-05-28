@@ -59,15 +59,12 @@ pub struct CycleError {
   pub path: Slice<string>,
   pub file: string,
   pub line: int,
-  pub col:  int,
+  pub col: int,
 }
 
 impl CycleError {
   fn Error(self: Ref<CycleError>) -> string {
-    fmt.Sprintf(
-      "import cycle:\n  %s",
-      strings.Join(self.path, "\n  → "),
-    )
+    fmt.Sprintf("import cycle:\n  %s", strings.Join(self.path, "\n  → "))
   }
 }
 
@@ -94,11 +91,11 @@ pub struct SortedUnits {
 pub fn run_topological_sort(ctx: Ref<BuildContext>) -> Result<SortedUnits, error> {
   let imports = match ctx.imports {
     Some(g) => g,
-    None    => return Err(errors.New("topological sort: import graph unavailable")),
+    None => return Err(errors.New("topological sort: import graph unavailable")),
   }
   let parsed = match ctx.parsed {
     Some(p) => p,
-    None    => return Err(errors.New("topological sort: parsed units unavailable")),
+    None => return Err(errors.New("topological sort: parsed units unavailable")),
   }
 
   // Complete node set from phase 3.  Every parsed source file participates in
@@ -113,7 +110,7 @@ pub fn run_topological_sort(ctx: Ref<BuildContext>) -> Result<SortedUnits, error
   let order = kahn(nodes, imports.edges)?
 
   fmt.Println(f"✓  topological sort: {order.length()} files")
-  Ok(SortedUnits { order: order, diags: [] })
+  Ok(SortedUnits { order, diags: [] })
 }
 
 // ---------------------------------------------------------------------------
@@ -131,11 +128,7 @@ pub fn run_topological_sort(ctx: Ref<BuildContext>) -> Result<SortedUnits, error
 // crosses capacity thresholds.  Provisioning to nodes.length() would
 // eliminate reallocations; Lisette's syntax for make([]string, 0, cap) is not
 // yet confirmed, so this is deferred as a future hardening step.
-fn kahn(
-  nodes: Slice<string>,
-  edges: Slice<ImportEdge>,
-) -> Result<Slice<string>, error> {
-
+fn kahn(nodes: Slice<string>, edges: Slice<ImportEdge>) -> Result<Slice<string>, error> {
   // in_degree[f]  = number of local prerequisites of f not yet emitted.
   // adjacency[f]  = files that import f; consulted when f is emitted to
   //                 unblock dependents in O(degree(f)) rather than O(|E|).
@@ -143,24 +136,22 @@ fn kahn(
   // Go maps return the zero value for absent keys: in_degree reads of
   // unimported files return 0 correctly; adjacency reads return nil, and
   // append(nil, item) is valid Go, so no initialisation pass is needed.
-  let mut in_degree: Map<string, int>           = Map.new<string, int>()
+  let mut in_degree: Map<string, int> = Map.new<string, int>()
   let mut adjacency: Map<string, Slice<string>> = Map.new<string, Slice<string>>()
 
   for edge in edges {
     in_degree[edge.from] = in_degree[edge.from] + 1
-    adjacency[edge.to]   = adjacency[edge.to].append(edge.from)
+    adjacency[edge.to] = adjacency[edge.to].append(edge.from)
   }
 
   // Seed: files with no local prerequisites are immediately emittable.
   // Iterating nodes (not the map) preserves phase 2 discovery order among
   // ties, producing deterministic output for a given source tree.
   let mut queue: Slice<string> = []
-  let mut head:  int           = 0
+  let mut head: int = 0
 
   for path in nodes {
-    if in_degree[path] == 0 {
-      queue = queue.append(path)
-    }
+    if in_degree[path] == 0 { queue = queue.append(path) }
   }
 
   let mut order: Slice<string> = []
@@ -169,7 +160,7 @@ fn kahn(
     if head >= queue.length() { break }
 
     let node = queue[head]
-    head  = head + 1
+    head = head + 1
     order = order.append(node)
 
     // Consult the adjacency list: each edge is visited exactly once across
@@ -177,9 +168,7 @@ fn kahn(
     for dep in adjacency[node] {
       let deg = in_degree[dep] - 1
       in_degree[dep] = deg
-      if deg == 0 {
-        queue = queue.append(dep)
-      }
+      if deg == 0 { queue = queue.append(dep) }
     }
   }
 
@@ -189,9 +178,7 @@ fn kahn(
   if order.length() != nodes.length() {
     let mut residual: Slice<string> = []
     for path in nodes {
-      if in_degree[path] > 0 {
-        residual = residual.append(path)
-      }
+      if in_degree[path] > 0 { residual = residual.append(path) }
     }
     let cycle_path = find_cycle(residual, edges)
 
@@ -199,20 +186,22 @@ fn kahn(
     // @import position within the entry file.  ImportEdge carries 1-based
     // line and col as normalised by phase 4 at construction time.
     let mut entry_line = 1
-    let mut entry_col  = 1
+    let mut entry_col = 1
     for edge in edges {
       if edge.from == cycle_path[0] && edge.to == cycle_path[1] {
         entry_line = edge.line
-        entry_col  = edge.col
+        entry_col = edge.col
       }
     }
 
-    return Err(&CycleError {
-      path: cycle_path,
-      file: cycle_path[0],
-      line: entry_line,
-      col:  entry_col,
-    })
+    return Err(
+      &CycleError { 
+        path: cycle_path,
+        file: cycle_path[0],
+        line: entry_line,
+        col: entry_col,
+      },
+    )
   }
 
   Ok(order)
@@ -238,11 +227,7 @@ fn kahn(
 //
 // visited and on_stack are Go maps (reference types); mutations are shared
 // across all recursive calls without Ref<> wrapping.
-fn find_cycle(
-  residual: Slice<string>,
-  edges:    Slice<ImportEdge>,
-) -> Slice<string> {
-
+fn find_cycle(residual: Slice<string>, edges: Slice<ImportEdge>) -> Slice<string> {
   // Build a membership set for O(1) residual lookup during edge filtering.
   let mut residual_set: Map<string, bool> = Map.new<string, bool>()
   for path in residual {
@@ -259,14 +244,14 @@ fn find_cycle(
     }
   }
 
-  let mut visited:  Map<string, bool> = Map.new<string, bool>()
+  let mut visited: Map<string, bool> = Map.new<string, bool>()
   let mut on_stack: Map<string, bool> = Map.new<string, bool>()
 
   for start in residual {
     if !visited[start] {
       match dfs_cycle(start, [], residual_adj, visited, on_stack) {
         Some(cycle) => return cycle,
-        None        => (),
+        None => (),
       }
     }
   }
@@ -295,21 +280,22 @@ fn find_cycle(
 // the cycle is extracted by scanning path for the first occurrence of the
 // back-edge target and closing with that target again.
 fn dfs_cycle(
-  node:         string,
-  path:         Slice<string>,
+  node: string,
+  path: Slice<string>,
   residual_adj: Map<string, Slice<string>>,
-  mut visited:  Map<string, bool>,
+  mut visited: Map<string, bool>,
   mut on_stack: Map<string, bool>,
 ) -> Option<Slice<string>> {
-
-  visited[node]  = true
+  visited[node] = true
   on_stack[node] = true
 
   // Rebuild path as a fresh allocation extended by node.
   // Iterating from empty ensures no shared backing array with the caller's
   // path slice regardless of Go's append capacity decisions.
   let mut fresh: Slice<string> = []
-  for p in path  { fresh = fresh.append(p) }
+  for p in path {
+    fresh = fresh.append(p)
+  }
   let path = fresh.append(node)
 
   for neighbor in residual_adj[node] {
@@ -317,12 +303,12 @@ fn dfs_cycle(
       // Back edge: neighbor is on the current recursion stack.
       // path runs from the DFS root to node (inclusive); the cycle is
       // the sub-path from neighbor through node, closed by neighbor.
-      let entry      = neighbor
+      let entry = neighbor
       let mut cycle: Slice<string> = []
       let mut in_cycle = false
       for p in path {
         if p == entry { in_cycle = true }
-        if in_cycle   { cycle = cycle.append(p) }
+        if in_cycle { cycle = cycle.append(p) }
       }
       return Some(cycle.append(entry))
     }
@@ -330,7 +316,7 @@ fn dfs_cycle(
     if !visited[neighbor] {
       match dfs_cycle(neighbor, path, residual_adj, visited, on_stack) {
         Some(cycle) => return Some(cycle),
-        None        => (),
+        None => (),
       }
     }
   }

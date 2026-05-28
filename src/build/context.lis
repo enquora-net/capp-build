@@ -33,7 +33,7 @@ import "go:path/filepath"
 // and extract the structural evidence they need — ApplicationDetails for phase
 // 8's application assembly path, nothing additional for framework archive paths.
 pub struct ValidatedProject {
-  pub meta:    PlistMeta,
+  pub meta: PlistMeta,
   pub details: ProjectDetails,
 }
 
@@ -82,8 +82,8 @@ pub struct ApplicationDetails {
 // Phase 9 (Archive) reads these paths to locate Foundation.sj and AppKit.sj,
 // which are assembled into the application deliverable in dependency load order.
 pub struct FrameworkRoots {
-  pub foundation: string,   // absolute path to Frameworks/Foundation
-  pub app_kit:    string,   // absolute path to Frameworks/AppKit
+  pub foundation: string, // absolute path to Frameworks/Foundation
+  pub app_kit: string, // absolute path to Frameworks/AppKit
 }
 
 // ---------------------------------------------------------------------------
@@ -95,9 +95,9 @@ pub struct FrameworkRoots {
 // Constructed only when all three keys are present; their absence is a phase 1
 // error.  CPBundlePackageType is the authoritative source for ProjectDetails.
 pub struct PlistMeta {
-  pub package_type: string,   // CPBundlePackageType — "APPL", "FMWK", or "THME"
-  pub name:         string,   // CPBundleName
-  pub identifier:   string,   // CPBundleIdentifier
+  pub package_type: string, // CPBundlePackageType — "APPL", "FMWK", or "THME"
+  pub name: string, // CPBundleName
+  pub identifier: string, // CPBundleIdentifier
 }
 
 // ---------------------------------------------------------------------------
@@ -132,11 +132,11 @@ pub struct ProjectRoot {
 //   Info.plist             — Framework or Theme project root
 fn is_project_root(dir: string) -> bool {
   match os.Stat(filepath.Join(dir, "Frameworks", "Foundation")) {
-    Ok(_)  => return true,
+    Ok(_) => return true,
     Err(_) => (),
   }
   match os.Stat(filepath.Join(dir, "Info.plist")) {
-    Ok(_)  => true,
+    Ok(_) => true,
     Err(_) => false,
   }
 }
@@ -147,12 +147,12 @@ pub fn find_project_root(start: string) -> Result<ProjectRoot, error> {
   let abs = filepath.Abs(start)?
   let mut dir = abs
   loop {
-    if is_project_root(dir) {
-      return Ok(ProjectRoot { path: dir })
-    }
+    if is_project_root(dir) { return Ok(ProjectRoot { path: dir }) }
     let parent = filepath.Dir(dir)
     if parent == dir {
-      return Err(errors.New("no Cappuccino project root found: no Frameworks/Foundation or Info.plist in any ancestor directory"))
+      return Err(errors.New(
+        "no Cappuccino project root found: no Frameworks/Foundation or Info.plist in any ancestor directory",
+      ))
     }
     dir = parent
   }
@@ -170,16 +170,16 @@ pub fn find_project_root(start: string) -> Result<ProjectRoot, error> {
 // Its presence guarantees structural validity; its details variant drives
 // phase-specific branching throughout the pipeline.
 pub struct BuildContext {
-  pub config:     BuildConfig,
-  pub root:       ProjectRoot,
-  pub project:    Option<ValidatedProject>,
+  pub config: BuildConfig,
+  pub root: ProjectRoot,
+  pub project: Option<ValidatedProject>,
   pub validation: Option<ValidationResult>,
-  pub tree:       Option<SourceTree>,
-  pub parsed:     Option<ParsedUnits>,
-  pub imports:    Option<ImportGraph>,
-  pub sorted:     Option<SortedUnits>,
-  pub symbols:    Option<SymbolTable>,
-  pub type_info:  Option<TypeCheckResult>,
-  pub compiled:   Option<CompileOutput>,
-  pub archived:   Option<ArchiveResult>,
+  pub tree: Option<SourceTree>,
+  pub parsed: Option<ParsedUnits>,
+  pub imports: Option<ImportGraph>,
+  pub sorted: Option<SortedUnits>,
+  pub symbols: Option<SymbolTable>,
+  pub type_info: Option<TypeCheckResult>,
+  pub compiled: Option<CompileOutput>,
+  pub archived: Option<ArchiveResult>,
 }
