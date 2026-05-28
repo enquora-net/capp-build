@@ -10,6 +10,10 @@
 // Phases accumulate Diagnostics rather than aborting on the first failure,
 // so the full set of defects is surfaced in a single build pass.
 //
+// Source positions are stored 1-based (line 1, column 1 = first character).
+// All call sites pass 0-based values from tree-sitter; diag_error_at and
+// diag_warn_at normalise to 1-based at construction.
+//
 // **
 
 pub enum DiagLevel {
@@ -23,7 +27,8 @@ pub struct Diagnostic {
   pub level:   DiagLevel,
   pub message: string,
   pub file:    Option<string>,
-  pub line:    Option<int>,
+  pub line:    Option<int>,    // 1-based; None when no source position is available
+  pub col:     Option<int>,    // 1-based; None when no source position is available
 }
 
 pub fn diag_info(phase: BuildPhase, message: string) -> Diagnostic {
@@ -53,13 +58,28 @@ pub fn diag_error(phase: BuildPhase, message: string) -> Diagnostic {
   }
 }
 
-// Use when a phase can attribute a defect to a specific file and line number.
-pub fn diag_error_at(phase: BuildPhase, message: string, file: string, line: int) -> Diagnostic {
+// diag_error_at attributes a defect to a specific file and source position.
+// line and col are 0-based (tree-sitter convention) and are stored as 1-based.
+pub fn diag_error_at(phase: BuildPhase, message: string, file: string, line: int, col: int) -> Diagnostic {
   Diagnostic {
     phase:   phase,
     level:   DiagLevel.Error,
     message: message,
     file:    Some(file),
-    line:    Some(line),
+    line:    Some(line + 1),
+    col:     Some(col + 1),
+  }
+}
+
+// diag_warn_at attributes a warning to a specific file and source position.
+// line and col are 0-based (tree-sitter convention) and are stored as 1-based.
+pub fn diag_warn_at(phase: BuildPhase, message: string, file: string, line: int, col: int) -> Diagnostic {
+  Diagnostic {
+    phase:   phase,
+    level:   DiagLevel.Warning,
+    message: message,
+    file:    Some(file),
+    line:    Some(line + 1),
+    col:     Some(col + 1),
   }
 }

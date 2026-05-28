@@ -22,9 +22,11 @@ import "go:github.com/enquora-net/capp-parse"
 // RawImport represents an @import directive before path resolution.
 // Framework carries the angle-bracket form: framework name and relative path.
 // Local carries the quoted form: the raw path string.
+// line and col are 0-based source positions of the @import node; normalised
+// to 1-based by diag_error_at and ImportEdge at their respective use sites.
 pub enum RawImport {
-  Framework(string, string),
-  Local(string),
+  Framework(string, string, int, int),  // framework, path, line, col
+  Local(string, int, int),              // path, line, col
 }
 
 pub struct ParsedUnit {
@@ -46,6 +48,11 @@ pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
   }
 
   if node.Kind() == capp.NodeKindObjjImport {
+    // Capture the position of the @import directive itself for diagnostics
+    // and editor invocation.  StartRow/StartColumn are 0-based (tree-sitter
+    // convention); callers normalise to 1-based at their use sites.
+    let row = node.StartRow() as int
+    let col = node.StartColumn() as int
     match node.ChildByFieldName(capp.FieldImportPath) {
       Some(path_node) => {
         let kind = path_node.Kind()
@@ -57,14 +64,14 @@ pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
             Some(slash) => {
               let framework = inner.substring(0..slash)
               let path      = inner.substring(slash + 1..inner.length())
-              return [RawImport.Framework(framework, path)]
+              return [RawImport.Framework(framework, path, row, col)]
             },
             None => return [],
           }
         } else if kind == capp.NodeKindString && text.length() > 2 {
           // text is "MyClass.j" — strip surrounding quotation marks
           let inner = text.substring(1..text.length() - 1)
-          return [RawImport.Local(inner)]
+          return [RawImport.Local(inner, row, col)]
         }
         return []
       },
@@ -131,7 +138,8 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
               phase,
               e.Message,
               file.Path,
-              e.Row as int,
+              e.Row    as int,
+              e.Column as int,
             ))
           }
         } else {

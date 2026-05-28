@@ -37,6 +37,41 @@ import "go:fmt"
 import "go:strings"
 
 // ---------------------------------------------------------------------------
+// CycleError
+// ---------------------------------------------------------------------------
+
+// CycleError is the structured error returned when Kahn's algorithm detects
+// an import cycle.  It implements Go's error interface so it propagates
+// naturally through the pipeline's Result return types.
+//
+// It carries the information required to open an editor at the exact
+// @import directive that begins the cycle:
+//
+//   file  — the first file in the cycle path (cycle_path[0])
+//   line  — 1-based line of the @import in file that leads into the cycle
+//   col   — 1-based column of that @import
+//   path  — the full circular path: [A, B, C, A]
+//
+// The CLI layer type-asserts the Err value to *CycleError to extract these
+// fields for editor invocation.  Error() provides the plain-text message
+// for all other output paths.
+pub struct CycleError {
+  pub path: Slice<string>,
+  pub file: string,
+  pub line: int,
+  pub col:  int,
+}
+
+impl CycleError {
+  fn Error(self: Ref<CycleError>) -> string {
+    fmt.Sprintf(
+      "import cycle:\n  %s",
+      strings.Join(self.path, "\n  → "),
+    )
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Output type
 // ---------------------------------------------------------------------------
 
@@ -149,7 +184,8 @@ fn kahn(
   }
 
   // Any node whose in-degree is still > 0 was never unblocked: it is part of
-  // a cycle.  Find and report the specific cycle path.
+  // a cycle.  Find the specific cycle path, then locate the @import edge at
+  // the cycle entry point so the CLI can open the editor at that position.
   if order.length() != nodes.length() {
     let mut residual: Slice<string> = []
     for path in nodes {
@@ -158,10 +194,25 @@ fn kahn(
       }
     }
     let cycle_path = find_cycle(residual, edges)
-    return Err(errors.New(fmt.Sprintf(
-      "import cycle:\n  %s",
-      strings.Join(cycle_path, "\n  → "),
-    )))
+
+    // Locate the edge from cycle_path[0] to cycle_path[1] to recover the
+    // @import position within the entry file.  ImportEdge carries 1-based
+    // line and col as normalised by phase 4 at construction time.
+    let mut entry_line = 1
+    let mut entry_col  = 1
+    for edge in edges {
+      if edge.from == cycle_path[0] && edge.to == cycle_path[1] {
+        entry_line = edge.line
+        entry_col  = edge.col
+      }
+    }
+
+    return Err(&CycleError {
+      path: cycle_path,
+      file: cycle_path[0],
+      line: entry_line,
+      col:  entry_col,
+    })
   }
 
   Ok(order)

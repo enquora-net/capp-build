@@ -35,11 +35,16 @@ import "go:path/filepath"
 import "go:github.com/enquora-net/capp-parse"
 
 // ImportEdge represents a resolved quote-form dependency between two source
-// files within the project.  Both fields are absolute paths.
+// files within the project.  Both from and to are absolute paths.
+// line and col are the 1-based source position of the @import directive in
+// from — the location an editor should open when reporting this dependency
+// as the site of a build error (unresolvable import, cycle entry).
 // The edge set feeds phase 5 (TopologicalSort).
 pub struct ImportEdge {
   pub from: string,
   pub to:   string,
+  pub line: int,   // 1-based line of @import in from
+  pub col:  int,   // 1-based column of @import in from
 }
 
 // FrameworkDep records a single angle-bracket import.  The framework name
@@ -113,10 +118,15 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
 
           // Quote-form: local dependency.  Resolve on disk, add to the
           // dependency graph, and schedule for transitive discovery.
-          RawImport.Local(path) => {
+          RawImport.Local(path, raw_line, raw_col) => {
             match resolve_local(path, unit.source.path) {
               Some(to_path) => {
-                edges = edges.append(ImportEdge { from: unit.source.path, to: to_path })
+                edges = edges.append(ImportEdge {
+                  from: unit.source.path,
+                  to:   to_path,
+                  line: raw_line + 1,
+                  col:  raw_col  + 1,
+                })
                 if !path_known(known, to_path) {
                   known     = known.append(to_path)
                   new_paths = new_paths.append(to_path)
@@ -127,7 +137,8 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
                   phase,
                   f"unresolvable import \"{path}\"",
                   unit.source.path,
-                  0,
+                  raw_line,
+                  raw_col,
                 ))
               },
             }
@@ -135,7 +146,8 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
 
           // Angle-bracket form: external framework dependency.  Record for
           // phase 8; do not resolve to source or enter the parse frontier.
-          RawImport.Framework(framework, path) => {
+          // Position fields are present in the RawImport but not needed here.
+          RawImport.Framework(framework, path, _, _) => {
             if !dep_known(framework_deps, framework, path) {
               framework_deps = framework_deps.append(
                 FrameworkDep { framework: framework, path: path }
@@ -167,12 +179,15 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
             None => (),
             Some(file) => {
               let imports = if file.HasError() {
-                diags = diags.append(diag_error_at(
-                  phase,
-                  "parse error in transitively imported file",
-                  file.Path,
-                  0,
-                ))
+                for e in file.Errors {
+                  diags = diags.append(diag_error_at(
+                    phase,
+                    e.Message,
+                    file.Path,
+                    e.Row    as int,
+                    e.Column as int,
+                  ))
+                }
                 []
               } else {
                 extract_imports(file.Root())
