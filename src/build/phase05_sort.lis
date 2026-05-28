@@ -7,40 +7,286 @@
 //
 // Phase 5: TopologicalSort
 //
-// Orders the files in the import graph so that every dependency precedes the
-// files that depend on it.  The resulting order is the authoritative
-// compilation sequence for phases 6, 7, and 8.
+// Kahn's BFS algorithm over the local import edge set produced by phase 4.
+// Produces a total ordering of source files in which every file appears after
+// all files it imports locally — the required input order for phases 6, 7, and 8.
+//
+// Only quote-form import edges participate.  Angle-bracket (framework) deps
+// are already recorded in ImportGraph.framework_deps and are not constraints
+// on intra-project compilation order.
+//
+// A cycle is a hard build error: there is no valid compilation order for a
+// cyclic import graph.  The error names the specific circular path
+// (e.g. A → B → C → A) so the developer can identify and break the cycle
+// without manual graph traversal.  The pipeline halts; no partial result
+// is emitted.
+//
+// Cycle detection uses DFS with an explicit recursion-stack membership map
+// (on_stack).  A back edge — an edge to a node currently on the recursion
+// stack — unambiguously identifies a cycle; path extraction is exact.
+//
+// Validation oracle: the file ordering embedded in Foundation.sj (produced by
+// the jake toolchain) is a correct topological sort of Foundation's source.
+// Phase 5 must produce an ordering consistent with it: for every pair (A, B)
+// where A precedes B in Foundation.sj, A must precede B in our output.
+// Identical orderings are not required; any valid topological sort passes.
 //
 // **
+import "go:errors"
 import "go:fmt"
+import "go:strings"
 
-// Every file is guaranteed to appear after all files it imports.
+// ---------------------------------------------------------------------------
+// Output type
+// ---------------------------------------------------------------------------
+
+// SortedUnits is the output of phase 5 and the input to phases 6, 7, and 8.
+//
+// order contains the absolute paths of all project source files in the order
+// they must be compiled: every file appears after all files it imports locally.
+//
+// diags carries non-fatal warnings; a cycle is fatal and returned as Err
+// rather than accumulated here.
 pub struct SortedUnits {
   pub order: Slice<string>,
   pub diags: Slice<Diagnostic>,
 }
 
-// run_topological_sort orders the files in ctx.imports such that every
-// dependency precedes the files that depend on it.
+// ---------------------------------------------------------------------------
+// Phase entry point
+// ---------------------------------------------------------------------------
+
+pub fn run_topological_sort(ctx: Ref<BuildContext>) -> Result<SortedUnits, error> {
+  let imports = match ctx.imports {
+    Some(g) => g,
+    None    => return Err(errors.New("topological sort: import graph unavailable")),
+  }
+  let parsed = match ctx.parsed {
+    Some(p) => p,
+    None    => return Err(errors.New("topological sort: parsed units unavailable")),
+  }
+
+  // Complete node set from phase 3.  Every parsed source file participates in
+  // the ordering even when it has no local imports; such files have in-degree 0
+  // and are emitted first.  Phase 2 discovery order is preserved among
+  // zero-degree files, giving deterministic output for a given source tree.
+  let mut nodes: Slice<string> = []
+  for unit in parsed.units {
+    nodes = nodes.append(unit.source.path)
+  }
+
+  let order = kahn(nodes, imports.edges)?
+
+  fmt.Println(f"✓  topological sort: {order.length()} files")
+  Ok(SortedUnits { order: order, diags: [] })
+}
+
+// ---------------------------------------------------------------------------
+// Kahn's algorithm — O(|V| + |E|)
+// ---------------------------------------------------------------------------
+
+// kahn runs Kahn's BFS topological sort over (nodes, edges).
 //
-// A cycle in ctx.imports is a fatal condition; it should have been detected
-// and reported in Phase 4.  If one is encountered here, an Error diagnostic
-// is emitted and the function returns Err rather than looping indefinitely.
-// This is a defensive guard, not the primary detection mechanism.
-pub fn run_topological_sort(_ctx: Ref<BuildContext>) -> Result<SortedUnits, error> {
-  let phase = BuildPhase.TopologicalSort
-  fmt.Println("  topological sort")
-  let mut diags: Slice<Diagnostic> = []
-  let order: Slice<string> = []
+// Edge semantics: edge.from imports edge.to, so edge.to is a prerequisite of
+// edge.from.  in_degree[from] is incremented per edge.  When a node is
+// emitted its adjacency list entry — the files that import it — is consulted
+// directly, bounding inner work to O(|E|) total across the loop.
+//
+// Queue note: the queue grows by successive appends and may reallocate as it
+// crosses capacity thresholds.  Provisioning to nodes.length() would
+// eliminate reallocations; Lisette's syntax for make([]string, 0, cap) is not
+// yet confirmed, so this is deferred as a future hardening step.
+fn kahn(
+  nodes: Slice<string>,
+  edges: Slice<ImportEdge>,
+) -> Result<Slice<string>, error> {
 
-  // TODO: implement Kahn's algorithm over ctx.imports.edges:
-  //       build an in-degree map, seed the queue with zero-in-degree nodes,
-  //       emit each dequeued node to `order`, decrement successors
-  diags = diags.append(diag_info(phase, "TODO: topological sort via Kahn's algorithm"))
+  // in_degree[f]  = number of local prerequisites of f not yet emitted.
+  // adjacency[f]  = files that import f; consulted when f is emitted to
+  //                 unblock dependents in O(degree(f)) rather than O(|E|).
+  //
+  // Go maps return the zero value for absent keys: in_degree reads of
+  // unimported files return 0 correctly; adjacency reads return nil, and
+  // append(nil, item) is valid Go, so no initialisation pass is needed.
+  let mut in_degree: Map<string, int>           = Map.new<string, int>()
+  let mut adjacency: Map<string, Slice<string>> = Map.new<string, Slice<string>>()
 
-  // TODO: if the algorithm terminates with unprocessed nodes, a cycle exists;
-  //       emit an Error diagnostic identifying the involved files and return Err
-  diags = diags.append(diag_info(phase, "TODO: cycle detection guard — emit Error and return Err on cycle"))
+  for edge in edges {
+    in_degree[edge.from] = in_degree[edge.from] + 1
+    adjacency[edge.to]   = adjacency[edge.to].append(edge.from)
+  }
 
-  Ok(SortedUnits { order: order, diags: diags })
+  // Seed: files with no local prerequisites are immediately emittable.
+  // Iterating nodes (not the map) preserves phase 2 discovery order among
+  // ties, producing deterministic output for a given source tree.
+  let mut queue: Slice<string> = []
+  let mut head:  int           = 0
+
+  for path in nodes {
+    if in_degree[path] == 0 {
+      queue = queue.append(path)
+    }
+  }
+
+  let mut order: Slice<string> = []
+
+  loop {
+    if head >= queue.length() { break }
+
+    let node = queue[head]
+    head  = head + 1
+    order = order.append(node)
+
+    // Consult the adjacency list: each edge is visited exactly once across
+    // the entire loop — O(|E|) total.
+    for dep in adjacency[node] {
+      let deg = in_degree[dep] - 1
+      in_degree[dep] = deg
+      if deg == 0 {
+        queue = queue.append(dep)
+      }
+    }
+  }
+
+  // Any node whose in-degree is still > 0 was never unblocked: it is part of
+  // a cycle.  Find and report the specific cycle path.
+  if order.length() != nodes.length() {
+    let mut residual: Slice<string> = []
+    for path in nodes {
+      if in_degree[path] > 0 {
+        residual = residual.append(path)
+      }
+    }
+    let cycle_path = find_cycle(residual, edges)
+    return Err(errors.New(fmt.Sprintf(
+      "import cycle:\n  %s",
+      strings.Join(cycle_path, "\n  → "),
+    )))
+  }
+
+  Ok(order)
+}
+
+// ---------------------------------------------------------------------------
+// Cycle extraction — DFS with recursion stack
+// ---------------------------------------------------------------------------
+
+// find_cycle locates a specific circular import path within the residual
+// subgraph (the nodes Kahn's could not emit) and returns it as a slice whose
+// last element equals its first: [A, B, C, A].
+//
+// Pre-filtering pass: residual is converted to a membership map and edges is
+// filtered once to produce a residual-only adjacency map before the DFS
+// begins.  This eliminates two sources of hidden quadratic complexity that
+// arise from scanning the global edge list inside the DFS hot loop:
+//   — scanning all edges per visited node:  O(|E|) per node → O(|V|·|E|) total
+//   — in_slice(residual, ...) per edge match: O(|V|) per hit → O(|V|·|E|) total
+// With a pre-built adjacency map the DFS proper is O(|V| + |E|_residual).
+// The filtering pass is O(|V|_residual + |E|) — dominated by the single edge
+// scan — making the total O(|V| + |E|).
+//
+// visited and on_stack are Go maps (reference types); mutations are shared
+// across all recursive calls without Ref<> wrapping.
+fn find_cycle(
+  residual: Slice<string>,
+  edges:    Slice<ImportEdge>,
+) -> Slice<string> {
+
+  // Build a membership set for O(1) residual lookup during edge filtering.
+  let mut residual_set: Map<string, bool> = Map.new<string, bool>()
+  for path in residual {
+    residual_set[path] = true
+  }
+
+  // Filter edges once: retain only edges where both endpoints are residual.
+  // The resulting adjacency map is the sole input to the DFS; the global
+  // edge slice and residual slice are not consulted again after this point.
+  let mut residual_adj: Map<string, Slice<string>> = Map.new<string, Slice<string>>()
+  for edge in edges {
+    if residual_set[edge.from] && residual_set[edge.to] {
+      residual_adj[edge.from] = residual_adj[edge.from].append(edge.to)
+    }
+  }
+
+  let mut visited:  Map<string, bool> = Map.new<string, bool>()
+  let mut on_stack: Map<string, bool> = Map.new<string, bool>()
+
+  for start in residual {
+    if !visited[start] {
+      match dfs_cycle(start, [], residual_adj, visited, on_stack) {
+        Some(cycle) => return cycle,
+        None        => (),
+      }
+    }
+  }
+
+  // Unreachable: residual is non-empty and every residual node has at least
+  // one outgoing edge in residual_adj (proof: if all prerequisites of a node
+  // had been satisfied it would have been emitted by Kahn's).  Returned as
+  // a defensive fallback only.
+  residual
+}
+
+// dfs_cycle performs a single DFS step from node using the pre-filtered
+// residual adjacency map.
+//
+// path is rebuilt from scratch at each call rather than extended via append.
+// This eliminates the backing-array aliasing hazard that arises when append
+// finds spare capacity and writes in place: a sibling branch's append would
+// overwrite the same backing array position, silently corrupting path data.
+// Building from an empty slice guarantees a disjoint allocation.
+// Cost: O(depth) allocation per call; acceptable in a diagnostic code path
+// bounded by cycle size, never in a compilation hot path.
+//
+// on_stack tracks the active recursion stack.  A back edge — a neighbor
+// already in on_stack — unambiguously identifies a cycle.  path at that
+// point contains the full walk from the DFS root to the current node;
+// the cycle is extracted by scanning path for the first occurrence of the
+// back-edge target and closing with that target again.
+fn dfs_cycle(
+  node:         string,
+  path:         Slice<string>,
+  residual_adj: Map<string, Slice<string>>,
+  mut visited:  Map<string, bool>,
+  mut on_stack: Map<string, bool>,
+) -> Option<Slice<string>> {
+
+  visited[node]  = true
+  on_stack[node] = true
+
+  // Rebuild path as a fresh allocation extended by node.
+  // Iterating from empty ensures no shared backing array with the caller's
+  // path slice regardless of Go's append capacity decisions.
+  let mut fresh: Slice<string> = []
+  for p in path  { fresh = fresh.append(p) }
+  let path = fresh.append(node)
+
+  for neighbor in residual_adj[node] {
+    if on_stack[neighbor] {
+      // Back edge: neighbor is on the current recursion stack.
+      // path runs from the DFS root to node (inclusive); the cycle is
+      // the sub-path from neighbor through node, closed by neighbor.
+      let entry      = neighbor
+      let mut cycle: Slice<string> = []
+      let mut in_cycle = false
+      for p in path {
+        if p == entry { in_cycle = true }
+        if in_cycle   { cycle = cycle.append(p) }
+      }
+      return Some(cycle.append(entry))
+    }
+
+    if !visited[neighbor] {
+      match dfs_cycle(neighbor, path, residual_adj, visited, on_stack) {
+        Some(cycle) => return Some(cycle),
+        None        => (),
+      }
+    }
+  }
+
+  // All neighbours exhausted without finding a cycle from this node.
+  // Remove from the recursion stack so subsequent paths through node are
+  // correctly identified as cross-edges rather than back-edges.
+  on_stack[node] = false
+  None
 }
