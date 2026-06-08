@@ -110,14 +110,8 @@ fn validate_framework_roots(root: string) -> Result<FrameworkRoots, Slice<string
   let foundation = filepath.Join(root, "Frameworks", "Foundation")
   let app_kit = filepath.Join(root, "Frameworks", "AppKit")
 
-  let fnd_ok = match os.Stat(foundation) {
-    Ok(_) => true,
-    Err(_) => false,
-  }
-  let ak_ok = match os.Stat(app_kit) {
-    Ok(_) => true,
-    Err(_) => false,
-  }
+  let fnd_ok = os.Stat(foundation).is_ok()
+  let ak_ok = os.Stat(app_kit).is_ok()
 
   match (fnd_ok, ak_ok) {
     (true, true) => Ok(FrameworkRoots { foundation, app_kit }),
@@ -156,14 +150,8 @@ fn validate_application(root: string) -> Result<ApplicationDetails, Slice<string
     },
   }
 
-  let main_ok = match os.Stat(filepath.Join(root, "main.j")) {
-    Ok(_) => true,
-    Err(_) => false,
-  }
-  let idx_ok = match os.Stat(filepath.Join(root, "index.html")) {
-    Ok(_) => true,
-    Err(_) => false,
-  }
+  let main_ok = os.Stat(filepath.Join(root, "main.j")).is_ok()
+  let idx_ok = os.Stat(filepath.Join(root, "index.html")).is_ok()
 
   if !main_ok {
     errs = errs.append("main.j not found — required for Application projects")
@@ -174,7 +162,7 @@ fn validate_application(root: string) -> Result<ApplicationDetails, Slice<string
     )
   }
 
-  if errs.length() > 0 { return Err(errs) }
+  if !errs.is_empty() { return Err(errs) }
 
   // All checks passed.  fwk is guaranteed Some: the only path to None is
   // through validate_framework_roots returning Err, which populates errs
@@ -256,9 +244,8 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
   // Construct ValidatedProject only when both meta and details are present.
   // Its presence in BuildContext.project is the guarantee that the project
   // is structurally valid and the pipeline may proceed.
-  match details {
-    Some(d) => ctx.project = Some(ValidatedProject { meta, details: d }),
-    None => (),
+  if let Some(d) = details {
+    ctx.project = Some(ValidatedProject { meta, details: d })
   }
 
   fmt.Println(f"✓  validate: {root}")

@@ -135,10 +135,7 @@ fn is_project_root(dir: string) -> bool {
     Ok(_) => return true,
     Err(_) => (),
   }
-  match os.Stat(filepath.Join(dir, "Info.plist")) {
-    Ok(_) => true,
-    Err(_) => false,
-  }
+  os.Stat(filepath.Join(dir, "Info.plist")).is_ok()
 }
 
 // Walks upward from start until a project root sentinel is found.

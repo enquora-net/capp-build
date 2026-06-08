@@ -148,26 +148,11 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
     phase.run(&ctx)?
   }
 
-  let file_count = match ctx.tree {
-    Some(t) => t.files.length(),
-    None => 0,
-  }
-  let unit_count = match ctx.parsed {
-    Some(p) => p.units.length(),
-    None => 0,
-  }
-  let edge_count = match ctx.imports {
-    Some(i) => i.edges.length(),
-    None => 0,
-  }
-  let dep_count = match ctx.imports {
-    Some(i) => i.framework_deps.length(),
-    None => 0,
-  }
-  let sorted_count = match ctx.sorted {
-    Some(s) => s.order.length(),
-    None => 0,
-  }
+  let file_count = ctx.tree.map_or(0, |t| t.files.length())
+  let unit_count = ctx.parsed.map_or(0, |p| p.units.length())
+  let edge_count = ctx.imports.map_or(0, |i| i.edges.length())
+  let dep_count = ctx.imports.map_or(0, |i| i.framework_deps.length())
+  let sorted_count = ctx.sorted.map_or(0, |s| s.order.length())
 
   fmt.Println(
     f"  {file_count} source files  {unit_count} parsed  {edge_count} import edges  {dep_count} framework deps  {sorted_count} sorted",

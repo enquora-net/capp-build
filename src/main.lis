@@ -136,12 +136,9 @@ fn make_group(use: string, short: string) -> cobra.Command {
 // ---------------------------------------------------------------------------
 
 fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
-  let source_root = if args.length() > 0 { args[0] } else { "." }
+  let source_root = if !args.is_empty() { args[0] } else { "." }
 
-  let mode_str = match cmd.Flags().GetString("mode") {
-    Ok(v) => v,
-    Err(_) => "debug",
-  }
+  let mode_str = cmd.Flags().GetString("mode").unwrap_or("debug")
 
   let mode = match mode_str {
     "release" => build.BuildMode.Release,
@@ -155,10 +152,7 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
     },
   }
 
-  let http2_flag = match cmd.Flags().GetBool("http2") {
-    Ok(v) => v,
-    Err(_) => false,
-  }
+  let http2_flag = cmd.Flags().GetBool("http2").unwrap_or(false)
 
   let delivery = if http2_flag {
     build.DeliveryContext.HTTP2
@@ -194,7 +188,7 @@ fn new_build_cmd() -> cobra.Command {
 // ---------------------------------------------------------------------------
 
 fn run_verify_root(cmd: Ref<cobra.Command>, args: Slice<string>) {
-  let start = if args.length() > 0 { args[0] } else { "." }
+  let start = if !args.is_empty() { args[0] } else { "." }
   let result = verify.verify_root(start)
   let icon = if result.ok { "✓" } else { "✗" }
   cmd.Println(f"{icon}  {result.label}: {result.detail}")
@@ -225,20 +219,14 @@ fn run_smoke_cobra(cmd: Ref<cobra.Command>, _args: Slice<string>) {
 }
 
 fn run_smoke_capp(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  let grammar = match cmd.Flags().GetString("grammar") {
-    Ok(v) => v,
-    Err(_) => "",
-  }
+  let grammar = cmd.Flags().GetString("grammar").unwrap_or("")
   let result = smoke.smoke_capp(grammar)
   let icon = if result.ok { "✓" } else { "✗" }
   cmd.Println(f"{icon}  {result.name}: {result.note}")
 }
 
 fn run_smoke_all(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  let grammar = match cmd.Flags().GetString("grammar") {
-    Ok(v) => v,
-    Err(_) => "",
-  }
+  let grammar = cmd.Flags().GetString("grammar").unwrap_or("")
   smoke.smoke_all(grammar)
 }
 

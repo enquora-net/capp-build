@@ -67,7 +67,16 @@ fn classify(path: string) -> SourceKind {
 pub fn run_walk_source_tree(ctx: Ref<BuildContext>) -> Result<SourceTree, error> {
   let diags: Slice<Diagnostic> = []
 
-  let skip = ["Frameworks", "build", ".cappuccino"]
+  // Excluded directory names.  Cappuccino's convention capitalises the build
+  // output directory (Build/Debug/..., as produced by jake and by phase 9),
+  // so the skip entry must match that casing.  Frameworks/ is consumed via
+  // import resolution only; .cappuccino/ is toolchain metadata.
+  //
+  // NOTE: capp.SourcePaths matches these names against directory names as it
+  // walks; if that match is case-sensitive (a capp-parse internal), a project
+  // using a differently-cased output dir would leak through.  Author note for
+  // capp-parse: case-insensitive skip matching would make this robust.
+  let skip = ["Frameworks", "Build", ".cappuccino"]
   let paths = capp.SourcePaths(ctx.root.path, capp.ModeAuto, skip)?
 
   let mut files: Slice<SourceFile> = []

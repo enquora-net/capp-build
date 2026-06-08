@@ -160,7 +160,7 @@ fn kahn(nodes: Slice<string>, edges: Slice<ImportEdge>) -> Result<Slice<string>,
     if head >= queue.length() { break }
 
     let node = queue[head]
-    head = head + 1
+    head += 1
     order = order.append(node)
 
     // Consult the adjacency list: each edge is visited exactly once across

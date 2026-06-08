@@ -108,7 +108,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
   let mut frontier: Slice<ParsedUnit> = parsed.units
 
   loop {
-    if frontier.length() == 0 { break }
+    if frontier.is_empty() { break }
 
     let mut new_paths: Slice<string> = []
 
@@ -159,7 +159,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
       }
     }
 
-    if new_paths.length() == 0 { break }
+    if new_paths.is_empty() { break }
 
     let cfg = capp.ProjectConfig { 
       Root: "",

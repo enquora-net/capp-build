@@ -1,0 +1,178 @@
+//**
+// build/lower.lis
+// capp-build
+//
+// Created by David Richardson on Thursday, May 29, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Lowering — the single pass that converts capp-parse's untyped CSTNode tree
+// into the typed AST declared in cst.lis.
+//
+// This is the ONLY module permitted to inspect raw node kinds and field names.
+// Dispatch here is necessarily string-domain: the CST discriminates nodes by
+// node.Kind() (a string) and addresses fields by name (a string), because
+// tree-sitter erases the grammar's closed node-kind set to strings at the C
+// boundary.  Every consumer above this module pattern-matches over closed
+// Lisette sum types with compiler-checked exhaustiveness; this module is the
+// firebreak that converts strings into those types exactly once.
+//
+// Because the dispatch is not exhaustiveness-checked by the compiler, every
+// dispatch carries a catch-all arm that records an unhandled node kind as a
+// diagnostic rather than silently dropping it.  An unhandled kind is a
+// coverage gap, surfaced, not a silent omission.
+//
+// Diagnostic discipline: lowering is purely functional.  Each helper RETURNS
+// its diagnostics alongside its result; callers merge.  No shared mutable
+// accumulator is threaded by reference.  The cost is an explicit merge at each
+// call site; the benefit is that every helper is a pure function of its node,
+// trivially testable against hand-built CST input.
+//
+// STATUS: top-down skeleton for architectural review.
+//   lower_program     — IMPLEMENTED (root level: hash_bang + statement list)
+//   lower_statement   — STUB: dispatches, but every kind currently routes to
+//                       the unhandled catch-all pending per-node implementation
+// The descent stops at the statement boundary by design.  Each statement kind
+// is filled in subsequently, one grammar production at a time.
+//
+// Node-kind constants: capp-parse currently exports only a handful
+// (NodeKindObjjImport, NodeKindSystemLibString, NodeKindString).  The full
+// descent requires the complete set; until capp-parse exports them, string
+// literals are used here and marked CONST-PENDING.  Expanding capp-parse's
+// constant surface is an author note — it converts a mistyped kind string from
+// a silent miss into a compile error.
+//
+// **
+import "go:github.com/enquora-net/capp-parse"
+
+// ---------------------------------------------------------------------------
+// Lowering result
+// ---------------------------------------------------------------------------
+
+// LoweredUnit pairs a file's typed AST root with any diagnostics raised while
+// lowering it.  Diagnostics here are non-fatal: an unhandled or malformed node
+// is recorded and lowering continues, so a single file yields one Program plus
+// a complete list of what could not be lowered, rather than aborting at the
+// first gap.
+pub struct LoweredUnit {
+  pub source: SourceFile,
+  pub program: Program,
+  pub diags: Slice<Diagnostic>,
+}
+
+// ---------------------------------------------------------------------------
+// Position helper
+// ---------------------------------------------------------------------------
+
+// node_pos captures a node's 0-based start position.  Every lowered node's
+// `pos` field is filled from here, so the 0-based convention is applied in
+// exactly one place.  StartRow/StartColumn are uint32 (tree-sitter); cast once.
+fn node_pos(node: capp.CSTNode) -> Position {
+  Position { row: node.StartRow() as int, col: node.StartColumn() as int }
+}
+
+// ---------------------------------------------------------------------------
+// Root: Program
+// ---------------------------------------------------------------------------
+
+// lower_program lowers the grammar root:
+//   program: seq(optional(hash_bang_line), repeat(statement))
+//
+// The root node's children are the optional hash-bang line followed by the
+// top-level statements, in source order.  Anonymous/extra nodes (comments,
+// punctuation) are skipped by kind.  Each recognised statement is lowered;
+// unrecognised kinds route through lower_statement's catch-all.
+//
+// diags accumulates across the whole file by merging each helper's returned
+// diagnostics, so the returned LoweredUnit carries the complete set.
+pub fn lower_program(root: capp.CSTNode, source: SourceFile) -> LoweredUnit {
+  let mut diags: Slice<Diagnostic> = []
+  let mut hash_bang: Option<HashBangLine> = None
+  let mut body: Slice<Statement> = []
+
+  for i in 0..root.ChildCount() {
+    let child = root.Child(i)
+    let kind = child.Kind()
+
+    if kind == "hash_bang_line" {
+      // CONST-PENDING
+      hash_bang = Some(
+        HashBangLine { text: child.Text(), pos: node_pos(child) },
+      )
+    } else if is_skippable(kind) {
+      () // comments / extras: not structural
+    } else {
+      // Each helper returns its diagnostics; the caller merges.
+      let (stmt_opt, stmt_diags) = lower_statement(child)
+      for d in stmt_diags {
+        diags = diags.append(d)
+      }
+      match stmt_opt {
+        Some(stmt) => body = body.append(stmt),
+        None => (), // unhandled; diagnostic already in stmt_diags
+      }
+    }
+  }
+
+  LoweredUnit { 
+    source,
+    program: Program { hash_bang, body, pos: node_pos(root) },
+    diags,
+  }
+}
+
+// is_skippable reports node kinds that are grammar `extras` or pure
+// punctuation and carry no AST content.  Centralised so the skip set is
+// declared once rather than scattered through every child loop.
+fn is_skippable(kind: string) -> bool {
+  kind == "comment" || kind == "html_comment" // CONST-PENDING
+}
+
+// ---------------------------------------------------------------------------
+// Statements  (STUB — descent stops here)
+// ---------------------------------------------------------------------------
+
+// lower_statement dispatches on a top-level statement node's kind and returns
+// the lowered Statement (or None when the kind is not yet handled) paired with
+// any diagnostics it raised.
+//
+// SKELETON: the dispatch structure and the catch-all are in place; the per-kind
+// arms are filled in subsequently.  Until then every kind falls through to
+// unhandled(), which is the correct, visible behaviour for an unimplemented
+// production — not a silent drop.
+//
+// The eventual arms mirror the Statement enum in cst.lis: each grammar node
+// kind (objj_class_implementation, function_declaration, if_statement, …) maps
+// to one constructor.  They are added one production at a time, each validated
+// against real lowered output before the next.  A handler that itself recurses
+// returns its own merged diagnostics, which this function passes through.
+fn lower_statement(node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  let kind = node.Kind()
+
+  // Per-kind arms are added here, e.g.:
+  //   if kind == "objj_class_implementation" {
+  //     let (impl, ds) = lower_objj_class_impl(node)
+  //     return (Some(Statement.ObjjClassImpl(impl)), ds)
+  //   }
+  //   if kind == "function_declaration" {
+  //     let (fdecl, ds) = lower_function_decl(node)
+  //     return (Some(Statement.Declaration(Declaration.Function(fdecl))), ds)
+  //   }
+  //   ...
+  unhandled(node, kind)
+}
+
+// unhandled records a coverage gap: a node kind reached by the dispatch with no
+// implementing arm.  Returns None plus a one-element diagnostic slice naming
+// exactly what was skipped and where, so the caller omits the node from the AST
+// without losing the record of it.
+fn unhandled(node: capp.CSTNode, kind: string) -> (Option<Statement>, Slice<Diagnostic>) {
+  let pos = node_pos(node)
+  let diag = diag_warn_at(
+    BuildPhase.BuildSymbolTable, // lowering runs ahead of phase 6's consumers
+    f"lowering: unhandled node kind \"{kind}\"",
+    "", // file path threaded in by the caller in the full version
+    pos.row,
+    pos.col,
+  )
+  (None, [diag])
+}
