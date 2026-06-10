@@ -1,0 +1,407 @@
+//**
+// build/cst_ops.lis
+// capp-build
+//
+// Created by David Richardson on Tuesday, June 9, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Operations over the typed CST model (cst.lis): selector reconstruction,
+// type rendering, and position accessors.
+//
+// This is the first real load on the model.  Every function here is pure,
+// typed-in, typed-out, with no CST knowledge — exercisable against hand-built
+// values (see verify/model.lis) independently of any parsed input, so a
+// failure implicates the model or the operation, never the lowering.
+//
+// Scope discipline:
+//   — Position accessors are implemented for the closure required to make
+//     Statement.position() total — Statement, ExportStatement, Declaration,
+//     Expressions, Expression, PrimaryExpression, AssignmentExpression,
+//     CallExpression, MetaProperty — plus the Objective-J enums phase 6
+//     consumes.  The remaining small enums (patterns, import clauses, object
+//     members) gain accessors as consumers demand them; speculative breadth
+//     adds surface without load.
+//   — The selector enums (ObjjMethodSelector, ObjjMessageSelector,
+//     ObjjSelectorName) deliberately have no position accessor.  Their
+//     keyword forms are repeat1-backed slices, so a total accessor would rest
+//     on a grammar invariant (non-emptiness) the types do not encode.  Every
+//     struct containing a selector carries its own `pos`; diagnostics anchor
+//     there.
+//   — Constructors are added per-type as the lowering arms demand them; their
+//     correct shape is evident only at the point of construction.
+//
+// Selector reconstruction follows Objective-C selector canonical form: a
+// unary selector is its identifier; a keyword selector is the concatenation
+// of its parts, each part contributing its (possibly absent) name followed by
+// a colon.  `foo:bar:` has two named parts; `foo::` has a named first part
+// and an anonymous second.
+//
+// Type rendering produces the canonical source spelling, suitable for
+// diagnostics and symbol display.  Spellings are taken verbatim from
+// tree-sitter-objj/grammar.js (objj_multi_word_type, objj_method_type).
+//
+// **
+import "go:strings"
+
+// ---------------------------------------------------------------------------
+// Selector reconstruction
+// ---------------------------------------------------------------------------
+
+impl ObjjMethodSelector {
+  // selector_string reconstructs the canonical selector of a method
+  // declaration or definition: `description`, `initWithFrame:`,
+  // `tableView:objectValueForTableColumn:row:`.  An anonymous keyword part
+  // (no name before the colon) contributes a bare colon.
+  pub fn selector_string(self) -> string {
+    match self {
+      Unary(name) => name.text,
+      Keyword(parts) => {
+        let mut out = ""
+        for part in parts {
+          if let Some(name) = part.name_part { out += name.text }
+          out += ":"
+        }
+        out
+      },
+    }
+  }
+}
+
+impl ObjjMessageSelector {
+  // selector_string reconstructs the selector named by a message send,
+  // for matching against method symbols.  An anonymous keyword argument
+  // contributes a bare colon, mirroring the method-declaration form.
+  pub fn selector_string(self) -> string {
+    match self {
+      Unary(name) => name.text,
+      Keyword(arguments) => {
+        let mut out = ""
+        for argument in arguments {
+          if let Some(keyword) = argument.keyword { out += keyword.text }
+          out += ":"
+        }
+        out
+      },
+    }
+  }
+}
+
+impl ObjjSelectorName {
+  // selector_string reconstructs the selector named by an @selector(...)
+  // expression.  The grammar requires every keyword part to be named, so
+  // there is no anonymous-part case here.
+  pub fn selector_string(self) -> string {
+    match self {
+      Unary(name) => name.text,
+      Keyword(parts) => {
+        let mut out = ""
+        for part in parts {
+          out += part.name.text
+          out += ":"
+        }
+        out
+      },
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Type rendering
+// ---------------------------------------------------------------------------
+
+impl ObjjProtocolReferenceList {
+  // render produces the bracketed protocol list as it appears in source:
+  // `<CPCoding>`, `<CPCoding, CPCopying>`.
+  pub fn render(self) -> string {
+    let mut names: Slice<string> = []
+    for protocol in self.protocols {
+      names = names.append(protocol.text)
+    }
+    let joined = strings.Join(names, ", ")
+    f"<{joined}>"
+  }
+}
+
+impl ObjjMultiWordType {
+  // render produces the canonical multi-word spelling, verbatim from the
+  // grammar's objj_multi_word_type alternatives.
+  pub fn render(self) -> string {
+    match self {
+      UnsignedChar(_) => "unsigned char",
+      UnsignedShort(_) => "unsigned short",
+      UnsignedInt(_) => "unsigned int",
+      UnsignedLong(_) => "unsigned long",
+      SignedChar(_) => "signed char",
+      SignedShort(_) => "signed short",
+      SignedInt(_) => "signed int",
+      SignedLong(_) => "signed long",
+      LongLong(_) => "long long",
+      LongDouble(_) => "long double",
+      UnsignedLongLong(_) => "unsigned long long",
+      Unsigned(_) => "unsigned",
+      Signed(_) => "signed",
+      Long(_) => "long",
+      Short(_) => "short",
+      Char(_) => "char",
+      Int(_) => "int",
+    }
+  }
+
+  pub fn position(self) -> Position {
+    match self {
+      UnsignedChar(pos) |
+      UnsignedShort(pos) |
+      UnsignedInt(pos) |
+      UnsignedLong(pos) |
+      SignedChar(pos) |
+      SignedShort(pos) |
+      SignedInt(pos) |
+      SignedLong(pos) |
+      LongLong(pos) |
+      LongDouble(pos) |
+      UnsignedLongLong(pos) |
+      Unsigned(pos) |
+      Signed(pos) |
+      Long(pos) |
+      Short(pos) |
+      Char(pos) |
+      Int(pos) => pos,
+    }
+  }
+}
+
+impl ObjjType {
+  // render produces the canonical source spelling of an ivar, parameter, or
+  // return type: `CPString`, `id`, `id<CPCoding>`, `CPView<CPCoding>`,
+  // `unsigned long long`.
+  pub fn render(self) -> string {
+    match self {
+      Protocol(protocol_type) => {
+        let protocols = protocol_type.protocols.render()
+        f"{protocol_type.name.text}{protocols}"
+      },
+      MultiWord(multi_word) => multi_word.render(),
+      Id(id_type) => id_type.protocols.map_or(
+        "id",
+        |list| {
+          let protocols = list.render()
+          f"id{protocols}"
+        },
+      ),
+      Named(name) => name.text,
+    }
+  }
+
+  pub fn position(self) -> Position {
+    match self {
+      Protocol(protocol_type) => protocol_type.pos,
+      MultiWord(multi_word) => multi_word.position(),
+      Id(id_type) => id_type.pos,
+      Named(name) => name.pos,
+    }
+  }
+}
+
+impl ObjjMethodTypeKind {
+  // render produces the return-kind spelling inside a method type's
+  // parentheses: `@action`, `void`, or the rendered ObjjType.
+  pub fn render(self) -> string {
+    match self {
+      Action(_) => "@action",
+      Void(_) => "void",
+      Type(objj_type) => objj_type.render(),
+    }
+  }
+
+  pub fn position(self) -> Position {
+    match self {
+      Action(pos) | Void(pos) => pos,
+      Type(objj_type) => objj_type.position(),
+    }
+  }
+}
+
+impl ObjjMethodType {
+  // render produces the method type as written between its parentheses,
+  // including the optional async prefix: `void`, `async CPString`.
+  pub fn render(self) -> string {
+    let kind = self.return_kind.render()
+    if self.is_async { f"async {kind}" } else { kind }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Position accessors
+// ---------------------------------------------------------------------------
+// Each enum lacking a direct `pos` field gains a total position() that
+// projects the position of whichever payload it holds.  Structs need no
+// accessor: their `pos` field is the accessor.  Variants carrying a bare
+// Position payload yield it directly; or-patterns collapse those arms.
+// ObjjType, ObjjMultiWordType, and ObjjMethodTypeKind carry their position
+// accessors in their impl blocks above, beside render.
+
+impl Statement {
+  pub fn position(self) -> Position {
+    match self {
+      Export(statement) => statement.position(),
+      Import(statement) => statement.pos,
+      Debugger(statement) => statement.pos,
+      Expression(statement) => statement.pos,
+      Declaration(declaration) => declaration.position(),
+      BlockScope(statement) => statement.pos,
+      If(statement) => statement.pos,
+      Switch(statement) => statement.pos,
+      For(statement) => statement.pos,
+      ForIn(statement) => statement.pos,
+      While(statement) => statement.pos,
+      Do(statement) => statement.pos,
+      Try(statement) => statement.pos,
+      With(statement) => statement.pos,
+      Break(statement) => statement.pos,
+      Continue(statement) => statement.pos,
+      Return(statement) => statement.pos,
+      Throw(statement) => statement.pos,
+      Empty(statement) => statement.pos,
+      Labeled(statement) => statement.pos,
+      ObjjImport(statement) => statement.pos,
+      ObjjGlobal(statement) => statement.pos,
+      ObjjClassForward(statement) => statement.pos,
+      ObjjTypedef(statement) => statement.pos,
+      ObjjProtocol(statement) => statement.pos,
+      ObjjClassImpl(statement) => statement.pos,
+      PreprocIf(statement) => statement.pos,
+      PreprocDirective(statement) => statement.pos,
+    }
+  }
+}
+
+impl ExportStatement {
+  pub fn position(self) -> Position {
+    match self {
+      All(export) => export.pos,
+      Namespace(export) => export.pos,
+      Named(export) => export.pos,
+      Declaration(declaration) | DefaultDeclaration(declaration) => declaration.position(),
+      DefaultValue(expression) => expression.position(),
+    }
+  }
+}
+
+impl Declaration {
+  pub fn position(self) -> Position {
+    match self {
+      Function(declaration) => declaration.pos,
+      GeneratorFunction(declaration) => declaration.pos,
+      Class(declaration) => declaration.pos,
+      Lexical(declaration) => declaration.pos,
+      Variable(declaration) => declaration.pos,
+      Using(declaration) => declaration.pos,
+    }
+  }
+}
+
+impl Expressions {
+  pub fn position(self) -> Position {
+    match self {
+      Single(expression) => expression.position(),
+      Sequence(sequence) => sequence.pos,
+    }
+  }
+}
+
+impl Expression {
+  pub fn position(self) -> Position {
+    match self {
+      Primary(primary) => primary.position(),
+      Assignment(assignment) => assignment.position(),
+      AugmentedAssignment(expression) => expression.pos,
+      Await(expression) => expression.pos,
+      Unary(expression) => expression.pos,
+      Binary(expression) => expression.pos,
+      Ternary(expression) => expression.pos,
+      Update(expression) => expression.pos,
+      New(expression) => expression.pos,
+      Yield(expression) => expression.pos,
+    }
+  }
+}
+
+impl AssignmentExpression {
+  pub fn position(self) -> Position {
+    match self {
+      Standard(assignment) => assignment.pos,
+      ObjjDeref(assignment) => assignment.pos,
+    }
+  }
+}
+
+impl PrimaryExpression {
+  pub fn position(self) -> Position {
+    match self {
+      Subscript(expression) => expression.pos,
+      Member(expression) => expression.pos,
+      Parenthesized(expression) => expression.pos,
+      Identifier(identifier) => identifier.pos,
+      Undefined(literal) => literal.pos,
+      This(literal) => literal.pos,
+      Super(literal) => literal.pos,
+      Number(literal) => literal.pos,
+      String(literal) => literal.pos,
+      Template(template) => template.pos,
+      Regex(regex) => regex.pos,
+      True(literal) => literal.pos,
+      False(literal) => literal.pos,
+      Null(literal) => literal.pos,
+      Object(object) => object.pos,
+      Function(function) => function.pos,
+      Arrow(arrow) => arrow.pos,
+      Generator(generator) => generator.pos,
+      Class(class) => class.pos,
+      MetaProperty(meta) => meta.position(),
+      Call(call) => call.position(),
+      ObjjDictionary(literal) => literal.pos,
+      ObjjArray(literal) => literal.pos,
+      ObjjString(literal) => literal.pos,
+      ObjjSelector(expression) => expression.pos,
+      ObjjProtocol(expression) => expression.pos,
+      ObjjMessage(expression) => expression.pos,
+      NativeArray(array) => array.pos,
+      ObjjRef(expression) => expression.pos,
+      ObjjDeref(expression) => expression.pos,
+    }
+  }
+}
+
+impl CallExpression {
+  pub fn position(self) -> Position {
+    match self {
+      Call(call) => call.pos,
+      TemplateCall(call) => call.pos,
+      OptionalCall(call) => call.pos,
+    }
+  }
+}
+
+impl MetaProperty {
+  pub fn position(self) -> Position {
+    match self {
+      NewTarget(pos) | ImportMeta(pos) => pos,
+    }
+  }
+}
+
+impl ObjjVisibilitySpecifier {
+  pub fn position(self) -> Position {
+    match self {
+      Private(pos) | Protected(pos) | Package(pos) | Public(pos) => pos,
+    }
+  }
+}
+
+impl ObjjIvarModifier {
+  pub fn position(self) -> Position {
+    match self {
+      Outlet(pos) | IBOutlet(pos) | Weak(pos) | Strong(pos) => pos,
+    }
+  }
+}

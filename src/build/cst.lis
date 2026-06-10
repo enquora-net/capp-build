@@ -45,6 +45,10 @@
 // `return_type`, or `parameter_type` to avoid any collision with a reserved
 // word.  The +/- method indicator is `scope` (Class | Instance).
 //
+// Operations over these types (selector reconstruction, type rendering,
+// position accessors) live in cst_ops.lis; this file is declaration only,
+// so a grammar change diffs against it cleanly.
+//
 // **
 
 // ===========================================================================

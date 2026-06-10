@@ -1,0 +1,293 @@
+//**
+// verify/model.lis
+// capp-build
+//
+// Created by David Richardson on Tuesday, June 9, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Typed CST model verification.
+//
+// Exercises the operations in build/cst_ops.lis against hand-built values —
+// no parsing, no lowering, no filesystem.  Each check constructs a value of
+// the typed model directly and asserts the operation's output, so a failure
+// implicates the model or the operation in isolation.
+//
+// Invoke via `capp-build verify model`.
+//
+// **
+import "build"
+
+// ---------------------------------------------------------------------------
+// Construction helpers
+// ---------------------------------------------------------------------------
+
+fn at(row: int, col: int) -> build.Position {
+  build.Position { row, col }
+}
+
+fn ident(text: string) -> build.Identifier {
+  build.Identifier { text, pos: at(0, 0) }
+}
+
+fn sel_ident(text: string) -> build.ObjjSelectorIdentifier {
+  build.ObjjSelectorIdentifier { text, pos: at(0, 0) }
+}
+
+// named_part builds a keyword-selector part with a name: `name:(type)param`.
+fn named_part(name: string) -> build.ObjjMethodParameterPart {
+  build.ObjjMethodParameterPart { 
+    name_part: Some(sel_ident(name)),
+    parameter_name: ident("parameter"),
+    pos: at(0, 0),
+    ..,
+  }
+}
+
+// anonymous_part builds a keyword-selector part with no name: `:(type)param`.
+fn anonymous_part() -> build.ObjjMethodParameterPart {
+  build.ObjjMethodParameterPart { 
+    parameter_name: ident("parameter"),
+    pos: at(0, 0),
+    ..,
+  }
+}
+
+fn identifier_expression(name: build.Identifier) -> build.Expression {
+  build.Expression.Primary(build.PrimaryExpression.Identifier(name))
+}
+
+fn message_argument(keyword: Option<build.ObjjSelectorIdentifier>) -> build.ObjjMessageKeywordArgument {
+  build.ObjjMessageKeywordArgument { 
+    keyword,
+    arguments: [identifier_expression(ident("x"))],
+    pos: at(0, 0),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Assertion helpers
+// ---------------------------------------------------------------------------
+
+fn expect_string(label: string, got: string, want: string) -> VerifyResult {
+  if got == want {
+    VerifyResult { ok: true, label, detail: got }
+  } else {
+    VerifyResult { ok: false, label, detail: f"expected {want}, got {got}" }
+  }
+}
+
+fn expect_position(
+  label: string,
+  got: build.Position,
+  want_row: int,
+  want_col: int,
+) -> VerifyResult {
+  if got.row == want_row && got.col == want_col {
+    VerifyResult { ok: true, label, detail: f"({got.row}, {got.col})" }
+  } else {
+    VerifyResult { 
+      ok: false,
+      label,
+      detail: f"expected ({want_row}, {want_col}), got ({got.row}, {got.col})",
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Checks — selector reconstruction
+// ---------------------------------------------------------------------------
+
+fn check_unary_method_selector() -> VerifyResult {
+  let selector = build.ObjjMethodSelector.Unary(sel_ident("description"))
+  expect_string("selector: unary", selector.selector_string(), "description")
+}
+
+fn check_keyword_method_selector() -> VerifyResult {
+  let selector = build.ObjjMethodSelector.Keyword([
+    named_part("initWithFrame"),
+    named_part("delegate"),
+  ])
+  expect_string(
+    "selector: keyword",
+    selector.selector_string(),
+    "initWithFrame:delegate:",
+  )
+}
+
+fn check_anonymous_keyword_method_selector() -> VerifyResult {
+  let selector = build.ObjjMethodSelector.Keyword([
+    named_part("foo"),
+    anonymous_part(),
+  ])
+  expect_string(
+    "selector: anonymous keyword part",
+    selector.selector_string(),
+    "foo::",
+  )
+}
+
+fn check_message_selector() -> VerifyResult {
+  let selector = build.ObjjMessageSelector.Keyword([
+    message_argument(Some(sel_ident("compare"))),
+    message_argument(None),
+  ])
+  expect_string(
+    "selector: message with anonymous argument",
+    selector.selector_string(),
+    "compare::",
+  )
+}
+
+fn check_selector_expression_name() -> VerifyResult {
+  let name = build.ObjjSelectorName.Keyword([
+    build.ObjjSelectorNamePart { name: sel_ident("setName"), pos: at(0, 0) },
+  ])
+  expect_string("selector: @selector name", name.selector_string(), "setName:")
+}
+
+// ---------------------------------------------------------------------------
+// Checks — type rendering
+// ---------------------------------------------------------------------------
+
+fn check_named_type() -> VerifyResult {
+  let objj_type = build.ObjjType.Named(ident("CPString"))
+  expect_string("type: named", objj_type.render(), "CPString")
+}
+
+fn check_multi_word_type() -> VerifyResult {
+  let objj_type = build.ObjjType.MultiWord(build.ObjjMultiWordType.UnsignedLongLong(at(
+    0,
+    0,
+  )))
+  expect_string("type: multi-word", objj_type.render(), "unsigned long long")
+}
+
+fn check_bare_id_type() -> VerifyResult {
+  let objj_type = build.ObjjType.Id(build.ObjjIdType { pos: at(0, 0), .. })
+  expect_string("type: bare id", objj_type.render(), "id")
+}
+
+fn check_id_protocol_type() -> VerifyResult {
+  let list = build.ObjjProtocolReferenceList { 
+    protocols: [ident("CPCoding"), ident("CPCopying")],
+    pos: at(0, 0),
+  }
+  let objj_type = build.ObjjType.Id(
+    build.ObjjIdType { protocols: Some(list), pos: at(0, 0) },
+  )
+  expect_string(
+    "type: id with protocols",
+    objj_type.render(),
+    "id<CPCoding, CPCopying>",
+  )
+}
+
+fn check_protocol_qualified_type() -> VerifyResult {
+  let list = build.ObjjProtocolReferenceList { 
+    protocols: [ident("CPCoding")],
+    pos: at(0, 0),
+  }
+  let objj_type = build.ObjjType.Protocol(
+    build.ObjjProtocolType { 
+      name: ident("CPView"),
+      protocols: list,
+      pos: at(0, 0),
+    },
+  )
+  expect_string(
+    "type: protocol-qualified",
+    objj_type.render(),
+    "CPView<CPCoding>",
+  )
+}
+
+fn check_action_method_type() -> VerifyResult {
+  let method_type = build.ObjjMethodType { 
+    return_kind: build.ObjjMethodTypeKind.Action(at(0, 0)),
+    pos: at(0, 0),
+    ..,
+  }
+  expect_string("type: @action", method_type.render(), "@action")
+}
+
+fn check_async_method_type() -> VerifyResult {
+  let method_type = build.ObjjMethodType { 
+    is_async: true,
+    return_kind: build.ObjjMethodTypeKind.Type(build.ObjjType.Named(ident(
+      "CPString",
+    ))),
+    pos: at(0, 0),
+  }
+  expect_string("type: async return", method_type.render(), "async CPString")
+}
+
+// ---------------------------------------------------------------------------
+// Checks — position accessors
+// ---------------------------------------------------------------------------
+
+fn check_statement_position() -> VerifyResult {
+  let statement = build.Statement.Return(
+    build.ReturnStatement { value: None, pos: at(4, 2) },
+  )
+  expect_position("position: statement", statement.position(), 4, 2)
+}
+
+// Exercises the recursive accessor chain
+// Statement → ExportStatement → Expression → PrimaryExpression → Identifier:
+// the position surfaces from four enum levels down.
+fn check_recursive_position() -> VerifyResult {
+  let target = build.Identifier { text: "x", pos: at(7, 12) }
+  let statement = build.Statement.Export(build.ExportStatement.DefaultValue(identifier_expression(
+    target,
+  )))
+  expect_position("position: recursive descent", statement.position(), 7, 12)
+}
+
+fn check_position_payload_variant() -> VerifyResult {
+  let expression = build.Expression.Primary(build.PrimaryExpression.MetaProperty(build.MetaProperty.NewTarget(at(
+    9,
+    0,
+  ))))
+  expect_position(
+    "position: bare Position payload",
+    expression.position(),
+    9,
+    0,
+  )
+}
+
+fn check_objj_type_position() -> VerifyResult {
+  let objj_type = build.ObjjType.MultiWord(build.ObjjMultiWordType.LongDouble(at(
+    3,
+    8,
+  )))
+  expect_position("position: objj type", objj_type.position(), 3, 8)
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+// verify_model runs every model check and returns the complete result set.
+// The model has no external dependencies, so this is deterministic and
+// side-effect free.
+pub fn verify_model() -> Slice<VerifyResult> {
+  [
+    check_unary_method_selector(),
+    check_keyword_method_selector(),
+    check_anonymous_keyword_method_selector(),
+    check_message_selector(),
+    check_selector_expression_name(),
+    check_named_type(),
+    check_multi_word_type(),
+    check_bare_id_type(),
+    check_id_protocol_type(),
+    check_protocol_qualified_type(),
+    check_action_method_type(),
+    check_async_method_type(),
+    check_statement_position(),
+    check_recursive_position(),
+    check_position_payload_variant(),
+    check_objj_type_position(),
+  ]
+}

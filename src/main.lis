@@ -11,6 +11,7 @@
 // Command surface:
 //   capp-build build [--mode debug|release|clean] [--http2]
 //   capp-build verify root [path]
+//   capp-build verify model
 //   capp-build smoke cobra
 //   capp-build smoke capp
 //   capp-build smoke all
@@ -194,6 +195,22 @@ fn run_verify_root(cmd: Ref<cobra.Command>, args: Slice<string>) {
   cmd.Println(f"{icon}  {result.label}: {result.detail}")
 }
 
+fn run_verify_model(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  let results = verify.verify_model()
+  let mut failures = 0
+  for result in results {
+    let icon = if result.ok { "✓" } else { "✗" }
+    cmd.Println(f"{icon}  {result.label}: {result.detail}")
+    if !result.ok { failures += 1 }
+  }
+  let total = results.length()
+  if failures > 0 {
+    cmd.Println(f"{failures} of {total} model checks failed")
+  } else {
+    cmd.Println(f"all {total} model checks passed")
+  }
+}
+
 fn new_verify_cmd() -> cobra.Command {
   let mut verify_cmd = make_group(
     "verify",
@@ -204,7 +221,13 @@ fn new_verify_cmd() -> cobra.Command {
     "Locate the project root",
     run_verify_root,
   )
+  let model_cmd = make_command(
+    "model",
+    "Exercise the typed CST model against hand-built values",
+    run_verify_model,
+  )
   verify_cmd.AddCommand(&root_cmd)
+  verify_cmd.AddCommand(&model_cmd)
   verify_cmd
 }
 
