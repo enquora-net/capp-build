@@ -178,7 +178,11 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
           match file_opt {
             None => (),
             Some(file) => {
-              let imports = if file.HasError() {
+              let source = SourceFile { 
+                path: file.Path,
+                kind: classify(file.Path),
+              }
+              if file.HasError() {
                 for e in file.Errors {
                   diags = diags.append(diag_error_at(
                     phase,
@@ -188,17 +192,20 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
                     e.Column as int,
                   ))
                 }
-                []
+                // No tree to lower; the zero-filled Program is empty.
+                next_frontier = next_frontier.append(
+                  ParsedUnit { source, imports: [], .. },
+                )
               } else {
-                extract_imports(file.Root())
+                let imports = extract_imports(file.Root())
+                let lowered = lower_program(file.Root(), source)
+                for d in lowered.diags {
+                  diags = diags.append(d)
+                }
+                next_frontier = next_frontier.append(
+                  ParsedUnit { source, imports, program: lowered.program },
+                )
               }
-              let source = SourceFile { 
-                path: file.Path,
-                kind: classify(file.Path),
-              }
-              next_frontier = next_frontier.append(
-                ParsedUnit { source, imports },
-              )
             },
           }
         }

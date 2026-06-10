@@ -32,6 +32,7 @@ pub enum RawImport {
 pub struct ParsedUnit {
   pub source: SourceFile,
   pub imports: Slice<RawImport>,
+  pub program: Program, // typed AST from the lowering pass; possibly partial
 }
 
 pub struct ParsedUnits {
@@ -90,7 +91,11 @@ pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
 
 // run_parse_sources parses every ObjectiveJ and Javascript file in the source
 // tree in a single parallel batch, extracts @import directives from each CST,
-// and returns the typed ParsedUnits.  The CSTs are released before returning.
+// and lowers each CST into its typed Program while the trees are live.  The
+// CSTs are released before returning; downstream phases consume only the
+// typed AST.  Lowering diagnostics (unhandled node kinds, malformed nodes)
+// are printed here — they drive the breadth-first arm-filling loop — and
+// merged into the returned diagnostics.
 pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
   let phase = BuildPhase.ParseSources
   let mut diags: Slice<Diagnostic> = []
@@ -124,6 +129,8 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
   defer pr.Close()
 
   let mut units: Slice<ParsedUnit> = []
+  let mut lower_diag_count = 0
+  let mut statement_count = 0
 
   for file_opt in pr.Files {
     match file_opt {
@@ -142,13 +149,35 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
         } else {
           let imports = extract_imports(file.Root())
           let source = SourceFile { path: file.Path, kind: classify(file.Path) }
-          units = units.append(ParsedUnit { source, imports })
+          let lowered = lower_program(file.Root(), source)
+          for d in lowered.diags {
+            diags = diags.append(d)
+            print_lowering_diag(d)
+          }
+          lower_diag_count += lowered.diags.length()
+          statement_count += lowered.program.body.length()
+          units = units.append(
+            ParsedUnit { source, imports, program: lowered.program },
+          )
         }
       },
     }
   }
 
   fmt.Println(f"✓  parse sources: {units.length()} units")
+  fmt.Println(
+    f"✓  lower sources: {statement_count} top-level statements, {lower_diag_count} diagnostics",
+  )
 
   Ok(ParsedUnits { units, diags })
+}
+
+// print_lowering_diag surfaces one lowering diagnostic in the build output.
+// Lowering diagnostics carry file and position by construction; absent values
+// indicate a defect in the diagnostic itself and print as 0.
+fn print_lowering_diag(d: Diagnostic) {
+  let file = d.file.unwrap_or("")
+  let line = d.line.unwrap_or(0)
+  let col = d.col.unwrap_or(0)
+  fmt.Println(f"   {d.message}  {file}:{line}:{col}")
 }

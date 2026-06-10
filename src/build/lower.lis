@@ -14,7 +14,9 @@
 // tree-sitter erases the grammar's closed node-kind set to strings at the C
 // boundary.  Every consumer above this module pattern-matches over closed
 // Lisette sum types with compiler-checked exhaustiveness; this module is the
-// firebreak that converts strings into those types exactly once.
+// firebreak that converts strings into those types exactly once.  Kind and
+// field strings come exclusively from capp-parse's constant surface, so a
+// mistyped name is a compile error rather than a silent dispatch miss.
 //
 // Because the dispatch is not exhaustiveness-checked by the compiler, every
 // dispatch carries a catch-all arm that records an unhandled node kind as a
@@ -23,26 +25,34 @@
 //
 // Diagnostic discipline: lowering is purely functional.  Each helper RETURNS
 // its diagnostics alongside its result; callers merge.  No shared mutable
-// accumulator is threaded by reference.  The cost is an explicit merge at each
-// call site; the benefit is that every helper is a pure function of its node,
-// trivially testable against hand-built CST input.
+// accumulator is threaded by reference.  The Lowering struct carries only the
+// file path, read-only, so diagnostics attribute to the right file without
+// threading a parameter through every signature.
 //
-// STATUS: top-down skeleton for architectural review.
-//   lower_program     — IMPLEMENTED (root level: hash_bang + statement list)
-//   lower_statement   — STUB: dispatches, but every kind currently routes to
-//                       the unhandled catch-all pending per-node implementation
-// The descent stops at the statement boundary by design.  Each statement kind
-// is filled in subsequently, one grammar production at a time.
+// Wrapper nodes: several visible choice rules (objj_implementation_member,
+// objj_instance_variable, objj_message_selector, objj_selector_identifier,
+// objj_type) produce a wrapper node whose single meaning is its first named
+// child; the corresponding helpers dispatch on that child.  This is grammar
+// fact, confirmed against node-types.json, not convention.
 //
-// Node-kind constants: capp-parse currently exports only a handful
-// (NodeKindObjjImport, NodeKindSystemLibString, NodeKindString).  The full
-// descent requires the complete set; until capp-parse exports them, string
-// literals are used here and marked CONST-PENDING.  Expanding capp-parse's
-// constant surface is an author note — it converts a mistyped kind string from
-// a silent miss into a compile error.
+// STATUS: arms cover the toolchain_test corpus —
+//   statements:   objj_import, function_declaration, objj_class_implementation,
+//                 expression_statement, empty, debugger, return
+//   expressions:  identifier, literals, string, call (plain), member,
+//                 parenthesized, objj_message_expression
+//   objj:         method definitions (unary + keyword selectors), ivars with
+//                 modifiers, types (named / id / protocol-qualified /
+//                 multi-word)
+// Everything else routes through the unhandled catch-alls.  The breadth-first
+// loop is: build a corpus, read the unhandled diagnostics, add the named arms,
+// repeat — driving the diagnostic count to zero per corpus before widening.
+//
+// Deferred with visible diagnostics: template and optional-chain calls,
+// accessors directives, preprocessor blocks, destructuring parameters.
 //
 // **
 import "go:github.com/enquora-net/capp-parse"
+import "go:strings"
 
 // ---------------------------------------------------------------------------
 // Lowering result
@@ -60,7 +70,7 @@ pub struct LoweredUnit {
 }
 
 // ---------------------------------------------------------------------------
-// Position helper
+// Module-level helpers (pure, no diagnostics)
 // ---------------------------------------------------------------------------
 
 // node_pos captures a node's 0-based start position.  Every lowered node's
@@ -70,45 +80,73 @@ fn node_pos(node: capp.CSTNode) -> Position {
   Position { row: node.StartRow() as int, col: node.StartColumn() as int }
 }
 
+fn ident_of(node: capp.CSTNode) -> Identifier {
+  Identifier { text: node.Text(), pos: node_pos(node) }
+}
+
+// selector_ident_of lowers an objj_selector_identifier wrapper.  The wrapper
+// holds a single identifier child (the grammar aliases reserved words to
+// identifier in selector position); Text() of the wrapper is that identifier's
+// text, so no descent is needed.
+fn selector_ident_of(node: capp.CSTNode) -> ObjjSelectorIdentifier {
+  ObjjSelectorIdentifier { text: node.Text(), pos: node_pos(node) }
+}
+
+// has_anonymous_child reports whether node has a direct anonymous child of the
+// given kind.  Anonymous tokens report their literal text as their kind, so
+// this detects optional keywords ("async") and markers ("...").
+fn has_anonymous_child(node: capp.CSTNode, kind: string) -> bool {
+  for i in 0..node.ChildCount() {
+    if node.Child(i).Kind() == kind { return true }
+  }
+  false
+}
+
+// skippable reports node kinds that are grammar extras and carry no AST
+// content.  Comments are named nodes and so appear in named-child iteration;
+// every structural loop consults this.  (html_comment is declared in the
+// grammar's externals for scanner ABI compatibility but appears in no rule;
+// the parser cannot produce it, so it is not checked here.)
+fn skippable(kind: string) -> bool {
+  kind == capp.NodeKindComment
+}
+
+fn merge_diags(into: Slice<Diagnostic>, from: Slice<Diagnostic>) -> Slice<Diagnostic> {
+  let mut out = into
+  for d in from {
+    out = out.append(d)
+  }
+  out
+}
+
 // ---------------------------------------------------------------------------
-// Root: Program
+// Entry point
 // ---------------------------------------------------------------------------
 
 // lower_program lowers the grammar root:
 //   program: seq(optional(hash_bang_line), repeat(statement))
-//
-// The root node's children are the optional hash-bang line followed by the
-// top-level statements, in source order.  Anonymous/extra nodes (comments,
-// punctuation) are skipped by kind.  Each recognised statement is lowered;
-// unrecognised kinds route through lower_statement's catch-all.
-//
-// diags accumulates across the whole file by merging each helper's returned
-// diagnostics, so the returned LoweredUnit carries the complete set.
 pub fn lower_program(root: capp.CSTNode, source: SourceFile) -> LoweredUnit {
+  let lowering = Lowering { path: source.path }
   let mut diags: Slice<Diagnostic> = []
   let mut hash_bang: Option<HashBangLine> = None
   let mut body: Slice<Statement> = []
 
-  for i in 0..root.ChildCount() {
-    let child = root.Child(i)
+  for i in 0..root.NamedChildCount() {
+    let child = root.NamedChild(i)
     let kind = child.Kind()
 
-    if kind == "hash_bang_line" {
-      // CONST-PENDING
+    if kind == capp.NodeKindHashBangLine {
       hash_bang = Some(
         HashBangLine { text: child.Text(), pos: node_pos(child) },
       )
-    } else if is_skippable(kind) {
-      () // comments / extras: not structural
+    } else if skippable(kind) {
+      ()
     } else {
-      // Each helper returns its diagnostics; the caller merges.
-      let (stmt_opt, stmt_diags) = lower_statement(child)
-      for d in stmt_diags {
-        diags = diags.append(d)
-      }
+      let (stmt_opt, stmt_diags) = lowering.statement(child)
+      diags = merge_diags(diags, stmt_diags)
       match stmt_opt {
         Some(stmt) => body = body.append(stmt),
-        None => (), // unhandled; diagnostic already in stmt_diags
+        None => (), // unhandled or malformed; diagnostic already recorded
       }
     }
   }
@@ -120,59 +158,1185 @@ pub fn lower_program(root: capp.CSTNode, source: SourceFile) -> LoweredUnit {
   }
 }
 
-// is_skippable reports node kinds that are grammar `extras` or pure
-// punctuation and carry no AST content.  Centralised so the skip set is
-// declared once rather than scattered through every child loop.
-fn is_skippable(kind: string) -> bool {
-  kind == "comment" || kind == "html_comment" // CONST-PENDING
+// ---------------------------------------------------------------------------
+// Lowering context
+// ---------------------------------------------------------------------------
+
+// Lowering carries the read-only file path for diagnostic attribution.  All
+// methods are pure functions of their node; none mutate shared state.
+struct Lowering { path: string }
+
+impl Lowering {
+  // unhandled records a coverage gap: a node reached by a dispatch with no
+  // implementing arm.  `what` names the dispatch site, so the diagnostic reads
+  // "unhandled statement kind 'with_statement'" rather than a bare kind.
+  fn unhandled(self, node: capp.CSTNode, what: string, kind: string) -> Slice<Diagnostic> {
+    let pos = node_pos(node)
+    [
+      diag_warn_at(
+        BuildPhase.BuildSymbolTable,
+        f"lowering: unhandled {what} kind '{kind}'",
+        self.path,
+        pos.row,
+        pos.col,
+      ),
+    ]
+  }
+
+  // malformed records a node that matched a handled kind but lacked a
+  // component the grammar marks required.  Reaching this implies a parser or
+  // lowering defect, not a user error; it is surfaced rather than asserted.
+  fn malformed(self, node: capp.CSTNode, what: string) -> Slice<Diagnostic> {
+    let pos = node_pos(node)
+    [
+      diag_warn_at(
+        BuildPhase.BuildSymbolTable,
+        f"lowering: malformed {what}",
+        self.path,
+        pos.row,
+        pos.col,
+      ),
+    ]
+  }
+
+  // -------------------------------------------------------------------------
+  // Statements
+  // -------------------------------------------------------------------------
+
+  fn statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    let pos = node_pos(node)
+
+    if kind == capp.NodeKindObjjImport { return self.objj_import(node) }
+    if kind == capp.NodeKindFunctionDeclaration {
+      let (decl_opt, diags) = self.function_declaration(node)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(Statement.Declaration(Declaration.Function(decl))), diags)
+    }
+    if kind == capp.NodeKindObjjClassImplementation {
+      return self.class_implementation(node)
+    }
+    if kind == capp.NodeKindExpressionStatement {
+      return self.expression_statement(node)
+    }
+    if kind == capp.NodeKindEmptyStatement {
+      return (Some(Statement.Empty(EmptyStatement { pos })), [])
+    }
+    if kind == capp.NodeKindDebuggerStatement {
+      return (Some(Statement.Debugger(DebuggerStatement { pos })), [])
+    }
+    if kind == capp.NodeKindReturnStatement {
+      return self.return_statement(node)
+    }
+
+    (None, self.unhandled(node, "statement", kind))
+  }
+
+  fn objj_import(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    match node.ChildByFieldName(capp.FieldPath) {
+      None => (None, self.malformed(node, "@import without path")),
+      Some(path_node) => {
+        let path_kind = path_node.Kind()
+        if path_kind == capp.NodeKindSystemLibString {
+          let lib = SystemLibString { 
+            text: path_node.Text(),
+            pos: node_pos(path_node),
+          }
+          let directive = ObjjImport { path: ObjjImportPath.System(lib), pos }
+          return (Some(Statement.ObjjImport(directive)), [])
+        }
+        if path_kind == capp.NodeKindString {
+          let (value, diags) = self.string_literal(path_node)
+          let directive = ObjjImport { path: ObjjImportPath.Local(value), pos }
+          return (Some(Statement.ObjjImport(directive)), diags)
+        }
+        (None, self.unhandled(path_node, "import path", path_kind))
+      },
+    }
+  }
+
+  fn expression_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    // expression_statement holds exactly one named child: an expression or a
+    // sequence_expression (the _expressions hidden choice).
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (exprs_opt, diags) = self.expressions(child)
+      let Some(exprs) = exprs_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Statement.Expression(
+          ExpressionStatement { expression: &exprs, pos },
+        )),
+        diags,
+      )
+    }
+    (None, self.malformed(node, "expression statement without expression"))
+  }
+
+  fn return_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut value: Option<Expressions> = None
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (exprs_opt, ds) = self.expressions(child)
+      diags = merge_diags(diags, ds)
+      value = exprs_opt
+      break
+    }
+    (Some(Statement.Return(ReturnStatement { value, pos })), diags)
+  }
+
+  fn statement_block(self, node: capp.CSTNode) -> (StatementBlock, Slice<Diagnostic>) {
+    let mut body: Slice<Statement> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (stmt_opt, ds) = self.statement(child)
+      diags = merge_diags(diags, ds)
+      match stmt_opt {
+        Some(stmt) => body = body.append(stmt),
+        None => (),
+      }
+    }
+    (StatementBlock { body, pos: node_pos(node) }, diags)
+  }
+
+  // -------------------------------------------------------------------------
+  // Declarations
+  // -------------------------------------------------------------------------
+
+  // function_declaration lowers to the bare FunctionDeclaration so that both
+  // the statement arm and ObjjImplementationMember.Function can wrap it.
+  fn function_declaration(self, node: capp.CSTNode) -> (Option<FunctionDeclaration>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_async = has_anonymous_child(node, "async")
+
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "function without name")),
+    }
+    let parameters_node = match node.ChildByFieldName(capp.FieldParameters) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "function without parameters")),
+    }
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "function without body")),
+    }
+
+    let (parameters, param_diags) = self.formal_parameters(parameters_node)
+    let (body, body_diags) = self.statement_block(body_node)
+    let diags = merge_diags(param_diags, body_diags)
+
+    let decl = FunctionDeclaration { 
+      is_async,
+      name: ident_of(name_node),
+      parameters,
+      body,
+      pos,
+    }
+    (Some(decl), diags)
+  }
+
+  fn formal_parameters(self, node: capp.CSTNode) -> (FormalParameters, Slice<Diagnostic>) {
+    let mut parameters: Slice<FormalParameter> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindIdentifier {
+        let parameter = FormalParameter.Pattern(Pattern.Lhs(LhsExpression.Identifier(ident_of(
+          child,
+        ))))
+        parameters = parameters.append(parameter)
+      } else {
+        // Destructuring, rest, and default parameters are deferred.
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "formal parameter", kind),
+        )
+      }
+    }
+    (FormalParameters { parameters, pos: node_pos(node) }, diags)
+  }
+
+  // -------------------------------------------------------------------------
+  // Expressions
+  // -------------------------------------------------------------------------
+
+  // expressions lowers the _expressions position: one expression or a comma
+  // sequence.
+  fn expressions(self, node: capp.CSTNode) -> (Option<Expressions>, Slice<Diagnostic>) {
+    if node.Kind() == capp.NodeKindSequenceExpression {
+      let mut items: Slice<Expression> = []
+      let mut diags: Slice<Diagnostic> = []
+      for i in 0..node.NamedChildCount() {
+        let child = node.NamedChild(i)
+        if skippable(child.Kind()) { continue }
+        let (expr_opt, ds) = self.expression(child)
+        diags = merge_diags(diags, ds)
+        match expr_opt {
+          Some(expr) => items = items.append(expr),
+          None => (),
+        }
+      }
+      let sequence = SequenceExpression { items, pos: node_pos(node) }
+      return (Some(Expressions.Sequence(sequence)), diags)
+    }
+
+    let (expr_opt, diags) = self.expression(node)
+    let Some(expr) = expr_opt else {
+      return (None, diags)
+    }
+    (Some(Expressions.Single(expr)), diags)
+  }
+
+  fn expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    let pos = node_pos(node)
+
+    if kind == capp.NodeKindIdentifier {
+      return (
+        Some(Expression.Primary(PrimaryExpression.Identifier(ident_of(node)))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindNumber {
+      let literal = NumberLiteral { text: node.Text(), pos }
+      return (Some(Expression.Primary(PrimaryExpression.Number(literal))), [])
+    }
+    if kind == capp.NodeKindString {
+      let (literal, diags) = self.string_literal(node)
+      return (
+        Some(Expression.Primary(PrimaryExpression.String(literal))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindTrue {
+      return (
+        Some(Expression.Primary(PrimaryExpression.True(TrueLiteral { pos }))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindFalse {
+      return (
+        Some(Expression.Primary(PrimaryExpression.False(FalseLiteral { pos }))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindNull {
+      return (
+        Some(Expression.Primary(PrimaryExpression.Null(NullLiteral { pos }))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindUndefined {
+      return (
+        Some(Expression.Primary(PrimaryExpression.Undefined(
+          UndefinedLiteral { pos },
+        ))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindThis {
+      return (
+        Some(Expression.Primary(PrimaryExpression.This(ThisLiteral { pos }))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindSuper {
+      return (
+        Some(Expression.Primary(PrimaryExpression.Super(SuperLiteral { pos }))),
+        [],
+      )
+    }
+    if kind == capp.NodeKindCallExpression { return self.call_expression(node) }
+    if kind == capp.NodeKindMemberExpression {
+      return self.member_expression(node)
+    }
+    if kind == capp.NodeKindParenthesizedExpression {
+      let (paren_opt, diags) = self.parenthesized(node)
+      let Some(paren) = paren_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.Parenthesized(paren))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindObjjMessageExpression {
+      return self.message_expression(node)
+    }
+
+    (None, self.unhandled(node, "expression", kind))
+  }
+
+  fn parenthesized(self, node: capp.CSTNode) -> (Option<ParenthesizedExpression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (exprs_opt, diags) = self.expressions(child)
+      let Some(exprs) = exprs_opt else {
+        return (None, diags)
+      }
+      return (Some(ParenthesizedExpression { expression: &exprs, pos }), diags)
+    }
+    (None, self.malformed(node, "parenthesized expression without content"))
+  }
+
+  fn string_literal(self, node: capp.CSTNode) -> (StringLiteral, Slice<Diagnostic>) {
+    let mut parts: Slice<StringPart> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindStringFragment {
+        let fragment = StringFragment { 
+          text: child.Text(),
+          pos: node_pos(child),
+        }
+        parts = parts.append(StringPart.Fragment(fragment))
+      } else if kind == capp.NodeKindEscapeSequence {
+        let escape = EscapeSequence { text: child.Text(), pos: node_pos(child) }
+        parts = parts.append(StringPart.Escape(escape))
+      } else if skippable(kind) {
+        ()
+      } else {
+        diags = merge_diags(diags, self.unhandled(child, "string part", kind))
+      }
+    }
+    (StringLiteral { parts, pos: node_pos(node) }, diags)
+  }
+
+  fn call_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    // Optional-chain calls (f?.()) and template calls (f`...`) are distinct
+    // CallExpression variants; both deferred.
+    match node.ChildByFieldName(capp.FieldOptionalChain) {
+      Some(_) => return (
+        None,
+        self.unhandled(node, "call form", "optional-chain call"),
+      ),
+      None => (),
+    }
+    let arguments_node = match node.ChildByFieldName(capp.FieldArguments) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "call without arguments")),
+    }
+    if arguments_node.Kind() == capp.NodeKindTemplateString {
+      return (None, self.unhandled(node, "call form", "template call"))
+    }
+
+    let function_node = match node.ChildByFieldName(capp.FieldFunction) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "call without callee")),
+    }
+
+    let mut diags: Slice<Diagnostic> = []
+    let callee = if function_node.Kind() == capp.NodeKindImport {
+      CallTarget.Import(ImportToken { pos: node_pos(function_node) })
+    } else {
+      let (callee_opt, ds) = self.expression(function_node)
+      diags = merge_diags(diags, ds)
+      match callee_opt {
+        Some(callee_expr) => CallTarget.Expression(&callee_expr),
+        None => return (None, diags),
+      }
+    }
+
+    let (arguments, arg_diags) = self.arguments(arguments_node)
+    diags = merge_diags(diags, arg_diags)
+
+    let call = PlainCall { callee, arguments, pos }
+    (
+      Some(Expression.Primary(PrimaryExpression.Call(CallExpression.Call(call)))),
+      diags,
+    )
+  }
+
+  fn arguments(self, node: capp.CSTNode) -> (Arguments, Slice<Diagnostic>) {
+    let mut items: Slice<Argument> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindSpreadElement {
+        let (spread_opt, ds) = self.spread(child)
+        diags = merge_diags(diags, ds)
+        match spread_opt {
+          Some(spread) => items = items.append(Argument.Spread(spread)),
+          None => (),
+        }
+      } else {
+        let (expr_opt, ds) = self.expression(child)
+        diags = merge_diags(diags, ds)
+        match expr_opt {
+          Some(expr) => items = items.append(Argument.Expression(&expr)),
+          None => (),
+        }
+      }
+    }
+    (Arguments { items, pos: node_pos(node) }, diags)
+  }
+
+  fn spread(self, node: capp.CSTNode) -> (Option<SpreadElement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (expr_opt, diags) = self.expression(child)
+      let Some(expr) = expr_opt else {
+        return (None, diags)
+      }
+      return (Some(SpreadElement { argument: &expr, pos }), diags)
+    }
+    (None, self.malformed(node, "spread without argument"))
+  }
+
+  fn member_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    let object_node = match node.ChildByFieldName(capp.FieldObject) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "member access without object"),
+      ),
+    }
+    let property_node = match node.ChildByFieldName(capp.FieldProperty) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "member access without property"),
+      ),
+    }
+
+    let mut diags: Slice<Diagnostic> = []
+    let object = if object_node.Kind() == capp.NodeKindImport {
+      MemberObject.Import(ImportToken { pos: node_pos(object_node) })
+    } else {
+      let (object_opt, ds) = self.expression(object_node)
+      diags = merge_diags(diags, ds)
+      match object_opt {
+        Some(object_expr) => MemberObject.Expression(&object_expr),
+        None => return (None, diags),
+      }
+    }
+
+    let optional_chain = node
+      .ChildByFieldName(capp.FieldOptionalChain)
+      .is_some()
+
+    let property = if property_node.Kind() ==
+    capp.NodeKindPrivatePropertyIdentifier {
+      MemberProperty.Private(
+        PrivatePropertyIdentifier { 
+          text: property_node.Text(),
+          pos: node_pos(property_node),
+        },
+      )
+    } else {
+      MemberProperty.Property(ident_of(property_node))
+    }
+
+    let member = MemberExpression { object, optional_chain, property, pos }
+    (Some(Expression.Primary(PrimaryExpression.Member(member))), diags)
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — message expressions
+  // -------------------------------------------------------------------------
+
+  fn message_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    let receiver_node = match node.ChildByFieldName(capp.FieldReceiver) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "message without receiver")),
+    }
+    let selector_node = match node.ChildByFieldName(capp.FieldSelector) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "message without selector")),
+    }
+
+    let (receiver_opt, receiver_diags) = self.expression(receiver_node)
+    let mut diags = receiver_diags
+    let receiver = match receiver_opt {
+      Some(receiver_expr) => receiver_expr,
+      None => return (None, diags),
+    }
+
+    let (selector_opt, selector_diags) = self.message_selector(selector_node)
+    diags = merge_diags(diags, selector_diags)
+    let selector = match selector_opt {
+      Some(sel) => sel,
+      None => return (None, diags),
+    }
+
+    let message = ObjjMessageExpression { receiver: &receiver, selector, pos }
+    (Some(Expression.Primary(PrimaryExpression.ObjjMessage(message))), diags)
+  }
+
+  // message_selector lowers the objj_message_selector wrapper: its named
+  // children are either a single objj_selector_identifier (unary send) or one
+  // or more objj_message_keyword_argument nodes (keyword send).
+  fn message_selector(self, node: capp.CSTNode) -> (Option<ObjjMessageSelector>, Slice<Diagnostic>) {
+    if node.NamedChildCount() == 0 {
+      return (None, self.malformed(node, "message selector without content"))
+    }
+
+    let first = node.NamedChild(0)
+    if first.Kind() == capp.NodeKindObjjSelectorIdentifier {
+      return (Some(ObjjMessageSelector.Unary(selector_ident_of(first))), [])
+    }
+
+    let mut arguments: Slice<ObjjMessageKeywordArgument> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindObjjMessageKeywordArgument {
+        let (argument_opt, ds) = self.keyword_argument(child)
+        diags = merge_diags(diags, ds)
+        match argument_opt {
+          Some(argument) => arguments = arguments.append(argument),
+          None => (),
+        }
+      } else {
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "message selector part", kind),
+        )
+      }
+    }
+
+    if arguments.is_empty() {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "keyword selector lowered no arguments"),
+        ),
+      )
+    }
+    (Some(ObjjMessageSelector.Keyword(arguments)), diags)
+  }
+
+  // keyword_argument lowers one `name: expr` (or anonymous `: expr`) part of a
+  // keyword message send.  The keyword is the fielded objj_selector_identifier
+  // child; the argument expressions are the remaining named children.
+  fn keyword_argument(self, node: capp.CSTNode) -> (Option<ObjjMessageKeywordArgument>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let keyword = node
+      .ChildByFieldName(capp.FieldKeyword)
+      .map(selector_ident_of)
+
+    let mut arguments: Slice<Expression> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      // The keyword child carries the objj_selector_identifier kind; argument
+      // expressions are concrete expression kinds and can never carry it.
+      if kind == capp.NodeKindObjjSelectorIdentifier || skippable(kind) {
+        continue
+      }
+      let (expr_opt, ds) = self.expression(child)
+      diags = merge_diags(diags, ds)
+      match expr_opt {
+        Some(expr) => arguments = arguments.append(expr),
+        None => (),
+      }
+    }
+
+    if arguments.is_empty() {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "keyword argument without expression"),
+        ),
+      )
+    }
+    (Some(ObjjMessageKeywordArgument { keyword, arguments, pos }), diags)
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — class implementation
+  // -------------------------------------------------------------------------
+
+  fn class_implementation(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "@implementation without name"),
+      ),
+    }
+
+    let superclass = node.ChildByFieldName(capp.FieldSuperclass).map(ident_of)
+    let category = node.ChildByFieldName(capp.FieldCategory).map(ident_of)
+    let protocols = node
+      .ChildByFieldName(capp.FieldProtocols)
+      .map(protocol_list)
+
+    let mut ivars: Option<ObjjInstanceVariables> = None
+    let mut members: Slice<ObjjImplementationMember> = []
+    let mut diags: Slice<Diagnostic> = []
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      // Fielded children (name, superclass, category, protocols) also appear
+      // in named-child iteration; they are captured above and skipped here.
+      if kind == capp.NodeKindIdentifier ||
+      kind == capp.NodeKindObjjProtocolReferenceList ||
+      skippable(kind) {
+        continue
+      }
+      if kind == capp.NodeKindObjjInstanceVariables {
+        let (block, ds) = self.instance_variables(child)
+        diags = merge_diags(diags, ds)
+        ivars = Some(block)
+      } else if kind == capp.NodeKindObjjImplementationMember {
+        let (member_opt, ds) = self.implementation_member(child)
+        diags = merge_diags(diags, ds)
+        match member_opt {
+          Some(member) => members = members.append(member),
+          None => (),
+        }
+      } else {
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "class body item", kind),
+        )
+      }
+    }
+
+    let class_impl = ObjjClassImplementation { 
+      name: ident_of(name_node),
+      superclass,
+      category,
+      protocols,
+      ivars,
+      members,
+      pos,
+    }
+    (Some(Statement.ObjjClassImpl(class_impl)), diags)
+  }
+
+  // implementation_member lowers the objj_implementation_member wrapper: a
+  // single named child carrying the member proper.
+  fn implementation_member(self, node: capp.CSTNode) -> (Option<ObjjImplementationMember>, Slice<Diagnostic>) {
+    if node.NamedChildCount() == 0 {
+      return (
+        None,
+        self.malformed(node, "implementation member without content"),
+      )
+    }
+    let child = node.NamedChild(0)
+    let kind = child.Kind()
+
+    if kind == capp.NodeKindObjjMethodDefinition {
+      let (method_opt, diags) = self.method_definition(child)
+      let Some(method) = method_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjImplementationMember.Method(method)), diags)
+    }
+    if kind == capp.NodeKindFunctionDeclaration {
+      let (decl_opt, diags) = self.function_declaration(child)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjImplementationMember.Function(decl)), diags)
+    }
+    if kind == capp.NodeKindEmptyStatement {
+      return (
+        Some(ObjjImplementationMember.Empty(
+          EmptyStatement { pos: node_pos(child) },
+        )),
+        [],
+      )
+    }
+    if kind == capp.NodeKindPreprocDirective {
+      let directive = PreprocDirective { 
+        text: child.Text(),
+        pos: node_pos(child),
+      }
+      return (Some(ObjjImplementationMember.PreprocDirective(directive)), [])
+    }
+
+    // objj_global_declaration, variable_declaration, and generator functions
+    // inside class bodies are deferred.
+    (None, self.unhandled(child, "implementation member", kind))
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — instance variables
+  // -------------------------------------------------------------------------
+
+  fn instance_variables(self, node: capp.CSTNode) -> (ObjjInstanceVariables, Slice<Diagnostic>) {
+    let mut members: Slice<ObjjIvarMember> = []
+    let mut diags: Slice<Diagnostic> = []
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindObjjInstanceVariable {
+        let (variable_opt, ds) = self.instance_variable(child)
+        diags = merge_diags(diags, ds)
+        match variable_opt {
+          Some(variable) => members = members.append(ObjjIvarMember.Variable(
+            variable,
+          )),
+          None => (),
+        }
+      } else {
+        // preproc_ivar_if_block is deferred.
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "ivar block item", kind),
+        )
+      }
+    }
+
+    (ObjjInstanceVariables { members, pos: node_pos(node) }, diags)
+  }
+
+  // instance_variable lowers the objj_instance_variable wrapper: a single
+  // named child that is either a visibility specifier or a field definition.
+  fn instance_variable(self, node: capp.CSTNode) -> (Option<ObjjInstanceVariable>, Slice<Diagnostic>) {
+    if node.NamedChildCount() == 0 {
+      return (None, self.malformed(node, "instance variable without content"))
+    }
+    let child = node.NamedChild(0)
+    let kind = child.Kind()
+
+    if kind == capp.NodeKindObjjVisibilitySpecifier {
+      let (visibility_opt, diags) = self.visibility_specifier(child)
+      let Some(visibility) = visibility_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjInstanceVariable.Visibility(visibility)), diags)
+    }
+    if kind == capp.NodeKindObjjFieldDefinition {
+      let (field_opt, diags) = self.field_definition(child)
+      let Some(field) = field_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjInstanceVariable.Field(field)), diags)
+    }
+
+    (None, self.unhandled(child, "instance variable", kind))
+  }
+
+  // visibility_specifier carries only anonymous token children; the node's
+  // text is the specifier itself.
+  fn visibility_specifier(self, node: capp.CSTNode) -> (Option<ObjjVisibilitySpecifier>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let text = node.Text()
+    if text == "@private" {
+      return (Some(ObjjVisibilitySpecifier.Private(pos)), [])
+    }
+    if text == "@protected" {
+      return (Some(ObjjVisibilitySpecifier.Protected(pos)), [])
+    }
+    if text == "@package" {
+      return (Some(ObjjVisibilitySpecifier.Package(pos)), [])
+    }
+    if text == "@public" {
+      return (Some(ObjjVisibilitySpecifier.Public(pos)), [])
+    }
+    (None, self.unhandled(node, "visibility specifier", text))
+  }
+
+  fn field_definition(self, node: capp.CSTNode) -> (Option<ObjjFieldDefinition>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    // Modifiers are an optional unfielded objj_ivar_modifiers child.
+    let mut modifiers: Slice<ObjjIvarModifier> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() == capp.NodeKindObjjIvarModifiers {
+        let (mods, ds) = self.ivar_modifiers(child)
+        diags = merge_diags(diags, ds)
+        modifiers = mods
+      }
+    }
+
+    let type_node = match node.ChildByFieldName(capp.FieldType) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "ivar without type")),
+      ),
+    }
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "ivar without name")),
+      ),
+    }
+
+    let (field_type_opt, type_diags) = self.objj_type(type_node)
+    diags = merge_diags(diags, type_diags)
+    let field_type = match field_type_opt {
+      Some(t) => t,
+      None => return (None, diags),
+    }
+
+    // @accessors lowering is deferred; its presence is surfaced.
+    match node.ChildByFieldName(capp.FieldAccessors) {
+      Some(accessors_node) => {
+        diags = merge_diags(
+          diags,
+          self.unhandled(
+            accessors_node,
+            "ivar component",
+            "accessors directive",
+          ),
+        )
+      },
+      None => (),
+    }
+
+    let field = ObjjFieldDefinition { 
+      modifiers,
+      field_type,
+      name: ident_of(name_node),
+      accessors: None,
+      pos,
+    }
+    (Some(field), diags)
+  }
+
+  fn ivar_modifiers(self, node: capp.CSTNode) -> (Slice<ObjjIvarModifier>, Slice<Diagnostic>) {
+    let mut modifiers: Slice<ObjjIvarModifier> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindObjjIvarModifier { continue }
+      let pos = node_pos(child)
+      let text = child.Text()
+      if text == "@outlet" {
+        modifiers = modifiers.append(ObjjIvarModifier.Outlet(pos))
+      } else if text == "@IBOutlet" {
+        modifiers = modifiers.append(ObjjIvarModifier.IBOutlet(pos))
+      } else if text == "@weak" {
+        modifiers = modifiers.append(ObjjIvarModifier.Weak(pos))
+      } else if text == "@strong" {
+        modifiers = modifiers.append(ObjjIvarModifier.Strong(pos))
+      } else {
+        diags = merge_diags(diags, self.unhandled(child, "ivar modifier", text))
+      }
+    }
+    (modifiers, diags)
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — methods
+  // -------------------------------------------------------------------------
+
+  fn method_definition(self, node: capp.CSTNode) -> (Option<ObjjMethodDefinition>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    // The method_type field holds the anonymous '+' or '-' token.
+    let scope = match node.ChildByFieldName(capp.FieldMethodType) {
+      Some(scope_node) => {
+        if scope_node.Text() == "+" {
+          ObjjMethodScope.Class
+        } else {
+          ObjjMethodScope.Instance
+        }
+      },
+      None => return (
+        None,
+        self.malformed(node, "method without +/- indicator"),
+      ),
+    }
+
+    let return_type_node = match node.ChildByFieldName(capp.FieldReturnType) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "method without return type")),
+    }
+    let (return_type_opt, return_diags) = self.method_type(return_type_node)
+    diags = merge_diags(diags, return_diags)
+    let return_type = match return_type_opt {
+      Some(t) => t,
+      None => return (None, diags),
+    }
+
+    // Unary methods carry a fielded method_name; keyword methods carry one or
+    // more unfielded objj_method_parameter_part children.
+    let selector = match node.ChildByFieldName(capp.FieldMethodName) {
+      Some(name_node) => ObjjMethodSelector.Unary(selector_ident_of(name_node)),
+      None => {
+        let mut parts: Slice<ObjjMethodParameterPart> = []
+        for i in 0..node.NamedChildCount() {
+          let child = node.NamedChild(i)
+          if child.Kind() != capp.NodeKindObjjMethodParameterPart { continue }
+          let (part_opt, ds) = self.parameter_part(child)
+          diags = merge_diags(diags, ds)
+          match part_opt {
+            Some(part) => parts = parts.append(part),
+            None => (),
+          }
+        }
+        if parts.is_empty() {
+          return (
+            None,
+            merge_diags(diags, self.malformed(node, "method without selector")),
+          )
+        }
+        ObjjMethodSelector.Keyword(parts)
+      },
+    }
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "method without body")),
+      ),
+    }
+    let (body, body_diags) = self.statement_block(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    let method = ObjjMethodDefinition { 
+      scope,
+      return_type,
+      selector,
+      body,
+      pos,
+    }
+    (Some(method), diags)
+  }
+
+  fn parameter_part(self, node: capp.CSTNode) -> (Option<ObjjMethodParameterPart>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let name_part = node
+      .ChildByFieldName(capp.FieldNamePart)
+      .map(selector_ident_of)
+
+    let parameter_type = match node.ChildByFieldName(capp.FieldParameterType) {
+      Some(type_node) => {
+        let (type_opt, ds) = self.method_type(type_node)
+        diags = merge_diags(diags, ds)
+        type_opt
+      },
+      None => None,
+    }
+
+    let parameter_name = match node.ChildByFieldName(capp.FieldParameterName) {
+      Some(n) => ident_of(n),
+      None => {
+        return (
+          None,
+          merge_diags(
+            diags,
+            self.malformed(node, "selector part without parameter name"),
+          ),
+        )
+      },
+    }
+
+    let part = ObjjMethodParameterPart { 
+      name_part,
+      parameter_type,
+      parameter_name,
+      is_variadic: has_anonymous_child(node, "..."),
+      pos,
+    }
+    (Some(part), diags)
+  }
+
+  // method_type lowers `( async? @action|void|objj_type )`.  The type field
+  // holds either an anonymous token ('@action', 'void') or an objj_type node.
+  fn method_type(self, node: capp.CSTNode) -> (Option<ObjjMethodType>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_async = has_anonymous_child(node, "async")
+
+    let kind_node = match node.ChildByFieldName(capp.FieldType) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "method type without content")),
+    }
+
+    let kind_text = kind_node.Kind()
+    if kind_text == "@action" {
+      let method_type = ObjjMethodType { 
+        is_async,
+        return_kind: ObjjMethodTypeKind.Action(node_pos(kind_node)),
+        pos,
+      }
+      return (Some(method_type), [])
+    }
+    if kind_text == "void" {
+      let method_type = ObjjMethodType { 
+        is_async,
+        return_kind: ObjjMethodTypeKind.Void(node_pos(kind_node)),
+        pos,
+      }
+      return (Some(method_type), [])
+    }
+    if kind_text == capp.NodeKindObjjType {
+      let (type_opt, diags) = self.objj_type(kind_node)
+      let Some(objj_type) = type_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(
+          ObjjMethodType { 
+            is_async,
+            return_kind: ObjjMethodTypeKind.Type(objj_type),
+            pos,
+          },
+        ),
+        diags,
+      )
+    }
+
+    (None, self.unhandled(kind_node, "method type", kind_text))
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — types
+  // -------------------------------------------------------------------------
+
+  // objj_type is a wrapper whose meaning is determined by its named children:
+  //   [objj_protocol_type]            → protocol-qualified named type
+  //   [objj_multi_word_type]          → C-style multi-word type
+  //   [identifier]                    → plain named type
+  //   [objj_protocol_reference_list]  → id<Protocols> (the 'id' is anonymous)
+  //   (none)                          → bare id
+  fn objj_type(self, node: capp.CSTNode) -> (Option<ObjjType>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    if node.NamedChildCount() == 0 {
+      return (Some(ObjjType.Id(ObjjIdType { protocols: None, pos })), [])
+    }
+
+    let child = node.NamedChild(0)
+    let kind = child.Kind()
+
+    if kind == capp.NodeKindIdentifier {
+      return (Some(ObjjType.Named(ident_of(child))), [])
+    }
+    if kind == capp.NodeKindObjjProtocolReferenceList {
+      let id_type = ObjjIdType { protocols: Some(protocol_list(child)), pos }
+      return (Some(ObjjType.Id(id_type)), [])
+    }
+    if kind == capp.NodeKindObjjProtocolType {
+      return self.protocol_type(child)
+    }
+    if kind == capp.NodeKindObjjMultiWordType {
+      return self.multi_word_type(child)
+    }
+
+    (None, self.unhandled(child, "type", kind))
+  }
+
+  // protocol_type lowers `Name<P, Q>`: unfielded children are the name
+  // identifier followed by the protocol reference list.
+  fn protocol_type(self, node: capp.CSTNode) -> (Option<ObjjType>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut name: Option<Identifier> = None
+    let mut protocols: Option<ObjjProtocolReferenceList> = None
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindIdentifier {
+        name = Some(ident_of(child))
+      } else if kind == capp.NodeKindObjjProtocolReferenceList {
+        protocols = Some(protocol_list(child))
+      }
+    }
+
+    let Some(type_name) = name else {
+      return (None, self.malformed(node, "protocol type without name"))
+    }
+    let Some(list) = protocols else {
+      return (None, self.malformed(node, "protocol type without protocol list"))
+    }
+    (
+      Some(ObjjType.Protocol(
+        ObjjProtocolType { name: type_name, protocols: list, pos },
+      )),
+      [],
+    )
+  }
+
+  // multi_word_type maps the C-style spellings onto their variants.  The
+  // node's children are anonymous word tokens; the text is normalised to
+  // single spaces before matching so source whitespace cannot affect dispatch.
+  fn multi_word_type(self, node: capp.CSTNode) -> (Option<ObjjType>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let normalized = strings.Join(strings.Fields(node.Text()), " ")
+
+    let variant = match normalized {
+      "unsigned char" => Some(ObjjMultiWordType.UnsignedChar(pos)),
+      "unsigned short" => Some(ObjjMultiWordType.UnsignedShort(pos)),
+      "unsigned int" => Some(ObjjMultiWordType.UnsignedInt(pos)),
+      "unsigned long long" => Some(ObjjMultiWordType.UnsignedLongLong(pos)),
+      "unsigned long" => Some(ObjjMultiWordType.UnsignedLong(pos)),
+      "signed char" => Some(ObjjMultiWordType.SignedChar(pos)),
+      "signed short" => Some(ObjjMultiWordType.SignedShort(pos)),
+      "signed int" => Some(ObjjMultiWordType.SignedInt(pos)),
+      "signed long" => Some(ObjjMultiWordType.SignedLong(pos)),
+      "long long" => Some(ObjjMultiWordType.LongLong(pos)),
+      "long double" => Some(ObjjMultiWordType.LongDouble(pos)),
+      "unsigned" => Some(ObjjMultiWordType.Unsigned(pos)),
+      "signed" => Some(ObjjMultiWordType.Signed(pos)),
+      "long" => Some(ObjjMultiWordType.Long(pos)),
+      "short" => Some(ObjjMultiWordType.Short(pos)),
+      "char" => Some(ObjjMultiWordType.Char(pos)),
+      "int" => Some(ObjjMultiWordType.Int(pos)),
+      _ => None,
+    }
+
+    let Some(multi_word) = variant else {
+      return (None, self.unhandled(node, "multi-word type", normalized))
+    }
+    (Some(ObjjType.MultiWord(multi_word)), [])
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Statements  (STUB — descent stops here)
+// Pure structural helpers
 // ---------------------------------------------------------------------------
 
-// lower_statement dispatches on a top-level statement node's kind and returns
-// the lowered Statement (or None when the kind is not yet handled) paired with
-// any diagnostics it raised.
-//
-// SKELETON: the dispatch structure and the catch-all are in place; the per-kind
-// arms are filled in subsequently.  Until then every kind falls through to
-// unhandled(), which is the correct, visible behaviour for an unimplemented
-// production — not a silent drop.
-//
-// The eventual arms mirror the Statement enum in cst.lis: each grammar node
-// kind (objj_class_implementation, function_declaration, if_statement, …) maps
-// to one constructor.  They are added one production at a time, each validated
-// against real lowered output before the next.  A handler that itself recurses
-// returns its own merged diagnostics, which this function passes through.
-fn lower_statement(node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
-  let kind = node.Kind()
-
-  // Per-kind arms are added here, e.g.:
-  //   if kind == "objj_class_implementation" {
-  //     let (impl, ds) = lower_objj_class_impl(node)
-  //     return (Some(Statement.ObjjClassImpl(impl)), ds)
-  //   }
-  //   if kind == "function_declaration" {
-  //     let (fdecl, ds) = lower_function_decl(node)
-  //     return (Some(Statement.Declaration(Declaration.Function(fdecl))), ds)
-  //   }
-  //   ...
-  unhandled(node, kind)
-}
-
-// unhandled records a coverage gap: a node kind reached by the dispatch with no
-// implementing arm.  Returns None plus a one-element diagnostic slice naming
-// exactly what was skipped and where, so the caller omits the node from the AST
-// without losing the record of it.
-fn unhandled(node: capp.CSTNode, kind: string) -> (Option<Statement>, Slice<Diagnostic>) {
-  let pos = node_pos(node)
-  let diag = diag_warn_at(
-    BuildPhase.BuildSymbolTable, // lowering runs ahead of phase 6's consumers
-    f"lowering: unhandled node kind \"{kind}\"",
-    "", // file path threaded in by the caller in the full version
-    pos.row,
-    pos.col,
-  )
-  (None, [diag])
+// protocol_list lowers `<P, Q, ...>`: the named children are exactly the
+// protocol identifiers.  Pure by grammar; nothing to diagnose.
+fn protocol_list(node: capp.CSTNode) -> ObjjProtocolReferenceList {
+  let mut protocols: Slice<Identifier> = []
+  for i in 0..node.NamedChildCount() {
+    let child = node.NamedChild(i)
+    if child.Kind() == capp.NodeKindIdentifier {
+      protocols = protocols.append(ident_of(child))
+    }
+  }
+  ObjjProtocolReferenceList { protocols, pos: node_pos(node) }
 }
