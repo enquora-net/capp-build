@@ -1,24 +1,64 @@
 # Makefile
 # capp-build
 #
-# Orchestrates the Lisette build pipeline with local capp-parse dependency.
+# Build orchestration and dependency-pin tooling.
 #
-# Lisette regenerates target/go.mod on every run. GOFLAGS points Go at a
-# durable module overlay that keeps private local replacements visible during
-# Lisette's internal go mod tidy/build steps.
+# One-time environment, required for resolving the private capp-parse module
+# (symptoms of their absence are noted):
+#
+#   go env -w GOPRIVATE=github.com/enquora-net/*
+#       Keeps proxy.golang.org and sum.golang.org out of the resolution path.
+#       Absent: fetch errors mentioning proxy.golang.org (404/410).
+#
+#   git config --global url."git@github.com:enquora-net/".insteadOf "https://github.com/enquora-net/"
+#       Routes module fetches for the org over SSH.
+#       Absent: "terminal prompts disabled" / "could not read Username".
+#
+# Updating the capp-parse pin (make bump-parse):
+#   Pinning is by commit hash; the branch is irrelevant. Go resolves any
+#   pushed commit by hash. Never pin @latest or @branch — those consult the
+#   default branch and caching makes them non-deterministic.
+#   The target verifies the local capp-parse HEAD is pushed, asks go for the
+#   canonical pseudo-version, rewrites the pin in lisette.toml, shows the
+#   diff, and rebuilds. Review is git diff; revert is git checkout.
+#
+# Portability: this Makefile assumes a POSIX shell and is not intended to
+# run under Windows. The durable home for this orchestration is the
+# cappuccino CLI, where it is written once and runs everywhere; the Makefile
+# is development scaffolding until then.
 
-BINARY        := capp-build
-TARGET        := target
-LOCAL_MOD     := $(abspath lisette.local.mod)
-GO_ENV        := GOFLAGS=-modfile=$(LOCAL_MOD)
+BINARY       := capp-build
+TARGET       := target
+PARSE_DIR    := $(HOME)/Desktop/capp-parse
+PARSE_MODULE := github.com/enquora-net/capp-parse
 
-.PHONY: all run clean
+.PHONY: all run clean bump-parse
 
 all: run
 
 run:
-	$(GO_ENV) lis run
+	lis run
 
 clean:
 	rm -rf $(TARGET)/vendor
 	rm -f $(TARGET)/go.sum
+
+# Pin capp-parse at its current pushed HEAD, then rebuild.
+# Fails loudly if HEAD has not been pushed: go can only resolve pushed
+# commits, and an unpushed pin is the most common cause of "unknown revision".
+bump-parse:
+	@hash=$$(git -C "$(PARSE_DIR)" rev-parse HEAD) || exit 1; \
+	upstream=$$(git -C "$(PARSE_DIR)" rev-parse '@{upstream}' 2>/dev/null); \
+	if [ -z "$$upstream" ]; then \
+		echo "error: capp-parse HEAD has no upstream — push the branch first"; exit 1; \
+	fi; \
+	if ! git -C "$(PARSE_DIR)" merge-base --is-ancestor "$$hash" "$$upstream"; then \
+		echo "error: capp-parse HEAD ($$hash) is not pushed — push before pinning"; exit 1; \
+	fi; \
+	echo "resolving $(PARSE_MODULE)@$$hash ..."; \
+	version=$$(cd "$(TARGET)" && go list -m "$(PARSE_MODULE)@$$hash" | awk '{print $$2}') || exit 1; \
+	tmp=$$(mktemp); \
+	sed "s|^\"$(PARSE_MODULE)\" = .*|\"$(PARSE_MODULE)\" = \"$$version\"|" lisette.toml > "$$tmp" \
+		&& mv "$$tmp" lisette.toml; \
+	git --no-pager diff -- lisette.toml; \
+	lis run

@@ -59,9 +59,59 @@ pub fn smoke_capp(grammar_path: string) -> SmokeResult {
   }
 }
 
+// smoke_boundary verifies that the capp-parse surface visible to Lisette
+// matches the surface this code was written against.  Three layers of proof:
+// compiling this function proves the typedefs carry the BoundaryVersion-2
+// symbols; linking proves the pinned Go module provides them; the runtime
+// checks prove the live parser agrees with the constants.
+// The FileResult tree is deliberately leaked: smoke runs are one-shot
+// processes and ParseFile has no owning ProjectResult to close.
+pub fn smoke_boundary(grammar_path: string) -> SmokeResult {
+  if capp.BoundaryVersion != 2 {
+    return SmokeResult { 
+      name: "boundary",
+      ok: false,
+      note: f"BoundaryVersion = {capp.BoundaryVersion}, expected 2 — stale capp-parse pin or typedefs",
+    }
+  }
+
+  // A single newline: minimal non-nil source parsing to an empty program.
+  let cfg = capp.ParseConfig { 
+    Path: "",
+    Src: [10],
+    GrammarPath: grammar_path,
+    Benchmark: false,
+    ..,
+  }
+
+  match capp.ParseFile(cfg) {
+    Ok(file) => {
+      let root = file.Root()
+      let kind = root.Kind()
+      let named_children = root.NamedChildCount()
+      let is_named = root.IsNamed()
+      let ok = kind == capp.NodeKindProgram && named_children == 0 && is_named
+      SmokeResult { 
+        name: "boundary",
+        ok,
+        note: f"BoundaryVersion={capp.BoundaryVersion} root kind={kind} named_children={named_children}",
+      }
+    },
+    Err(e) => SmokeResult { 
+      name: "boundary",
+      ok: false,
+      note: f"capp.ParseFile error: {e}",
+    },
+  }
+}
+
 // smoke_all runs all smoke tests and prints results.
 pub fn smoke_all(grammar_path: string) {
-  let results = [smoke_cobra(), smoke_capp(grammar_path)]
+  let results = [
+    smoke_cobra(),
+    smoke_capp(grammar_path),
+    smoke_boundary(grammar_path),
+  ]
   for r in results {
     let icon = if r.ok { "✓" } else { "✗" }
     fmt.Println(f"{icon}  {r.name}: {r.note}")
