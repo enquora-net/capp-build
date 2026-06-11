@@ -35,9 +35,12 @@
 // child; the corresponding helpers dispatch on that child.  This is grammar
 // fact, confirmed against node-types.json, not convention.
 //
-// STATUS: arms cover the toolchain_test corpus —
+// STATUS: arms cover the toolchain_test corpus plus the full statement tier —
 //   statements:   objj_import, function_declaration, objj_class_implementation,
-//                 expression_statement, empty, debugger, return
+//                 expression_statement, empty, debugger, return, if, for,
+//                 for-in/of, while, do, switch, try/catch/finally, throw,
+//                 with, break, continue, labeled, nested blocks, and
+//                 var/let/const declarations (identifier declarators)
 //   expressions:  identifier, literals, string, call (plain), member,
 //                 parenthesized, objj_message_expression
 //   objj:         method definitions (unary + keyword selectors), ivars with
@@ -48,7 +51,8 @@
 // repeat — driving the diagnostic count to zero per corpus before widening.
 //
 // Deferred with visible diagnostics: template and optional-chain calls,
-// accessors directives, preprocessor blocks, destructuring parameters.
+// accessors directives, preprocessor blocks, and destructuring everywhere it
+// appears (parameters, declarators, for-in bindings, catch parameters).
 //
 // **
 import "go:github.com/enquora-net/capp-parse"
@@ -230,6 +234,48 @@ impl Lowering {
     if kind == capp.NodeKindReturnStatement {
       return self.return_statement(node)
     }
+    if kind == capp.NodeKindIfStatement { return self.if_statement(node) }
+    if kind == capp.NodeKindVariableDeclaration {
+      let (decl_opt, diags) = self.variable_declaration(node)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(Statement.Declaration(Declaration.Variable(decl))), diags)
+    }
+    if kind == capp.NodeKindLexicalDeclaration {
+      let (decl_opt, diags) = self.lexical_declaration(node)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(Statement.Declaration(Declaration.Lexical(decl))), diags)
+    }
+    if kind == capp.NodeKindForStatement { return self.for_statement(node) }
+    if kind == capp.NodeKindWhileStatement { return self.while_statement(node) }
+    if kind == capp.NodeKindSwitchStatement {
+      return self.switch_statement(node)
+    }
+    if kind == capp.NodeKindForInStatement {
+      return self.for_in_statement(node)
+    }
+    if kind == capp.NodeKindTryStatement { return self.try_statement(node) }
+    if kind == capp.NodeKindDoStatement { return self.do_statement(node) }
+    if kind == capp.NodeKindThrowStatement { return self.throw_statement(node) }
+    if kind == capp.NodeKindWithStatement { return self.with_statement(node) }
+    if kind == capp.NodeKindStatementBlock {
+      let (block, diags) = self.statement_block(node)
+      return (Some(Statement.BlockScope(block)), diags)
+    }
+    if kind == capp.NodeKindBreakStatement {
+      let label = node.ChildByFieldName(capp.FieldLabel).map(ident_of)
+      return (Some(Statement.Break(BreakStatement { label, pos })), [])
+    }
+    if kind == capp.NodeKindContinueStatement {
+      let label = node.ChildByFieldName(capp.FieldLabel).map(ident_of)
+      return (Some(Statement.Continue(ContinueStatement { label, pos })), [])
+    }
+    if kind == capp.NodeKindLabeledStatement {
+      return self.labeled_statement(node)
+    }
 
     (None, self.unhandled(node, "statement", kind))
   }
@@ -311,6 +357,652 @@ impl Lowering {
   }
 
   // -------------------------------------------------------------------------
+  // Statements — control flow
+  // -------------------------------------------------------------------------
+
+  // paren_field lowers a required parenthesized_expression field — the
+  // header shape shared by if/while/do/switch/with.  `what` names the
+  // absence for the malformed diagnostic.
+  fn paren_field(self, node: capp.CSTNode, field: string, what: string) -> (Option<ParenthesizedExpression>, Slice<Diagnostic>) {
+    node
+      .ChildByFieldName(field)
+      .map_or_else(
+        || (None, self.malformed(node, what)),
+        |child| self.parenthesized(child),
+      )
+  }
+
+  // statement_field lowers a required statement-valued field — loop and
+  // clause bodies.
+  fn statement_field(self, node: capp.CSTNode, field: string, what: string) -> (Option<Statement>, Slice<Diagnostic>) {
+    node
+      .ChildByFieldName(field)
+      .map_or_else(
+        || (None, self.malformed(node, what)),
+        |child| self.statement(child),
+      )
+  }
+
+  fn if_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let (condition_opt, condition_diags) = self.paren_field(
+      node,
+      capp.FieldCondition,
+      "if without condition",
+    )
+    diags = merge_diags(diags, condition_diags)
+    let Some(condition) = condition_opt else {
+      return (None, diags)
+    }
+
+    let (consequence_opt, consequence_diags) = self.statement_field(
+      node,
+      capp.FieldConsequence,
+      "if without consequence",
+    )
+    diags = merge_diags(diags, consequence_diags)
+    let Some(consequence) = consequence_opt else {
+      return (None, diags)
+    }
+
+    let mut alternative: Option<ElseClause> = None
+    match node.ChildByFieldName(capp.FieldAlternative) {
+      Some(else_node) => {
+        let (else_opt, else_diags) = self.else_clause(else_node)
+        diags = merge_diags(diags, else_diags)
+        alternative = else_opt
+      },
+      None => (),
+    }
+
+    let lowered = IfStatement { 
+      condition,
+      consequence: &consequence,
+      alternative,
+      pos,
+    }
+    (Some(Statement.If(lowered)), diags)
+  }
+
+  // else_clause holds its statement as the single unfielded named child.
+  fn else_clause(self, node: capp.CSTNode) -> (Option<ElseClause>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (stmt_opt, diags) = self.statement(child)
+      let Some(stmt) = stmt_opt else {
+        return (None, diags)
+      }
+      return (Some(ElseClause { body: &stmt, pos }), diags)
+    }
+    (None, self.malformed(node, "else without body"))
+  }
+
+  fn while_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let (condition_opt, condition_diags) = self.paren_field(
+      node,
+      capp.FieldCondition,
+      "while without condition",
+    )
+    diags = merge_diags(diags, condition_diags)
+    let Some(condition) = condition_opt else {
+      return (None, diags)
+    }
+
+    let (body_opt, body_diags) = self.statement_field(
+      node,
+      capp.FieldBody,
+      "while without body",
+    )
+    diags = merge_diags(diags, body_diags)
+    let Some(body) = body_opt else {
+      return (None, diags)
+    }
+
+    let lowered = WhileStatement { condition, body: &body, pos }
+    (Some(Statement.While(lowered)), diags)
+  }
+
+  fn do_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let (body_opt, body_diags) = self.statement_field(
+      node,
+      capp.FieldBody,
+      "do without body",
+    )
+    diags = merge_diags(diags, body_diags)
+    let Some(body) = body_opt else {
+      return (None, diags)
+    }
+
+    let (condition_opt, condition_diags) = self.paren_field(
+      node,
+      capp.FieldCondition,
+      "do without condition",
+    )
+    diags = merge_diags(diags, condition_diags)
+    let Some(condition) = condition_opt else {
+      return (None, diags)
+    }
+
+    let lowered = DoStatement { body: &body, condition, pos }
+    (Some(Statement.Do(lowered)), diags)
+  }
+
+  fn with_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let (object_opt, object_diags) = self.paren_field(
+      node,
+      capp.FieldObject,
+      "with without object",
+    )
+    diags = merge_diags(diags, object_diags)
+    let Some(object) = object_opt else {
+      return (None, diags)
+    }
+
+    let (body_opt, body_diags) = self.statement_field(
+      node,
+      capp.FieldBody,
+      "with without body",
+    )
+    diags = merge_diags(diags, body_diags)
+    let Some(body) = body_opt else {
+      return (None, diags)
+    }
+
+    let lowered = WithStatement { object, body: &body, pos }
+    (Some(Statement.With(lowered)), diags)
+  }
+
+  fn labeled_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    let label_node = match node.ChildByFieldName(capp.FieldLabel) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "labeled statement without label"),
+      ),
+    }
+
+    let (body_opt, diags) = self.statement_field(
+      node,
+      capp.FieldBody,
+      "labeled statement without body",
+    )
+    let Some(body) = body_opt else {
+      return (None, diags)
+    }
+
+    let lowered = LabeledStatement { 
+      label: ident_of(label_node),
+      body: &body,
+      pos,
+    }
+    (Some(Statement.Labeled(lowered)), diags)
+  }
+
+  // throw_statement holds its value as the single unfielded named child: an
+  // expression or sequence.
+  fn throw_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (exprs_opt, diags) = self.expressions(child)
+      let Some(exprs) = exprs_opt else {
+        return (None, diags)
+      }
+      let lowered = ThrowStatement { value: &exprs, pos }
+      return (Some(Statement.Throw(lowered)), diags)
+    }
+    (None, self.malformed(node, "throw without value"))
+  }
+
+  fn switch_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let (value_opt, value_diags) = self.paren_field(
+      node,
+      capp.FieldValue,
+      "switch without value",
+    )
+    diags = merge_diags(diags, value_diags)
+    let Some(value) = value_opt else {
+      return (None, diags)
+    }
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "switch without body")),
+      ),
+    }
+    let (body, body_diags) = self.switch_body(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    (Some(Statement.Switch(SwitchStatement { value, body, pos })), diags)
+  }
+
+  fn switch_body(self, node: capp.CSTNode) -> (SwitchBody, Slice<Diagnostic>) {
+    let mut entries: Slice<SwitchEntry> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindSwitchCase {
+        let (case_opt, ds) = self.switch_case(child)
+        diags = merge_diags(diags, ds)
+        match case_opt {
+          Some(case_entry) => entries = entries.append(SwitchEntry.Case(
+            case_entry,
+          )),
+          None => (),
+        }
+      } else if kind == capp.NodeKindSwitchDefault {
+        let (default_entry, ds) = self.switch_default(child)
+        diags = merge_diags(diags, ds)
+        entries = entries.append(SwitchEntry.Default(default_entry))
+      } else {
+        diags = merge_diags(diags, self.unhandled(child, "switch entry", kind))
+      }
+    }
+    (SwitchBody { entries, pos: node_pos(node) }, diags)
+  }
+
+  // switch_case: the value is fielded and precedes the body statements in
+  // tree order; the body is a multiple-valued field, so with first-match
+  // field access the first non-comment named child is taken as the value
+  // and the remainder as body statements.
+  fn switch_case(self, node: capp.CSTNode) -> (Option<SwitchCase>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+    let mut value: Option<Expressions> = None
+    let mut body: Slice<Statement> = []
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      if value.is_none() {
+        let (exprs_opt, ds) = self.expressions(child)
+        diags = merge_diags(diags, ds)
+        match exprs_opt {
+          Some(exprs) => value = Some(exprs),
+          None => return (None, diags),
+        }
+      } else {
+        let (stmt_opt, ds) = self.statement(child)
+        diags = merge_diags(diags, ds)
+        match stmt_opt {
+          Some(stmt) => body = body.append(stmt),
+          None => (),
+        }
+      }
+    }
+
+    let Some(case_value) = value else {
+      return (
+        None,
+        merge_diags(diags, self.malformed(node, "case without value")),
+      )
+    }
+    (Some(SwitchCase { value: &case_value, body, pos }), diags)
+  }
+
+  fn switch_default(self, node: capp.CSTNode) -> (SwitchDefault, Slice<Diagnostic>) {
+    let mut body: Slice<Statement> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (stmt_opt, ds) = self.statement(child)
+      diags = merge_diags(diags, ds)
+      match stmt_opt {
+        Some(stmt) => body = body.append(stmt),
+        None => (),
+      }
+    }
+    (SwitchDefault { body, pos: node_pos(node) }, diags)
+  }
+
+  fn for_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let initializer_node = match node.ChildByFieldName(capp.FieldInitializer) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "for without initializer")),
+    }
+    let (initializer_opt, initializer_diags) = self.for_initializer(
+      initializer_node,
+    )
+    diags = merge_diags(diags, initializer_diags)
+    let Some(initializer) = initializer_opt else {
+      return (None, diags)
+    }
+
+    // The condition is a multiple-valued field covering both the expression
+    // and its terminating ';'.  First-match field access therefore returns
+    // the expression when present, an empty_statement, or — for an absent
+    // condition — the bare anonymous ';' itself, whose kind is its literal
+    // text.
+    let condition_node = match node.ChildByFieldName(capp.FieldCondition) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "for without condition")),
+      ),
+    }
+    let condition_kind = condition_node.Kind()
+    let condition_absent = condition_kind == ";" ||
+    condition_kind == capp.NodeKindEmptyStatement
+    let condition = if condition_absent {
+      ForCondition.Empty(EmptyStatement { pos: node_pos(condition_node) })
+    } else {
+      let (exprs_opt, ds) = self.expressions(condition_node)
+      diags = merge_diags(diags, ds)
+      match exprs_opt {
+        Some(exprs) => ForCondition.Expression(&exprs),
+        None => return (None, diags),
+      }
+    }
+
+    let mut increment: Option<Expressions> = None
+    match node.ChildByFieldName(capp.FieldIncrement) {
+      Some(increment_node) => {
+        let (exprs_opt, ds) = self.expressions(increment_node)
+        diags = merge_diags(diags, ds)
+        increment = exprs_opt
+      },
+      None => (),
+    }
+
+    let (body_opt, body_diags) = self.statement_field(
+      node,
+      capp.FieldBody,
+      "for without body",
+    )
+    diags = merge_diags(diags, body_diags)
+    let Some(body) = body_opt else {
+      return (None, diags)
+    }
+
+    let lowered = ForStatement { 
+      initializer,
+      condition,
+      increment,
+      body: &body,
+      pos,
+    }
+    (Some(Statement.For(lowered)), diags)
+  }
+
+  fn for_initializer(self, node: capp.CSTNode) -> (Option<ForInitializer>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindEmptyStatement {
+      return (
+        Some(ForInitializer.Empty(EmptyStatement { pos: node_pos(node) })),
+        [],
+      )
+    }
+    if kind == capp.NodeKindVariableDeclaration {
+      let (decl_opt, diags) = self.variable_declaration(node)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(ForInitializer.Variable(decl)), diags)
+    }
+    if kind == capp.NodeKindLexicalDeclaration {
+      let (decl_opt, diags) = self.lexical_declaration(node)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(ForInitializer.Lexical(decl)), diags)
+    }
+
+    let (exprs_opt, diags) = self.expressions(node)
+    let Some(exprs) = exprs_opt else {
+      return (None, diags)
+    }
+    (Some(ForInitializer.Expression(&exprs)), diags)
+  }
+
+  // for_in_statement covers both `for (x in y)` and `for (x of y)`.  The
+  // declaration kind (var/let/const/using) and the `await` of `for await`
+  // share a single multiple-valued `kind` field of anonymous tokens; with
+  // first-match field access only, both are recovered by anonymous-child
+  // scan, where each is unambiguous.  `await using` declarations inside
+  // for-headers are not distinguished from `for await (using ...)`; the
+  // corpus contains neither.
+  fn for_in_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let is_await = has_anonymous_child(node, "await")
+    let mut declared_kind: Option<VariableKind> = None
+    if has_anonymous_child(node, "var") {
+      declared_kind = Some(VariableKind.Var)
+    }
+    if has_anonymous_child(node, "let") {
+      declared_kind = Some(VariableKind.Let)
+    }
+    if has_anonymous_child(node, "const") {
+      declared_kind = Some(VariableKind.Const)
+    }
+    if has_anonymous_child(node, "using") {
+      declared_kind = Some(VariableKind.Using)
+    }
+
+    let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "for-in without operator")),
+    }
+    let operator = if operator_node.Kind() == "of" {
+      ForOperator.Of
+    } else {
+      ForOperator.In
+    }
+
+    let left_node = match node.ChildByFieldName(capp.FieldLeft) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "for-in without binding")),
+    }
+    let left_kind = left_node.Kind()
+
+    let binding = match declared_kind {
+      Some(kind) => {
+        let left = if left_kind == capp.NodeKindIdentifier {
+          ForDeclaredLeft.Identifier(ident_of(left_node))
+        } else {
+          // Destructuring bindings are deferred.
+          return (
+            None,
+            merge_diags(
+              diags,
+              self.unhandled(left_node, "for-in declared binding", left_kind),
+            ),
+          )
+        }
+        // The legacy `for (var x = init in y)` initializer arrives in the
+        // optional `value` field; Initializer.pos anchors at the value
+        // expression, as the grammar has no initializer node.
+        let mut initializer: Option<Initializer> = None
+        match node.ChildByFieldName(capp.FieldValue) {
+          Some(value_node) => {
+            let (expr_opt, ds) = self.expression(value_node)
+            diags = merge_diags(diags, ds)
+            if let Some(expr) = expr_opt {
+              initializer = Some(
+                Initializer { value: &expr, pos: node_pos(value_node) },
+              )
+            }
+          },
+          None => (),
+        }
+        ForBinding.Declared(
+          ForDeclaredBinding { 
+            kind,
+            left,
+            initializer,
+            pos: node_pos(left_node),
+          },
+        )
+      },
+      None => {
+        let left = if left_kind == capp.NodeKindIdentifier {
+          ForLeft.Lhs(LhsExpression.Identifier(ident_of(left_node)))
+        } else if left_kind == capp.NodeKindUndefined {
+          ForLeft.Lhs(LhsExpression.Undefined(
+            UndefinedLiteral { pos: node_pos(left_node) },
+          ))
+        } else {
+          // member/subscript/parenthesized/destructuring bindings wait on
+          // the expression tier's bare-struct helpers.
+          return (
+            None,
+            merge_diags(
+              diags,
+              self.unhandled(left_node, "for-in binding", left_kind),
+            ),
+          )
+        }
+        ForBinding.Plain(ForPlainBinding { left, pos: node_pos(left_node) })
+      },
+    }
+
+    let right_node = match node.ChildByFieldName(capp.FieldRight) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "for-in without right side")),
+      ),
+    }
+    let (right_opt, right_diags) = self.expressions(right_node)
+    diags = merge_diags(diags, right_diags)
+    let Some(right) = right_opt else {
+      return (None, diags)
+    }
+
+    let (body_opt, body_diags) = self.statement_field(
+      node,
+      capp.FieldBody,
+      "for-in without body",
+    )
+    diags = merge_diags(diags, body_diags)
+    let Some(body) = body_opt else {
+      return (None, diags)
+    }
+
+    // ForHeader spans binding through right side; its pos anchors at the
+    // binding.
+    let header = ForHeader { 
+      binding,
+      operator,
+      right: &right,
+      pos: node_pos(left_node),
+    }
+    let lowered = ForInStatement { is_await, header, body: &body, pos }
+    (Some(Statement.ForIn(lowered)), diags)
+  }
+
+  fn try_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "try without body")),
+    }
+    let (body, body_diags) = self.statement_block(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    let mut handler: Option<CatchClause> = None
+    match node.ChildByFieldName(capp.FieldHandler) {
+      Some(handler_node) => {
+        let (handler_opt, ds) = self.catch_clause(handler_node)
+        diags = merge_diags(diags, ds)
+        handler = handler_opt
+      },
+      None => (),
+    }
+
+    let mut finalizer: Option<FinallyClause> = None
+    match node.ChildByFieldName(capp.FieldFinalizer) {
+      Some(finalizer_node) => {
+        let (finalizer_opt, ds) = self.finally_clause(finalizer_node)
+        diags = merge_diags(diags, ds)
+        finalizer = finalizer_opt
+      },
+      None => (),
+    }
+
+    let lowered = TryStatement { body, handler, finalizer, pos }
+    (Some(Statement.Try(lowered)), diags)
+  }
+
+  fn catch_clause(self, node: capp.CSTNode) -> (Option<CatchClause>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let mut parameter: Option<CatchParameter> = None
+    match node.ChildByFieldName(capp.FieldParameter) {
+      Some(parameter_node) => {
+        if parameter_node.Kind() == capp.NodeKindIdentifier {
+          parameter = Some(CatchParameter.Identifier(ident_of(parameter_node)))
+        } else {
+          // Destructuring catch parameters are deferred; the clause itself
+          // still lowers.
+          diags = merge_diags(
+            diags,
+            self.unhandled(
+              parameter_node,
+              "catch parameter",
+              parameter_node.Kind(),
+            ),
+          )
+        }
+      },
+      None => (),
+    }
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "catch without body")),
+      ),
+    }
+    let (body, body_diags) = self.statement_block(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    (Some(CatchClause { parameter, body, pos }), diags)
+  }
+
+  fn finally_clause(self, node: capp.CSTNode) -> (Option<FinallyClause>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "finally without body")),
+    }
+    let (body, diags) = self.statement_block(body_node)
+    (Some(FinallyClause { body, pos }), diags)
+  }
+
+  // -------------------------------------------------------------------------
   // Declarations
   // -------------------------------------------------------------------------
 
@@ -368,6 +1060,111 @@ impl Lowering {
       }
     }
     (FormalParameters { parameters, pos: node_pos(node) }, diags)
+  }
+
+  // variable_declaration lowers `var d, d, ...;` — the declarators are the
+  // named children.
+  fn variable_declaration(self, node: capp.CSTNode) -> (Option<VariableDeclaration>, Slice<Diagnostic>) {
+    let (declarators, diags) = self.declarators(node)
+    if declarators.is_empty() {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "variable declaration without declarators"),
+        ),
+      )
+    }
+    (Some(VariableDeclaration { declarators, pos: node_pos(node) }), diags)
+  }
+
+  // lexical_declaration lowers `let|const d, d, ...;`.  The kind field holds
+  // the anonymous keyword token.
+  fn lexical_declaration(self, node: capp.CSTNode) -> (Option<LexicalDeclaration>, Slice<Diagnostic>) {
+    let kind = match node.ChildByFieldName(capp.FieldKind) {
+      Some(kind_node) => {
+        if kind_node.Text() == "const" {
+          LexicalKind.Const
+        } else {
+          LexicalKind.Let
+        }
+      },
+      None => return (
+        None,
+        self.malformed(node, "lexical declaration without kind"),
+      ),
+    }
+    let (declarators, diags) = self.declarators(node)
+    if declarators.is_empty() {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "lexical declaration without declarators"),
+        ),
+      )
+    }
+    (Some(LexicalDeclaration { kind, declarators, pos: node_pos(node) }), diags)
+  }
+
+  fn declarators(self, node: capp.CSTNode) -> (Slice<VariableDeclarator>, Slice<Diagnostic>) {
+    let mut declarators: Slice<VariableDeclarator> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind != capp.NodeKindVariableDeclarator {
+        diags = merge_diags(diags, self.unhandled(child, "declarator", kind))
+        continue
+      }
+      let (declarator_opt, ds) = self.variable_declarator(child)
+      diags = merge_diags(diags, ds)
+      match declarator_opt {
+        Some(declarator) => declarators = declarators.append(declarator),
+        None => (),
+      }
+    }
+    (declarators, diags)
+  }
+
+  // variable_declarator: the initializer arrives in the `value` field; the
+  // grammar has no initializer node, so Initializer.pos anchors at the value
+  // expression (decided 2026-06-10).  An unhandled initializer expression
+  // records its diagnostic and leaves the declarator bare rather than
+  // discarding it.
+  fn variable_declarator(self, node: capp.CSTNode) -> (Option<VariableDeclarator>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "declarator without name")),
+    }
+    if name_node.Kind() != capp.NodeKindIdentifier {
+      // object_pattern / array_pattern — destructuring declarators deferred.
+      return (
+        None,
+        self.unhandled(name_node, "declarator name", name_node.Kind()),
+      )
+    }
+    let name = VariableDeclaratorName.Identifier(ident_of(name_node))
+
+    let mut initializer: Option<Initializer> = None
+    match node.ChildByFieldName(capp.FieldValue) {
+      Some(value_node) => {
+        let (expr_opt, ds) = self.expression(value_node)
+        diags = merge_diags(diags, ds)
+        if let Some(expr) = expr_opt {
+          initializer = Some(
+            Initializer { value: &expr, pos: node_pos(value_node) },
+          )
+        }
+      },
+      None => (),
+    }
+
+    (Some(VariableDeclarator { name, initializer, pos }), diags)
   }
 
   // -------------------------------------------------------------------------
@@ -476,6 +1273,94 @@ impl Lowering {
     }
     if kind == capp.NodeKindObjjMessageExpression {
       return self.message_expression(node)
+    }
+    if kind == capp.NodeKindSubscriptExpression {
+      let (subscript_opt, diags) = self.subscript_expr_struct(node)
+      let Some(subscript) = subscript_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.Subscript(subscript))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindAssignmentExpression {
+      return self.assignment_expression(node)
+    }
+    if kind == capp.NodeKindAugmentedAssignmentExpression {
+      return self.augmented_assignment_expression(node)
+    }
+    if kind == capp.NodeKindBinaryExpression {
+      return self.binary_expression(node)
+    }
+    if kind == capp.NodeKindUnaryExpression {
+      return self.unary_expression(node)
+    }
+    if kind == capp.NodeKindTernaryExpression {
+      return self.ternary_expression(node)
+    }
+    if kind == capp.NodeKindUpdateExpression {
+      return self.update_expression(node)
+    }
+    if kind == capp.NodeKindNewExpression {
+      let (new_opt, diags) = self.new_expr_struct(node)
+      let Some(new_expr) = new_opt else {
+        return (None, diags)
+      }
+      return (Some(Expression.New(new_expr)), diags)
+    }
+    if kind == capp.NodeKindAwaitExpression {
+      return self.await_expression(node)
+    }
+    if kind == capp.NodeKindObject {
+      let (object_opt, diags) = self.object_literal(node)
+      let Some(object) = object_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.Object(object))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindNativeArray {
+      let (array_opt, diags) = self.native_array(node)
+      let Some(array) = array_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.NativeArray(array))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindFunctionExpression {
+      let (func_opt, diags) = self.function_expression(node)
+      let Some(func) = func_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.Function(func))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindRegex {
+      let (regex_opt, diags) = self.regex_literal(node)
+      let Some(regex) = regex_opt else {
+        return (None, diags)
+      }
+      return (Some(Expression.Primary(PrimaryExpression.Regex(regex))), [])
+    }
+    if kind == capp.NodeKindObjjRefExpression {
+      return self.objj_ref_expression(node)
+    }
+    if kind == capp.NodeKindObjjDerefExpression {
+      let (deref_opt, diags) = self.objj_deref_struct(node)
+      let Some(deref) = deref_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.ObjjDeref(deref))),
+        diags,
+      )
     }
 
     (None, self.unhandled(node, "expression", kind))
@@ -606,7 +1491,18 @@ impl Lowering {
     (None, self.malformed(node, "spread without argument"))
   }
 
+  // member_expression is the dispatch wrapper; member_expr_struct is the
+  // bare producer reused by assignment targets, new constructors, and for-in
+  // bindings, which need MemberExpression rather than the wrapped Expression.
   fn member_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let (member_opt, diags) = self.member_expr_struct(node)
+    let Some(member) = member_opt else {
+      return (None, diags)
+    }
+    (Some(Expression.Primary(PrimaryExpression.Member(member))), diags)
+  }
+
+  fn member_expr_struct(self, node: capp.CSTNode) -> (Option<MemberExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let object_node = match node.ChildByFieldName(capp.FieldObject) {
@@ -652,8 +1548,845 @@ impl Lowering {
       MemberProperty.Property(ident_of(property_node))
     }
 
-    let member = MemberExpression { object, optional_chain, property, pos }
-    (Some(Expression.Primary(PrimaryExpression.Member(member))), diags)
+    (Some(MemberExpression { object, optional_chain, property, pos }), diags)
+  }
+
+  // subscript_expr_struct is the bare producer for o[i].  index is an
+  // expression or sequence, so it lowers through `expressions`.
+  fn subscript_expr_struct(self, node: capp.CSTNode) -> (Option<SubscriptExpression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let object_node = match node.ChildByFieldName(capp.FieldObject) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "subscript without object")),
+    }
+    let (object_opt, object_diags) = self.expression(object_node)
+    diags = merge_diags(diags, object_diags)
+    let Some(object) = object_opt else {
+      return (None, diags)
+    }
+
+    let optional_chain = node
+      .ChildByFieldName(capp.FieldOptionalChain)
+      .is_some()
+
+    let index_node = match node.ChildByFieldName(capp.FieldIndex) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "subscript without index")),
+      ),
+    }
+    let (index_opt, index_diags) = self.expressions(index_node)
+    diags = merge_diags(diags, index_diags)
+    let Some(index) = index_opt else {
+      return (None, diags)
+    }
+
+    (
+      Some(
+        SubscriptExpression { 
+          object: &object,
+          optional_chain,
+          index: &index,
+          pos,
+        },
+      ),
+      diags,
+    )
+  }
+
+  // -------------------------------------------------------------------------
+  // Expressions — operators
+  // -------------------------------------------------------------------------
+
+  // binary_op maps the anonymous operator token's kind (its literal text) to
+  // the BinaryOp enum.  The grammar's `in` operator is the membership test,
+  // distinct from for-in.
+  fn binary_op(self, node: capp.CSTNode) -> Option<BinaryOp> {
+    match node.Kind() {
+      "&&" => Some(BinaryOp.LogicalAnd),
+      "||" => Some(BinaryOp.LogicalOr),
+      ">>" => Some(BinaryOp.ShiftRight),
+      ">>>" => Some(BinaryOp.UnsignedShiftRight),
+      "<<" => Some(BinaryOp.ShiftLeft),
+      "&" => Some(BinaryOp.BitAnd),
+      "^" => Some(BinaryOp.BitXor),
+      "|" => Some(BinaryOp.BitOr),
+      "+" => Some(BinaryOp.Add),
+      "-" => Some(BinaryOp.Sub),
+      "*" => Some(BinaryOp.Mul),
+      "/" => Some(BinaryOp.Div),
+      "%" => Some(BinaryOp.Mod),
+      "**" => Some(BinaryOp.Exp),
+      "<" => Some(BinaryOp.LessThan),
+      "<=" => Some(BinaryOp.LessEqual),
+      "==" => Some(BinaryOp.Equal),
+      "===" => Some(BinaryOp.StrictEqual),
+      "!=" => Some(BinaryOp.NotEqual),
+      "!==" => Some(BinaryOp.StrictNotEqual),
+      ">=" => Some(BinaryOp.GreaterEqual),
+      ">" => Some(BinaryOp.GreaterThan),
+      "??" => Some(BinaryOp.NullishCoalesce),
+      "instanceof" => Some(BinaryOp.Instanceof),
+      "in" => Some(BinaryOp.In),
+      _ => None,
+    }
+  }
+
+  fn unary_op(self, node: capp.CSTNode) -> Option<UnaryOp> {
+    match node.Kind() {
+      "!" => Some(UnaryOp.Not),
+      "~" => Some(UnaryOp.BitNot),
+      "-" => Some(UnaryOp.Negate),
+      "+" => Some(UnaryOp.Plus),
+      "typeof" => Some(UnaryOp.Typeof),
+      "void" => Some(UnaryOp.Void),
+      "delete" => Some(UnaryOp.Delete),
+      _ => None,
+    }
+  }
+
+  // assignment_op maps the compound operators permitted on @deref targets.
+  // Bare '=' is Assign; the rest mirror the +=-family without the '='.
+  fn assignment_op(self, node: capp.CSTNode) -> Option<AssignmentOp> {
+    match node.Kind() {
+      "=" => Some(AssignmentOp.Assign),
+      "+=" => Some(AssignmentOp.Add),
+      "-=" => Some(AssignmentOp.Sub),
+      "*=" => Some(AssignmentOp.Mul),
+      "/=" => Some(AssignmentOp.Div),
+      "%=" => Some(AssignmentOp.Mod),
+      "&=" => Some(AssignmentOp.BitAnd),
+      "|=" => Some(AssignmentOp.BitOr),
+      "^=" => Some(AssignmentOp.BitXor),
+      "<<=" => Some(AssignmentOp.ShiftLeft),
+      ">>=" => Some(AssignmentOp.ShiftRight),
+      ">>>=" => Some(AssignmentOp.UnsignedShiftRight),
+      _ => None,
+    }
+  }
+
+  fn augmented_op(self, node: capp.CSTNode) -> Option<AugmentedAssignmentOp> {
+    match node.Kind() {
+      "+=" => Some(AugmentedAssignmentOp.Add),
+      "-=" => Some(AugmentedAssignmentOp.Sub),
+      "*=" => Some(AugmentedAssignmentOp.Mul),
+      "/=" => Some(AugmentedAssignmentOp.Div),
+      "%=" => Some(AugmentedAssignmentOp.Mod),
+      "^=" => Some(AugmentedAssignmentOp.BitXor),
+      "&=" => Some(AugmentedAssignmentOp.BitAnd),
+      "|=" => Some(AugmentedAssignmentOp.BitOr),
+      ">>=" => Some(AugmentedAssignmentOp.ShiftRight),
+      ">>>=" => Some(AugmentedAssignmentOp.UnsignedShiftRight),
+      "<<=" => Some(AugmentedAssignmentOp.ShiftLeft),
+      "**=" => Some(AugmentedAssignmentOp.Exp),
+      "&&=" => Some(AugmentedAssignmentOp.LogicalAnd),
+      "||=" => Some(AugmentedAssignmentOp.LogicalOr),
+      "??=" => Some(AugmentedAssignmentOp.NullishCoalesce),
+      _ => None,
+    }
+  }
+
+  fn binary_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let left_node = match node.ChildByFieldName(capp.FieldLeft) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "binary without left")),
+    }
+    // The left side may be a private property identifier (the `#x in obj`
+    // brand check), which is not an expression.
+    let left = if left_node.Kind() ==
+    capp.NodeKindPrivatePropertyIdentifier {
+      BinaryLeft.PrivateProperty(
+        PrivatePropertyIdentifier { 
+          text: left_node.Text(),
+          pos: node_pos(left_node),
+        },
+      )
+    } else {
+      let (left_opt, ds) = self.expression(left_node)
+      diags = merge_diags(diags, ds)
+      match left_opt {
+        Some(left_expr) => BinaryLeft.Expression(&left_expr),
+        None => return (None, diags),
+      }
+    }
+
+    let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "binary without operator")),
+      ),
+    }
+    let Some(operator) = self.binary_op(operator_node) else {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.unhandled(operator_node, "binary operator", operator_node.Kind()),
+        ),
+      )
+    }
+
+    let right_node = match node.ChildByFieldName(capp.FieldRight) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "binary without right")),
+      ),
+    }
+    let (right_opt, right_diags) = self.expression(right_node)
+    diags = merge_diags(diags, right_diags)
+    let Some(right) = right_opt else {
+      return (None, diags)
+    }
+
+    let lowered = BinaryExpression { left, operator, right: &right, pos }
+    (Some(Expression.Binary(lowered)), diags)
+  }
+
+  fn unary_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "unary without operator")),
+    }
+    let Some(operator) = self.unary_op(operator_node) else {
+      return (
+        None,
+        self.unhandled(operator_node, "unary operator", operator_node.Kind()),
+      )
+    }
+
+    let argument_node = match node.ChildByFieldName(capp.FieldArgument) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "unary without argument")),
+    }
+    let (argument_opt, diags) = self.expression(argument_node)
+    let Some(argument) = argument_opt else {
+      return (None, diags)
+    }
+
+    let lowered = UnaryExpression { operator, argument: &argument, pos }
+    (Some(Expression.Unary(lowered)), diags)
+  }
+
+  fn ternary_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let condition_node = match node.ChildByFieldName(capp.FieldCondition) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "ternary without condition")),
+    }
+    let (condition_opt, condition_diags) = self.expression(condition_node)
+    diags = merge_diags(diags, condition_diags)
+    let Some(condition) = condition_opt else {
+      return (None, diags)
+    }
+
+    let consequence_node = match node.ChildByFieldName(capp.FieldConsequence) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "ternary without consequence")),
+      ),
+    }
+    let (consequence_opt, consequence_diags) = self.expression(consequence_node)
+    diags = merge_diags(diags, consequence_diags)
+    let Some(consequence) = consequence_opt else {
+      return (None, diags)
+    }
+
+    let alternative_node = match node.ChildByFieldName(capp.FieldAlternative) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "ternary without alternative")),
+      ),
+    }
+    let (alternative_opt, alternative_diags) = self.expression(alternative_node)
+    diags = merge_diags(diags, alternative_diags)
+    let Some(alternative) = alternative_opt else {
+      return (None, diags)
+    }
+
+    let lowered = TernaryExpression { 
+      condition: &condition,
+      consequence: &consequence,
+      alternative: &alternative,
+      pos,
+    }
+    (Some(Expression.Ternary(lowered)), diags)
+  }
+
+  // update_expression: ++x / x++.  The grammar does not field prefix/postfix;
+  // it falls out of whether the argument begins after the node's own start.
+  fn update_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "update without operator")),
+    }
+    let operator = if operator_node.Kind() == "--" {
+      UpdateOp.Decrement
+    } else {
+      UpdateOp.Increment
+    }
+
+    let argument_node = match node.ChildByFieldName(capp.FieldArgument) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "update without argument")),
+    }
+    // The boundary exposes only row/column, not byte offset.  For ++x the
+    // operator precedes the argument, so the node starts strictly before the
+    // argument; for x++ the argument starts at the node's own start.
+    let node_row = node.StartRow()
+    let arg_row = argument_node.StartRow()
+    let is_prefix = node_row < arg_row ||
+      (node_row == arg_row && node.StartColumn() < argument_node.StartColumn())
+
+    let (argument_opt, diags) = self.expression(argument_node)
+    let Some(argument) = argument_opt else {
+      return (None, diags)
+    }
+
+    let lowered = UpdateExpression { operator, argument: &argument, is_prefix, pos }
+    (Some(Expression.Update(lowered)), diags)
+  }
+
+  fn await_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (expr_opt, diags) = self.expression(child)
+      let Some(expr) = expr_opt else {
+        return (None, diags)
+      }
+      let lowered = AwaitExpression { argument: &expr, pos }
+      return (Some(Expression.Await(lowered)), diags)
+    }
+    (None, self.malformed(node, "await without argument"))
+  }
+
+  // -------------------------------------------------------------------------
+  // Expressions — assignment
+  // -------------------------------------------------------------------------
+
+  // assignment_expression splits on the left side: an @deref target routes to
+  // ObjjDerefAssignment with its compound operator; everything else is a
+  // StandardAssignment whose target is a parenthesized expression or an lhs.
+  fn assignment_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let left_node = match node.ChildByFieldName(capp.FieldLeft) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "assignment without target")),
+    }
+    let right_node = match node.ChildByFieldName(capp.FieldRight) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "assignment without value")),
+    }
+
+    let (right_opt, right_diags) = self.expression(right_node)
+    diags = merge_diags(diags, right_diags)
+    let Some(right) = right_opt else {
+      return (None, diags)
+    }
+
+    if left_node.Kind() == capp.NodeKindObjjDerefExpression {
+      let (deref_opt, deref_diags) = self.objj_deref_struct(left_node)
+      diags = merge_diags(diags, deref_diags)
+      let Some(deref) = deref_opt else {
+        return (None, diags)
+      }
+      // The @deref assignment operator is an unfielded anonymous choice; it is
+      // recovered by scanning for the operator token between target and value.
+      let operator = self.scan_assignment_op(node)
+      let lowered = ObjjDerefAssignment { left: deref, operator, right: &right, pos }
+      return (
+        Some(Expression.Assignment(AssignmentExpression.ObjjDeref(lowered))),
+        diags,
+      )
+    }
+
+    let (target_opt, target_diags) = self.assignment_target(left_node)
+    diags = merge_diags(diags, target_diags)
+    let Some(target) = target_opt else {
+      return (None, diags)
+    }
+    let lowered = StandardAssignment { left: target, right: &right, pos }
+    (
+      Some(Expression.Assignment(AssignmentExpression.Standard(lowered))),
+      diags,
+    )
+  }
+
+  // scan_assignment_op recovers the @deref-assignment operator from the
+  // unfielded anonymous token between target and value.  Absent a match the
+  // bare '=' is assumed, which is the dominant case.
+  fn scan_assignment_op(self, node: capp.CSTNode) -> AssignmentOp {
+    for i in 0..node.ChildCount() {
+      let child = node.Child(i)
+      match self.assignment_op(child) {
+        Some(op) => return op,
+        None => (),
+      }
+    }
+    AssignmentOp.Assign
+  }
+
+  // assignment_target lowers the StandardAssignment left side: a parenthesized
+  // expression, or an lhs (identifier / member / subscript / undefined).
+  // Destructuring patterns are deferred.
+  fn assignment_target(self, node: capp.CSTNode) -> (Option<AssignmentTarget>, Slice<Diagnostic>) {
+    if node.Kind() == capp.NodeKindParenthesizedExpression {
+      let (paren_opt, diags) = self.parenthesized(node)
+      let Some(paren) = paren_opt else {
+        return (None, diags)
+      }
+      return (Some(AssignmentTarget.Parenthesized(&paren)), diags)
+    }
+    let (lhs_opt, diags) = self.lhs_expression(node)
+    let Some(lhs) = lhs_opt else {
+      return (None, diags)
+    }
+    (Some(AssignmentTarget.Lhs(&lhs)), diags)
+  }
+
+  // lhs_expression lowers an assignment / binding target to LhsExpression.
+  // Member and subscript draw on the bare-struct producers.  Destructuring
+  // patterns (object_pattern / array_pattern) are deferred behind the
+  // unhandled catch-all.
+  fn lhs_expression(self, node: capp.CSTNode) -> (Option<LhsExpression>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindIdentifier {
+      return (Some(LhsExpression.Identifier(ident_of(node))), [])
+    }
+    if kind == capp.NodeKindUndefined {
+      return (
+        Some(LhsExpression.Undefined(UndefinedLiteral { pos: node_pos(node) })),
+        [],
+      )
+    }
+    if kind == capp.NodeKindMemberExpression {
+      let (member_opt, diags) = self.member_expr_struct(node)
+      let Some(member) = member_opt else {
+        return (None, diags)
+      }
+      return (Some(LhsExpression.Member(&member)), diags)
+    }
+    if kind == capp.NodeKindSubscriptExpression {
+      let (subscript_opt, diags) = self.subscript_expr_struct(node)
+      let Some(subscript) = subscript_opt else {
+        return (None, diags)
+      }
+      return (Some(LhsExpression.Subscript(&subscript)), diags)
+    }
+    (None, self.unhandled(node, "assignment target", kind))
+  }
+
+  fn augmented_assignment_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let left_node = match node.ChildByFieldName(capp.FieldLeft) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "augmented assignment without target"),
+      ),
+    }
+    let (target_opt, target_diags) = self.augmented_target(left_node)
+    diags = merge_diags(diags, target_diags)
+    let Some(target) = target_opt else {
+      return (None, diags)
+    }
+
+    let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "augmented assignment without operator"),
+        ),
+      ),
+    }
+    let Some(operator) = self.augmented_op(operator_node) else {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.unhandled(
+            operator_node,
+            "augmented operator",
+            operator_node.Kind(),
+          ),
+        ),
+      )
+    }
+
+    let right_node = match node.ChildByFieldName(capp.FieldRight) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "augmented assignment without value"),
+        ),
+      ),
+    }
+    let (right_opt, right_diags) = self.expression(right_node)
+    diags = merge_diags(diags, right_diags)
+    let Some(right) = right_opt else {
+      return (None, diags)
+    }
+
+    let lowered = AugmentedAssignmentExpression { 
+      left: target,
+      operator,
+      right: &right,
+      pos,
+    }
+    (Some(Expression.AugmentedAssignment(lowered)), diags)
+  }
+
+  // augmented_target: the narrower target set permitted on +=-family
+  // assignment — identifier, member, subscript, or parenthesized.  No
+  // destructuring or deref here, per the grammar.
+  fn augmented_target(self, node: capp.CSTNode) -> (Option<AugmentedAssignmentTarget>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindIdentifier {
+      return (Some(AugmentedAssignmentTarget.Identifier(ident_of(node))), [])
+    }
+    if kind == capp.NodeKindMemberExpression {
+      let (member_opt, diags) = self.member_expr_struct(node)
+      let Some(member) = member_opt else {
+        return (None, diags)
+      }
+      return (Some(AugmentedAssignmentTarget.Member(&member)), diags)
+    }
+    if kind == capp.NodeKindSubscriptExpression {
+      let (subscript_opt, diags) = self.subscript_expr_struct(node)
+      let Some(subscript) = subscript_opt else {
+        return (None, diags)
+      }
+      return (Some(AugmentedAssignmentTarget.Subscript(&subscript)), diags)
+    }
+    if kind == capp.NodeKindParenthesizedExpression {
+      let (paren_opt, diags) = self.parenthesized(node)
+      let Some(paren) = paren_opt else {
+        return (None, diags)
+      }
+      return (Some(AugmentedAssignmentTarget.Parenthesized(&paren)), diags)
+    }
+    (None, self.unhandled(node, "augmented target", kind))
+  }
+
+  // -------------------------------------------------------------------------
+  // Expressions — new / object / array / function / regex
+  // -------------------------------------------------------------------------
+
+  // new_expr_struct is recursive: `new new C()()` nests, with the constructor
+  // either another new_expression or a primary.  The constructor field is the
+  // hidden primary_expression supertype, surfacing as its concrete primary.
+  fn new_expr_struct(self, node: capp.CSTNode) -> (Option<NewExpression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let constructor_node = match node.ChildByFieldName(capp.FieldConstructor) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "new without constructor")),
+    }
+    let constructor = if constructor_node.Kind() == capp.NodeKindNewExpression {
+      let (inner_opt, ds) = self.new_expr_struct(constructor_node)
+      diags = merge_diags(diags, ds)
+      match inner_opt {
+        Some(inner) => NewConstructor.New(&inner),
+        None => return (None, diags),
+      }
+    } else {
+      let (primary_opt, ds) = self.primary_struct(constructor_node)
+      diags = merge_diags(diags, ds)
+      match primary_opt {
+        Some(primary) => NewConstructor.Primary(&primary),
+        None => return (None, diags),
+      }
+    }
+
+    let mut arguments: Option<Arguments> = None
+    match node.ChildByFieldName(capp.FieldArguments) {
+      Some(arguments_node) => {
+        let (args, args_diags) = self.arguments(arguments_node)
+        diags = merge_diags(diags, args_diags)
+        arguments = Some(args)
+      },
+      None => (),
+    }
+
+    (Some(NewExpression { constructor, arguments, pos }), diags)
+  }
+
+  // primary_struct unwraps a lowered Expression to its bare PrimaryExpression,
+  // for the one position — new's constructor — that requires it.  A
+  // non-primary expression in constructor position is a grammar impossibility;
+  // it is reported rather than silently wrapped.
+  fn primary_struct(self, node: capp.CSTNode) -> (Option<PrimaryExpression>, Slice<Diagnostic>) {
+    let (expr_opt, diags) = self.expression(node)
+    let Some(expr) = expr_opt else {
+      return (None, diags)
+    }
+    match expr {
+      Expression.Primary(primary) => (Some(primary), diags),
+      _ => (None, merge_diags(
+        diags,
+        self.malformed(node, "new constructor is not a primary expression"),
+      )),
+    }
+  }
+
+  fn object_literal(self, node: capp.CSTNode) -> (Option<Object>, Slice<Diagnostic>) {
+    let mut members: Slice<ObjectMember> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindPair {
+        let (pair_opt, ds) = self.pair(child)
+        diags = merge_diags(diags, ds)
+        match pair_opt {
+          Some(pair) => members = members.append(ObjectMember.Pair(pair)),
+          None => (),
+        }
+      } else if kind == capp.NodeKindSpreadElement {
+        let (spread_opt, ds) = self.spread(child)
+        diags = merge_diags(diags, ds)
+        match spread_opt {
+          Some(spread) => members = members.append(ObjectMember.Spread(spread)),
+          None => (),
+        }
+      } else if kind == capp.NodeKindMethodDefinition {
+        // The ECMAScript object-method shorthand { foo() {} } is distinct
+        // from the Objective-J method form and absent from the corpus; it is
+        // deferred until a corpus exercises it.
+        diags = merge_diags(diags, self.unhandled(child, "object member", kind))
+      } else if kind == capp.NodeKindShorthandPropertyIdentifier {
+        members = members.append(ObjectMember.Shorthand(ident_of(child)))
+      } else {
+        diags = merge_diags(diags, self.unhandled(child, "object member", kind))
+      }
+    }
+    (Some(Object { members, pos: node_pos(node) }), diags)
+  }
+
+  fn pair(self, node: capp.CSTNode) -> (Option<Pair>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let key_node = match node.ChildByFieldName(capp.FieldKey) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "pair without key")),
+    }
+    let (key_opt, key_diags) = self.property_name(key_node)
+    diags = merge_diags(diags, key_diags)
+    let Some(key) = key_opt else {
+      return (None, diags)
+    }
+
+    let value_node = match node.ChildByFieldName(capp.FieldValue) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "pair without value")),
+      ),
+    }
+    let (value_opt, value_diags) = self.expression(value_node)
+    diags = merge_diags(diags, value_diags)
+    let Some(value) = value_opt else {
+      return (None, diags)
+    }
+
+    (Some(Pair { key, value: &value, pos }), diags)
+  }
+
+  // property_name lowers the _property_name supertype plus its Objective-J
+  // objj_string_literal addition.
+  fn property_name(self, node: capp.CSTNode) -> (Option<PropertyName>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindPropertyIdentifier {
+      return (Some(PropertyName.Identifier(ident_of(node))), [])
+    }
+    if kind == capp.NodeKindPrivatePropertyIdentifier {
+      return (
+        Some(PropertyName.Private(
+          PrivatePropertyIdentifier { text: node.Text(), pos: node_pos(node) },
+        )),
+        [],
+      )
+    }
+    if kind == capp.NodeKindString {
+      let (literal, diags) = self.string_literal(node)
+      return (Some(PropertyName.String(literal)), diags)
+    }
+    if kind == capp.NodeKindNumber {
+      return (
+        Some(PropertyName.Number(NumberLiteral { text: node.Text(), pos: node_pos(node) })),
+        [],
+      )
+    }
+    if kind == capp.NodeKindComputedPropertyName {
+      let (computed_opt, diags) = self.computed_property_name(node)
+      let Some(computed) = computed_opt else {
+        return (None, diags)
+      }
+      return (Some(PropertyName.Computed(computed)), diags)
+    }
+    if kind == capp.NodeKindObjjStringLiteral {
+      // objj_string_literal as a property key lands with the ObjJ tier.
+      return (None, self.unhandled(node, "property name", kind))
+    }
+    (None, self.unhandled(node, "property name", kind))
+  }
+
+  fn computed_property_name(self, node: capp.CSTNode) -> (Option<ComputedPropertyName>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (expr_opt, diags) = self.expression(child)
+      let Some(expr) = expr_opt else {
+        return (None, diags)
+      }
+      return (Some(ComputedPropertyName { expression: &expr, pos }), diags)
+    }
+    (None, self.malformed(node, "computed property name without expression"))
+  }
+
+  fn native_array(self, node: capp.CSTNode) -> (Option<NativeArray>, Slice<Diagnostic>) {
+    let mut elements: Slice<ArrayElement> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindSpreadElement {
+        let (spread_opt, ds) = self.spread(child)
+        diags = merge_diags(diags, ds)
+        match spread_opt {
+          Some(spread) => elements = elements.append(ArrayElement.Spread(spread)),
+          None => (),
+        }
+      } else {
+        let (expr_opt, ds) = self.expression(child)
+        diags = merge_diags(diags, ds)
+        match expr_opt {
+          Some(expr) => elements = elements.append(ArrayElement.Expression(&expr)),
+          None => (),
+        }
+      }
+    }
+    (Some(NativeArray { elements, pos: node_pos(node) }), diags)
+  }
+
+  fn function_expression(self, node: capp.CSTNode) -> (Option<FunctionExpression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_async = has_anonymous_child(node, "async")
+    let name = node.ChildByFieldName(capp.FieldName).map(ident_of)
+
+    let parameters_node = match node.ChildByFieldName(capp.FieldParameters) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "function expression without parameters"),
+      ),
+    }
+    let (parameters, param_diags) = self.formal_parameters(parameters_node)
+    let mut diags = param_diags
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "function expression without body")),
+      ),
+    }
+    let (body, body_diags) = self.statement_block(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    (
+      Some(FunctionExpression { is_async, name, parameters, body, pos }),
+      diags,
+    )
+  }
+
+  // regex carries pattern and optional flags as named fields of literal text.
+  fn regex_literal(self, node: capp.CSTNode) -> (Option<Regex>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let pattern_node = match node.ChildByFieldName(capp.FieldPattern) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "regex without pattern")),
+    }
+    let pattern = RegexPattern { 
+      text: pattern_node.Text(),
+      pos: node_pos(pattern_node),
+    }
+    let mut flags: Option<RegexFlags> = None
+    match node.ChildByFieldName(capp.FieldFlags) {
+      Some(flags_node) => {
+        flags = Some(
+          RegexFlags { text: flags_node.Text(), pos: node_pos(flags_node) },
+        )
+      },
+      None => (),
+    }
+    (Some(Regex { pattern, flags, pos }), [])
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — ref / deref
+  // -------------------------------------------------------------------------
+
+  fn objj_ref_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (expr_opt, diags) = self.expression(child)
+      let Some(expr) = expr_opt else {
+        return (None, diags)
+      }
+      let lowered = ObjjRefExpression { argument: &expr, pos }
+      return (
+        Some(Expression.Primary(PrimaryExpression.ObjjRef(lowered))),
+        diags,
+      )
+    }
+    (None, self.malformed(node, "@ref without argument"))
+  }
+
+  fn objj_deref_struct(self, node: capp.CSTNode) -> (Option<ObjjDerefExpression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (expr_opt, diags) = self.expression(child)
+      let Some(expr) = expr_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjDerefExpression { argument: &expr, pos }), diags)
+    }
+    (None, self.malformed(node, "@deref without argument"))
   }
 
   // -------------------------------------------------------------------------
