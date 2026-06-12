@@ -7,34 +7,76 @@
 //
 // Phase 6: BuildSymbolTable
 //
-// Walks the sorted parse trees and constructs a complete symbol table for
-// the project.  Files are processed in ctx.sorted.order so that every class
-// and protocol referenced by a file is recorded before that file is visited.
+// Walks the typed Programs of the parsed units in ctx.sorted.order and
+// constructs a complete symbol table for the project.  This is the first
+// consumer of the typed AST: no CSTNode, no string-keyed node kind, and no
+// capp-parse constant appears below this comment.
 //
 // The symbol table is the shared foundation for phase 7 (TypeCheck) and
 // phase 8 (Compile).  Phase 7 checks against it; phase 8 drives code
 // generation from it.  Neither pass rebuilds it; both receive it read-only
 // via ctx.symbols.
 //
-// Content extracted from each file:
-//   — @implementation declarations: class name, superclass, ivar list,
-//     method signatures (name, type indicator, return type, parameter types)
-//   — @protocol declarations: protocol name, required and optional methods
-//   — @class forward declarations: name only, resolved in a later file
-//   — @typedef declarations: name only
+// Content extracted from each unit's Program:
+//   — Statement.ObjjClassImpl: class name, superclass, category, protocol
+//     conformances, ivars (with @accessors), method definitions
+//   — Statement.ObjjProtocol: protocol name, inherited protocols, and
+//     required/optional method declarations
+//   — Statement.ObjjClassForward / ObjjTypedef / ObjjGlobal: name only
+//   — ObjjImplementationMember.Global: member-level @global declarations
 //
-// The tree-sitter grammar exposes all of these as named nodes with typed
-// fields (see grammar.js: objj_class_implementation, objj_protocol_declaration,
-// objj_method_definition, objj_instance_variable, objj_field_definition).
-// Position information is carried through to every symbol for phase 7
-// diagnostic attribution and editor invocation.
+// Settled decisions (recorded in PROGRESS-SNAPSHOT.md, June 12 2026):
+//
+//   Frontier units — transitively discovered units contribute edges only
+//   (phase 4) and therefore no symbols.  AppKit, Foundation, and the other
+//   contents of ./Frameworks are produced by the legacy toolchain until the
+//   normal application project structure is fully handled; resolution of
+//   symbols against framework bundles is a later, separate mechanism.
+//
+//   Preprocessor guards — a symbol declared inside a #if block is recorded
+//   unconditionally, tagged with the full stack of guarding conditions
+//   (negated for #else branches).  Both branches contribute; consumers
+//   decide.  guards is empty for unconditional symbols.  Duplicate-symbol
+//   diagnostics consider only unguarded declarations, because the same name
+//   in opposing branches legitimately coexists.
+//
+//   @accessors — getter/setter MethodSymbol entries are synthesized at
+//   table-build time, mirroring the legacy preprocessor (Preprocessor.js:
+//   property defaults to the ivar name; the default setter preserves a
+//   leading underscore as a prefix: _name → _setName:).  Synthesized symbols
+//   carry is_synthesized so phase 8 knows to generate bodies.  One deliberate
+//   deviation: the legacy preprocessor typed both accessors `(id)`; the
+//   symbols carry the declared ivar type, which is strictly more informative
+//   and identical at runtime.  An explicit method with the same selector
+//   suppresses synthesis silently — the hand-written method wins.
+//
+//   Conflict policy — strict.  Duplicate unguarded primary @implementation
+//   or @protocol: Error naming both sites.  Duplicate (class, category)
+//   pair: Warning.  Categories remain separate ClassSymbols (category set);
+//   no merging.  Forward-then-concrete is normal and silent.  Duplicate
+//   selector within one @implementation: Warning.
+//
+// Positions on symbols are stored 1-based for direct diagnostic attribution
+// and editor invocation; Position values from the AST are 0-based and are
+// normalised at construction, mirroring diagnostics.lis.
 //
 // **
+import "go:errors"
 import "go:fmt"
+import "go:strings"
 
 // ---------------------------------------------------------------------------
 // Symbol table types
 // ---------------------------------------------------------------------------
+
+// PreprocGuard records one #if condition governing a symbol's existence.
+// negated marks symbols declared in the #else branch of the condition.
+// A symbol's guards slice is the full stack, outermost first; the symbol
+// exists exactly when every guard holds.
+pub struct PreprocGuard {
+  pub condition: PreprocCondition,
+  pub negated: bool,
+}
 
 // SymbolTable is the output of phase 6 and a read-only input to phases 7 and 8.
 pub struct SymbolTable {
@@ -42,10 +84,13 @@ pub struct SymbolTable {
   pub protocols: Slice<ProtocolSymbol>,
   pub forwards: Slice<ForwardSymbol>,
   pub typedefs: Slice<TypedefSymbol>,
+  pub globals: Slice<GlobalSymbol>,
   pub diags: Slice<Diagnostic>,
 }
 
-// ClassSymbol records a single @implementation declaration.
+// ClassSymbol records a single @implementation declaration.  A category
+// implementation is its own ClassSymbol with category set; it is never
+// merged into the primary implementation.
 pub struct ClassSymbol {
   pub name: string,
   pub superclass: Option<string>,
@@ -53,6 +98,7 @@ pub struct ClassSymbol {
   pub protocols: Slice<string>, // protocol names from the conformance list
   pub ivars: Slice<IvarSymbol>,
   pub methods: Slice<MethodSymbol>,
+  pub guards: Slice<PreprocGuard>,
   pub file: string, // absolute path of the defining file
   pub line: int, // 1-based line of @implementation
   pub col: int, // 1-based column of @implementation
@@ -62,6 +108,7 @@ pub struct ClassSymbol {
 pub struct IvarSymbol {
   pub name: string,
   pub type_name: string,
+  pub guards: Slice<PreprocGuard>,
   pub file: string,
   pub line: int,
   pub col: int,
@@ -69,20 +116,30 @@ pub struct IvarSymbol {
 
 // MethodSymbol records a single method definition or declaration.
 // is_class_method distinguishes + (class) from - (instance) methods.
+// is_synthesized marks @accessors getters/setters, whose bodies phase 8
+// generates; their position is that of the originating field definition.
 pub struct MethodSymbol {
   pub selector: string, // full selector, e.g. "setFrame:display:"
   pub is_class_method: bool,
   pub return_type: string,
   pub param_types: Slice<string>,
+  pub is_variadic: bool, // trailing , ... on the final parameter part
+  pub is_synthesized: bool,
+  pub guards: Slice<PreprocGuard>,
   pub file: string,
   pub line: int,
   pub col: int,
 }
 
-// ProtocolSymbol records a single @protocol declaration.
+// ProtocolSymbol records a single @protocol declaration.  Methods are
+// partitioned by the ordered @optional/@required markers; the initial state
+// is required (Objective-C rule).
 pub struct ProtocolSymbol {
   pub name: string,
-  pub methods: Slice<MethodSymbol>,
+  pub protocols: Slice<string>, // inherited protocol names
+  pub required: Slice<MethodSymbol>,
+  pub optional: Slice<MethodSymbol>,
+  pub guards: Slice<PreprocGuard>,
   pub file: string,
   pub line: int,
   pub col: int,
@@ -91,6 +148,7 @@ pub struct ProtocolSymbol {
 // ForwardSymbol records a single @class forward declaration.
 pub struct ForwardSymbol {
   pub name: string,
+  pub guards: Slice<PreprocGuard>,
   pub file: string,
   pub line: int,
   pub col: int,
@@ -99,70 +157,864 @@ pub struct ForwardSymbol {
 // TypedefSymbol records a single @typedef declaration.
 pub struct TypedefSymbol {
   pub name: string,
+  pub guards: Slice<PreprocGuard>,
+  pub file: string,
+  pub line: int,
+  pub col: int,
+}
+
+// GlobalSymbol records a single @global declaration, whether at top level or
+// inside an @implementation body.
+pub struct GlobalSymbol {
+  pub name: string,
+  pub guards: Slice<PreprocGuard>,
   pub file: string,
   pub line: int,
   pub col: int,
 }
 
 // ---------------------------------------------------------------------------
+// Internal accumulators
+// ---------------------------------------------------------------------------
+
+// Harvest is the return-and-merge accumulator for the statement walk.  Every
+// harvesting helper is pure: it returns a Harvest which the caller merges.
+struct Harvest {
+  classes: Slice<ClassSymbol>,
+  protocols: Slice<ProtocolSymbol>,
+  forwards: Slice<ForwardSymbol>,
+  typedefs: Slice<TypedefSymbol>,
+  globals: Slice<GlobalSymbol>,
+  diags: Slice<Diagnostic>,
+}
+
+fn empty_harvest() -> Harvest {
+  Harvest { 
+    classes: [],
+    protocols: [],
+    forwards: [],
+    typedefs: [],
+    globals: [],
+    diags: [],
+  }
+}
+
+fn merge_harvest(into: Harvest, from: Harvest) -> Harvest {
+  let mut out = into
+  for class_symbol in from.classes {
+    out.classes = out.classes.append(class_symbol)
+  }
+  for protocol in from.protocols {
+    out.protocols = out.protocols.append(protocol)
+  }
+  for forward in from.forwards {
+    out.forwards = out.forwards.append(forward)
+  }
+  for typedef in from.typedefs {
+    out.typedefs = out.typedefs.append(typedef)
+  }
+  for global in from.globals {
+    out.globals = out.globals.append(global)
+  }
+  out.diags = merge_diags(out.diags, from.diags)
+  out
+}
+
+// IvarHarvest accumulates the ivar-block walk: the ivar symbols themselves,
+// the accessor methods synthesized from their @accessors directives, and any
+// duplicate-ivar diagnostics.
+struct IvarHarvest {
+  ivars: Slice<IvarSymbol>,
+  accessors: Slice<MethodSymbol>,
+  diags: Slice<Diagnostic>,
+}
+
+// AccessorSpec is the decoded attribute surface of one @accessors directive.
+struct AccessorSpec {
+  property: string,
+  getter: Option<string>,
+  setter: Option<string>,
+  readonly: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Phase entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_build_symbol_table(_ctx: Ref<BuildContext>) -> Result<SymbolTable, error> {
+pub fn run_build_symbol_table(ctx: Ref<BuildContext>) -> Result<SymbolTable, error> {
   let phase = BuildPhase.BuildSymbolTable
-  fmt.Println("  build symbol table")
-  let mut diags: Slice<Diagnostic> = []
 
-  // TODO: iterate ctx.sorted.order; for each path retrieve the
-  //       corresponding ParsedUnit and walk its CST
-  // TODO: for each objj_class_implementation node extract:
-  //         name (field: name), superclass (field: superclass),
-  //         category (field: category), protocol list (field: protocols),
-  //         ivar block (objj_instance_variables → objj_field_definition),
-  //         method definitions (objj_method_definition)
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: extract class symbols from @implementation nodes",
-  ))
+  let parsed = match ctx.parsed {
+    Some(p) => p,
+    None => return Err(errors.New(
+      "build symbol table: parsed units unavailable",
+    )),
+  }
+  let sorted = match ctx.sorted {
+    Some(s) => s,
+    None => return Err(errors.New(
+      "build symbol table: sorted units unavailable",
+    )),
+  }
 
-  // TODO: for each objj_method_definition node reconstruct the full
-  //       selector string from objj_method_parameter_part name_part fields
-  //       and extract return type, parameter types, and +/- indicator
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: reconstruct method selectors and signatures",
-  ))
+  // path → index+1 into parsed.units; the Go zero value 0 means absent.
+  // sorted.order and parsed.units name the same file set (phase 5 seeds its
+  // node set from parsed.units), so a miss indicates a pipeline defect and is
+  // surfaced as a warning rather than silently skipped.
+  let mut unit_index: Map<string, int> = Map.new<string, int>()
+  let mut slot = 0
+  for unit in parsed.units {
+    unit_index[unit.source.path] = slot + 1
+    slot += 1
+  }
 
-  // TODO: for each objj_protocol_declaration node extract:
-  //         name, required/optional method declarations
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: extract protocol symbols from @protocol nodes",
-  ))
+  let mut total = empty_harvest()
+  for path in sorted.order {
+    let index = unit_index[path]
+    if index == 0 {
+      total.diags = total.diags.append(diag_warn(
+        phase,
+        f"sorted order names {path} but no parsed unit carries it",
+      ))
+    } else {
+      let unit = parsed.units[index - 1]
+      for statement in unit.program.body {
+        total = merge_harvest(
+          total,
+          harvest_statement(statement, [], unit.source.path),
+        )
+      }
+    }
+  }
 
-  // TODO: for each objj_class_forward_declaration node record a ForwardSymbol
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: record @class forward declarations",
-  ))
+  let diags = merge_diags(total.diags, duplicate_diags(total))
 
-  // TODO: for each objj_typedef node record a TypedefSymbol
-  diags = diags.append(diag_info(phase, "TODO: record @typedef declarations"))
+  for d in diags {
+    print_symbol_diag(d)
+  }
 
-  // TODO: detect duplicate class definitions (same name, not a category)
-  //       and emit Error diagnostics with both definition sites
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: detect duplicate class definitions",
-  ))
+  let mut category_count = 0
+  let mut method_count = 0
+  let mut synthesized_count = 0
+  let mut ivar_count = 0
+  for class_symbol in total.classes {
+    if let Some(_) = class_symbol.category { category_count += 1 }
+    ivar_count += class_symbol.ivars.length()
+    method_count += class_symbol.methods.length()
+    for method in class_symbol.methods {
+      if method.is_synthesized { synthesized_count += 1 }
+    }
+  }
+
+  fmt.Println(
+    f"✓  symbol table: {total.classes.length()} classes ({category_count} categories), {total.protocols.length()} protocols, {total.forwards.length()} forwards, {total.typedefs.length()} typedefs, {total.globals.length()} globals",
+  )
+  fmt.Println(
+    f"   {method_count} methods ({synthesized_count} synthesized), {ivar_count} ivars, {diags.length()} diagnostics",
+  )
 
   Ok(
     SymbolTable { 
-      classes: [],
-      protocols: [],
-      forwards: [],
-      typedefs: [],
+      classes: total.classes,
+      protocols: total.protocols,
+      forwards: total.forwards,
+      typedefs: total.typedefs,
+      globals: total.globals,
       diags,
     },
   )
+}
+
+// print_symbol_diag surfaces one phase-6 diagnostic in the build output.
+// Table-level diagnostics (pipeline defects) carry no position and print
+// without a location suffix.
+fn print_symbol_diag(d: Diagnostic) {
+  let Some(file) = d.file else {
+    fmt.Println(f"   {d.message}")
+    return
+  }
+  let line = d.line.unwrap_or(0)
+  let col = d.col.unwrap_or(0)
+  fmt.Println(f"   {d.message}  {file}:{line}:{col}")
+}
+
+// ---------------------------------------------------------------------------
+// Statement walk
+// ---------------------------------------------------------------------------
+
+// extend_guards returns a fresh guard stack extended by one condition.
+// The copy is built from empty deliberately: append on a shared backing
+// array would let the #if and #else branches of one block overwrite each
+// other's extension (the aliasing hazard documented at phase05 dfs_cycle).
+fn extend_guards(
+  guards: Slice<PreprocGuard>,
+  condition: PreprocCondition,
+  negated: bool,
+) -> Slice<PreprocGuard> {
+  let mut fresh: Slice<PreprocGuard> = []
+  for guard in guards {
+    fresh = fresh.append(guard)
+  }
+  fresh.append(PreprocGuard { condition, negated })
+}
+
+// harvest_statement extracts the symbols declared by one top-level statement.
+// Statements that declare no symbols — expression statements, control flow,
+// imports — yield an empty harvest.
+fn harvest_statement(
+  statement: Statement,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> Harvest {
+  match statement {
+    ObjjClassImpl(implementation) => harvest_class(implementation, guards, file),
+    ObjjProtocol(declaration) => harvest_protocol(declaration, guards, file),
+    ObjjClassForward(forward) => {
+      let mut out = empty_harvest()
+      out.forwards = out.forwards.append(
+        ForwardSymbol { 
+          name: forward.name.text,
+          guards,
+          file,
+          line: forward.pos.row + 1,
+          col: forward.pos.col + 1,
+        },
+      )
+      out
+    },
+    ObjjTypedef(typedef) => {
+      let mut out = empty_harvest()
+      out.typedefs = out.typedefs.append(
+        TypedefSymbol { 
+          name: typedef.name.text,
+          guards,
+          file,
+          line: typedef.pos.row + 1,
+          col: typedef.pos.col + 1,
+        },
+      )
+      out
+    },
+    ObjjGlobal(global) => {
+      let mut out = empty_harvest()
+      out.globals = out.globals.append(global_symbol(global, guards, file))
+      out
+    },
+    PreprocIf(block) => harvest_preproc_block(block, guards, file),
+    _ => empty_harvest(),
+  }
+}
+
+// harvest_preproc_block recurses into a top-level #if block.  Symbols in the
+// body carry the condition; symbols in the #else branch carry it negated.
+fn harvest_preproc_block(
+  block: PreprocIfBlock,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> Harvest {
+  let mut out = empty_harvest()
+  let body_guards = extend_guards(guards, block.if_line.condition, false)
+  for item in block.body {
+    out = merge_harvest(out, harvest_block_item(item, body_guards, file))
+  }
+  if let Some(branch) = block.else_branch {
+    let else_guards = extend_guards(guards, block.if_line.condition, true)
+    for item in branch.body {
+      out = merge_harvest(out, harvest_block_item(item, else_guards, file))
+    }
+  }
+  out
+}
+
+fn harvest_block_item(
+  item: PreprocBlockItem,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> Harvest {
+  match item {
+    Nested(block) => harvest_preproc_block(block, guards, file),
+    Statement(statement) => harvest_statement(statement, guards, file),
+    Directive(_) => empty_harvest(),
+  }
+}
+
+fn global_symbol(
+  global: ObjjGlobalDeclaration,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> GlobalSymbol {
+  GlobalSymbol { 
+    name: global.name.text,
+    guards,
+    file,
+    line: global.pos.row + 1,
+    col: global.pos.col + 1,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Class implementations
+// ---------------------------------------------------------------------------
+
+// selector_key namespaces a selector by method scope for occupancy tracking:
+// class (+) and instance (-) methods occupy disjoint selector spaces.
+fn selector_key(is_class_method: bool, selector: string) -> string {
+  if is_class_method { f"+{selector}" } else { f"-{selector}" }
+}
+
+// harvest_class extracts one ClassSymbol from an @implementation.
+//
+// Two passes: explicit members first, recording selector occupancy; then the
+// ivar block, whose @accessors synthesis consults that occupancy so a
+// hand-written method silently wins over a synthesized accessor.  Methods
+// cannot be individually #if-guarded in the model (member-level preprocessor
+// content lowers as raw PreprocDirective text), so explicit methods carry the
+// class's own guard stack.
+fn harvest_class(
+  implementation: ObjjClassImplementation,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> Harvest {
+  let phase = BuildPhase.BuildSymbolTable
+  let mut out = empty_harvest()
+
+  let mut methods: Slice<MethodSymbol> = []
+  let mut occupied: Map<string, int> = Map.new<string, int>()
+
+  for member in implementation.members {
+    match member {
+      Method(definition) => {
+        let symbol = method_symbol(
+          definition.scope,
+          definition.return_type,
+          definition.selector,
+          definition.pos,
+          guards,
+          file,
+        )
+        let key = selector_key(symbol.is_class_method, symbol.selector)
+        if occupied[key] > 0 {
+          out.diags = out.diags.append(diag_warn_at(
+            phase,
+            f"duplicate method {key} in @implementation {implementation.name.text}",
+            file,
+            definition.pos.row,
+            definition.pos.col,
+          ))
+        }
+        occupied[key] = occupied[key] + 1
+        methods = methods.append(symbol)
+      },
+      Global(global) => {
+        out.globals = out.globals.append(global_symbol(global, guards, file))
+      },
+      _ => (),
+    }
+  }
+
+  let mut ivars: Slice<IvarSymbol> = []
+  if let Some(block) = implementation.ivars {
+    let mut seen: Map<string, int> = Map.new<string, int>()
+    let mut harvested = IvarHarvest { ivars: [], accessors: [], diags: [] }
+    for member in block.members {
+      harvested = match member {
+        Variable(variable) => instance_variable_harvest(
+          harvested,
+          variable,
+          guards,
+          occupied,
+          seen,
+          implementation.name.text,
+          file,
+        ),
+        PreprocIf(nested) => preproc_ivar_harvest(
+          harvested,
+          nested,
+          guards,
+          occupied,
+          seen,
+          implementation.name.text,
+          file,
+        ),
+      }
+    }
+    ivars = harvested.ivars
+    for accessor in harvested.accessors {
+      methods = methods.append(accessor)
+    }
+    out.diags = merge_diags(out.diags, harvested.diags)
+  }
+
+  out.classes = out.classes.append(
+    ClassSymbol { 
+      name: implementation.name.text,
+      superclass: implementation.superclass.map(identifier_text),
+      category: implementation.category.map(identifier_text),
+      protocols: protocol_names(implementation.protocols),
+      ivars,
+      methods,
+      guards,
+      file,
+      line: implementation.pos.row + 1,
+      col: implementation.pos.col + 1,
+    },
+  )
+  out
+}
+
+fn identifier_text(identifier: Identifier) -> string {
+  identifier.text
+}
+
+fn protocol_names(list: Option<ObjjProtocolReferenceList>) -> Slice<string> {
+  let Some(reference_list) = list else {
+    return []
+  }
+  let mut names: Slice<string> = []
+  for identifier in reference_list.protocols {
+    names = names.append(identifier.text)
+  }
+  names
+}
+
+// ---------------------------------------------------------------------------
+// Ivars and accessor synthesis
+// ---------------------------------------------------------------------------
+
+// instance_variable_harvest folds one ivar-block entry into the accumulator.
+// Visibility specifiers (@private and friends) partition the block but carry
+// no symbol.  Duplicate-ivar detection considers only unguarded declarations;
+// seen counts those by name.
+fn instance_variable_harvest(
+  into: IvarHarvest,
+  variable: ObjjInstanceVariable,
+  guards: Slice<PreprocGuard>,
+  mut occupied: Map<string, int>,
+  mut seen: Map<string, int>,
+  class_name: string,
+  file: string,
+) -> IvarHarvest {
+  match variable {
+    Visibility(_) => into,
+    Field(field) => {
+      let phase = BuildPhase.BuildSymbolTable
+      let mut out = into
+      if guards.is_empty() {
+        if seen[field.name.text] > 0 {
+          out.diags = out.diags.append(diag_error_at(
+            phase,
+            f"duplicate instance variable {field.name.text} in @implementation {class_name}",
+            file,
+            field.pos.row,
+            field.pos.col,
+          ))
+        }
+        seen[field.name.text] = seen[field.name.text] + 1
+      }
+      out.ivars = out.ivars.append(
+        IvarSymbol { 
+          name: field.name.text,
+          type_name: field.field_type.render(),
+          guards,
+          file,
+          line: field.pos.row + 1,
+          col: field.pos.col + 1,
+        },
+      )
+      for accessor in synthesize_accessors(field, occupied, guards, file) {
+        out.accessors = out.accessors.append(accessor)
+      }
+      out
+    },
+  }
+}
+
+// preproc_ivar_harvest recurses into a #if block inside an ivar block,
+// extending the guard stack exactly as the top-level walk does.
+fn preproc_ivar_harvest(
+  into: IvarHarvest,
+  block: PreprocIvarIfBlock,
+  guards: Slice<PreprocGuard>,
+  mut occupied: Map<string, int>,
+  mut seen: Map<string, int>,
+  class_name: string,
+  file: string,
+) -> IvarHarvest {
+  let mut out = into
+  let body_guards = extend_guards(guards, block.if_line.condition, false)
+  for item in block.body {
+    out = ivar_item_harvest(
+      out,
+      item,
+      body_guards,
+      occupied,
+      seen,
+      class_name,
+      file,
+    )
+  }
+  if let Some(branch) = block.else_branch {
+    let else_guards = extend_guards(guards, block.if_line.condition, true)
+    for item in branch.body {
+      out = ivar_item_harvest(
+        out,
+        item,
+        else_guards,
+        occupied,
+        seen,
+        class_name,
+        file,
+      )
+    }
+  }
+  out
+}
+
+fn ivar_item_harvest(
+  into: IvarHarvest,
+  item: PreprocIvarItem,
+  guards: Slice<PreprocGuard>,
+  mut occupied: Map<string, int>,
+  mut seen: Map<string, int>,
+  class_name: string,
+  file: string,
+) -> IvarHarvest {
+  match item {
+    Variable(variable) => instance_variable_harvest(
+      into,
+      variable,
+      guards,
+      occupied,
+      seen,
+      class_name,
+      file,
+    ),
+    Nested(block) => preproc_ivar_harvest(
+      into,
+      block,
+      guards,
+      occupied,
+      seen,
+      class_name,
+      file,
+    ),
+    Directive(_) => into,
+  }
+}
+
+// accessor_name_string renders an @accessors attribute value as a selector
+// string: Simple as a bare name, Setter with its trailing colon, Keyword with
+// a colon after every part.
+fn accessor_name_string(name: ObjjAccessorName) -> string {
+  match name {
+    Simple(identifier) => identifier.text,
+    Setter(setter) => f"{setter.name.text}:",
+    Keyword(keyword) => {
+      let mut out = f"{keyword.head.text}:"
+      for part in keyword.parts {
+        out += f"{part.text}:"
+      }
+      out
+    },
+  }
+}
+
+fn flag_into_spec(into: AccessorSpec, name: string) -> AccessorSpec {
+  let mut out = into
+  // `copy` affects only the synthesized setter body (a phase 8 concern); it
+  // does not alter the symbol surface, so only readonly is decoded here.
+  if name == "readonly" { out.readonly = true }
+  out
+}
+
+fn key_value_into_spec(into: AccessorSpec, pair: ObjjAccessorKeyValue) -> AccessorSpec {
+  let mut out = into
+  match pair.key.text {
+    "property" => out.property = accessor_name_string(pair.value),
+    "getter" => out.getter = Some(accessor_name_string(pair.value)),
+    "setter" => out.setter = Some(accessor_name_string(pair.value)),
+    _ => (),
+  }
+  out
+}
+
+// default_setter_selector applies the legacy preprocessor's rule
+// (Preprocessor.js): a leading underscore is preserved as a prefix and the
+// capitalised remainder follows `set` — name → setName:, _name → _setName:.
+fn default_setter_selector(property: string) -> string {
+  let mut prefix = ""
+  let mut stem = property
+  if !property.is_empty() && property.substring(0..1) == "_" {
+    prefix = "_"
+    stem = property.substring(1..property.length())
+  }
+  if stem.is_empty() { return f"{prefix}set:" }
+  let head = strings.ToUpper(stem.substring(0..1))
+  let tail = stem.substring(1..stem.length())
+  f"{prefix}set{head}{tail}:"
+}
+
+// synthesize_accessors produces the getter/setter MethodSymbols for one
+// field's @accessors directive, if present.
+//
+// Occupancy: a selector already occupied — by an explicit method or a prior
+// unguarded synthesis — suppresses synthesis silently.  Unguarded synthesis
+// records its selectors in occupied; guarded synthesis does not, so the
+// opposing #else branch of the same condition may synthesize the same
+// accessor pair, consistent with both-branches-recorded guard semantics.
+fn synthesize_accessors(
+  field: ObjjFieldDefinition,
+  mut occupied: Map<string, int>,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> Slice<MethodSymbol> {
+  let Some(directive) = field.accessors else {
+    return []
+  }
+
+  let mut spec = AccessorSpec { property: field.name.text, .. }
+  for attribute in directive.attributes {
+    spec = match attribute {
+      Flag(name) => flag_into_spec(spec, name.text),
+      KeyValue(pair) => key_value_into_spec(spec, pair),
+    }
+  }
+
+  let unguarded = guards.is_empty()
+  let mut out: Slice<MethodSymbol> = []
+
+  // Getter — selector defaults to the property name; the return type is the
+  // declared ivar type (deviation from the legacy `(id)`, recorded above).
+  let getter_selector = spec.getter.unwrap_or(spec.property)
+  let getter_key = selector_key(false, getter_selector)
+  if occupied[getter_key] == 0 {
+    if unguarded { occupied[getter_key] = 1 }
+    out = out.append(
+      MethodSymbol { 
+        selector: getter_selector,
+        is_class_method: false,
+        return_type: field.field_type.render(),
+        param_types: [],
+        is_variadic: false,
+        is_synthesized: true,
+        guards,
+        file,
+        line: field.pos.row + 1,
+        col: field.pos.col + 1,
+      },
+    )
+  }
+
+  if spec.readonly { return out }
+
+  let setter_selector = spec.setter.unwrap_or(default_setter_selector(
+    spec.property,
+  ))
+  let setter_key = selector_key(false, setter_selector)
+  if occupied[setter_key] == 0 {
+    if unguarded { occupied[setter_key] = 1 }
+    out = out.append(
+      MethodSymbol { 
+        selector: setter_selector,
+        is_class_method: false,
+        return_type: "void",
+        param_types: [field.field_type.render()],
+        is_variadic: false,
+        is_synthesized: true,
+        guards,
+        file,
+        line: field.pos.row + 1,
+        col: field.pos.col + 1,
+      },
+    )
+  }
+  out
+}
+
+// ---------------------------------------------------------------------------
+// Methods
+// ---------------------------------------------------------------------------
+
+// selector_param_types projects the declared parameter types of a keyword
+// selector, defaulting absent annotations to id (the Objective-C rule).
+// A unary selector has no parameters.
+fn selector_param_types(selector: ObjjMethodSelector) -> Slice<string> {
+  match selector {
+    Unary(_) => [],
+    Keyword(parts) => {
+      let mut out: Slice<string> = []
+      for part in parts {
+        out = out.append(part.parameter_type.map_or("id", |t| t.render()))
+      }
+      out
+    },
+  }
+}
+
+fn selector_is_variadic(selector: ObjjMethodSelector) -> bool {
+  match selector {
+    Unary(_) => false,
+    Keyword(parts) => {
+      let mut variadic = false
+      for part in parts {
+        if part.is_variadic { variadic = true }
+      }
+      variadic
+    },
+  }
+}
+
+// method_symbol constructs one MethodSymbol from the pieces shared by
+// ObjjMethodDefinition and ObjjMethodDeclaration.  Selector reconstruction
+// and type rendering come from cst_ops; they are not reimplemented here.
+fn method_symbol(
+  scope: ObjjMethodScope,
+  return_type: ObjjMethodType,
+  selector: ObjjMethodSelector,
+  pos: Position,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> MethodSymbol {
+  let is_class_method = match scope {
+    Class => true,
+    Instance => false,
+  }
+  MethodSymbol { 
+    selector: selector.selector_string(),
+    is_class_method,
+    return_type: return_type.render(),
+    param_types: selector_param_types(selector),
+    is_variadic: selector_is_variadic(selector),
+    is_synthesized: false,
+    guards,
+    file,
+    line: pos.row + 1,
+    col: pos.col + 1,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Protocols
+// ---------------------------------------------------------------------------
+
+// harvest_protocol extracts one ProtocolSymbol.  The ordered
+// @optional/@required markers toggle the destination of subsequent method
+// declarations; the initial state is required.
+fn harvest_protocol(
+  declaration: ObjjProtocolDeclaration,
+  guards: Slice<PreprocGuard>,
+  file: string,
+) -> Harvest {
+  let mut required: Slice<MethodSymbol> = []
+  let mut optional: Slice<MethodSymbol> = []
+  let mut required_mode = true
+
+  for member in declaration.members {
+    match member {
+      Optional(_) => required_mode = false,
+      Required(_) => required_mode = true,
+      Method(method) => {
+        let symbol = method_symbol(
+          method.scope,
+          method.return_type,
+          method.selector,
+          method.pos,
+          guards,
+          file,
+        )
+        if required_mode {
+          required = required.append(symbol)
+        } else {
+          optional = optional.append(symbol)
+        }
+      },
+    }
+  }
+
+  let mut out = empty_harvest()
+  out.protocols = out.protocols.append(
+    ProtocolSymbol { 
+      name: declaration.name.text,
+      protocols: protocol_names(declaration.protocols),
+      required,
+      optional,
+      guards,
+      file,
+      line: declaration.pos.row + 1,
+      col: declaration.pos.col + 1,
+    },
+  )
+  out
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate detection
+// ---------------------------------------------------------------------------
+
+// duplicate_diags applies the strict conflict policy across the assembled
+// table.  Only unguarded declarations participate: the same name declared in
+// opposing preprocessor branches legitimately coexists.  Primary classes and
+// (class, category) pairs occupy separate key spaces, so a category never
+// conflicts with its primary implementation.  Forward-then-concrete and
+// duplicate forwards/typedefs/globals are silent: re-declaration of a bare
+// name is harmless and common across files.
+//
+// Symbols store 1-based positions; the diag_*_at constructors expect 0-based
+// (tree-sitter convention) and normalise, so positions convert back at these
+// call sites.
+fn duplicate_diags(harvest: Harvest) -> Slice<Diagnostic> {
+  let phase = BuildPhase.BuildSymbolTable
+  let mut diags: Slice<Diagnostic> = []
+
+  let mut class_site: Map<string, string> = Map.new<string, string>()
+  for class_symbol in harvest.classes {
+    if class_symbol.guards.is_empty() {
+      let key = class_symbol.category.map_or(
+        class_symbol.name,
+        |category| f"{class_symbol.name}({category})",
+      )
+      let site = class_site[key]
+      if site == "" {
+        class_site[key] = f"{class_symbol.file}:{class_symbol.line}:{class_symbol.col}"
+      } else {
+        let diag = match class_symbol.category {
+          None => diag_error_at(
+            phase,
+            f"duplicate @implementation {key}; first declared at {site}",
+            class_symbol.file,
+            class_symbol.line - 1,
+            class_symbol.col - 1,
+          ),
+          Some(_) => diag_warn_at(
+            phase,
+            f"duplicate category @implementation {key}; first declared at {site}",
+            class_symbol.file,
+            class_symbol.line - 1,
+            class_symbol.col - 1,
+          ),
+        }
+        diags = diags.append(diag)
+      }
+    }
+  }
+
+  let mut protocol_site: Map<string, string> = Map.new<string, string>()
+  for protocol in harvest.protocols {
+    if protocol.guards.is_empty() {
+      let site = protocol_site[protocol.name]
+      if site == "" {
+        protocol_site[protocol.name] = f"{protocol.file}:{protocol.line}:{protocol.col}"
+      } else {
+        diags = diags.append(diag_error_at(
+          phase,
+          f"duplicate @protocol {protocol.name}; first declared at {site}",
+          protocol.file,
+          protocol.line - 1,
+          protocol.col - 1,
+        ))
+      }
+    }
+  }
+
+  diags
 }
