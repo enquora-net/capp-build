@@ -34,9 +34,17 @@ All records share the same wire encoding:
 ```
 
 - **marker** — a single ASCII character identifying the record type.
-- **decimal_length** — the byte count of `<content>`, encoded as ASCII
-  decimal digits, terminated by `;`.
-- **content** — exactly `decimal_length` bytes of UTF-8 text.
+- **decimal_length** — the length of `<content>` in **UTF-16 code units**
+  (JavaScript `String.length`), encoded as ASCII decimal digits,
+  terminated by `;`. *Not* a byte count: the legacy writer measures JS
+  string lengths, and the two differ wherever the content contains
+  non-ASCII characters. Proof: `CPDate.j` in the debug `Foundation.sj`
+  declares `t;31723;` over a payload of 31,724 UTF-8 bytes — one U+00B1
+  (`±`) accounts for the difference. (Corrected June 12 2026; earlier
+  revisions of this document said "byte count", which holds only for
+  ASCII payloads such as the toolchain_test records.)
+- **content** — exactly `decimal_length` UTF-16 code units of text,
+  serialized as UTF-8.
 
 There are no separators between records. Framing is entirely governed by
 the length field. The stream is terminated by an end record:
