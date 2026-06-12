@@ -249,9 +249,8 @@ fn find_cycle(residual: Slice<string>, edges: Slice<ImportEdge>) -> Slice<string
 
   for start in residual {
     if !visited[start] {
-      match dfs_cycle(start, [], residual_adj, visited, on_stack) {
-        Some(cycle) => return cycle,
-        None => (),
+      if let Some(cycle) = dfs_cycle(start, [], residual_adj, visited, on_stack) {
+        return cycle
       }
     }
   }
@@ -314,9 +313,14 @@ fn dfs_cycle(
     }
 
     if !visited[neighbor] {
-      match dfs_cycle(neighbor, path, residual_adj, visited, on_stack) {
-        Some(cycle) => return Some(cycle),
-        None => (),
+      if let Some(cycle) = dfs_cycle(
+        neighbor,
+        path,
+        residual_adj,
+        visited,
+        on_stack,
+      ) {
+        return Some(cycle)
       }
     }
   }

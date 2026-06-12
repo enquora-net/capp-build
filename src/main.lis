@@ -315,8 +315,5 @@ fn main() {
   root.AddCommand(&verify_cmd)
   root.AddCommand(&smoke_cmd)
 
-  match root.Execute() {
-    Ok(_) => (),
-    Err(e) => fmt.Println(f"error: {e}"),
-  }
+  if let Err(e) = root.Execute() { fmt.Println(f"error: {e}") }
 }

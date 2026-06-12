@@ -86,17 +86,14 @@ fn parse_plist_meta(content: string) -> Result<PlistMeta, Slice<string>> {
     ),
     (pt_opt, nm_opt, id_opt) => {
       let mut errs: Slice<string> = []
-      match pt_opt {
-        None => errs = errs.append("missing required key: CPBundlePackageType"),
-        Some(_) => (),
+      if let None = pt_opt {
+        errs = errs.append("missing required key: CPBundlePackageType")
       }
-      match nm_opt {
-        None => errs = errs.append("missing required key: CPBundleName"),
-        Some(_) => (),
+      if let None = nm_opt {
+        errs = errs.append("missing required key: CPBundleName")
       }
-      match id_opt {
-        None => errs = errs.append("missing required key: CPBundleIdentifier"),
-        Some(_) => (),
+      if let None = id_opt {
+        errs = errs.append("missing required key: CPBundleIdentifier")
       }
       Err(errs)
     },
@@ -184,15 +181,12 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
 
   // Info.plist — mandatory entry condition for all supported project types
   let plist_path = filepath.Join(root, "Info.plist")
-  match os.Stat(plist_path) {
-    Ok(_) => (),
-    Err(_) => {
-      diags = diags.append(diag_error(
-        phase,
-        "Info.plist not found — required for all Cappuccino projects",
-      ))
-      return Ok(ValidationResult { diags })
-    },
+  if let Err(_) = os.Stat(plist_path) {
+    diags = diags.append(diag_error(
+      phase,
+      "Info.plist not found — required for all Cappuccino projects",
+    ))
+    return Ok(ValidationResult { diags })
   }
 
   let content = match os.ReadFile(plist_path) {

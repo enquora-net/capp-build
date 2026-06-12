@@ -175,38 +175,35 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     match capp.ParseProject(cfg) {
       Ok(pr) => {
         for file_opt in pr.Files {
-          match file_opt {
-            None => (),
-            Some(file) => {
-              let source = SourceFile { 
-                path: file.Path,
-                kind: classify(file.Path),
+          if let Some(file) = file_opt {
+            let source = SourceFile { 
+              path: file.Path,
+              kind: classify(file.Path),
+            }
+            if file.HasError() {
+              for e in file.Errors {
+                diags = diags.append(diag_error_at(
+                  phase,
+                  e.Message,
+                  file.Path,
+                  e.Row as int,
+                  e.Column as int,
+                ))
               }
-              if file.HasError() {
-                for e in file.Errors {
-                  diags = diags.append(diag_error_at(
-                    phase,
-                    e.Message,
-                    file.Path,
-                    e.Row as int,
-                    e.Column as int,
-                  ))
-                }
-                // No tree to lower; the zero-filled Program is empty.
-                next_frontier = next_frontier.append(
-                  ParsedUnit { source, imports: [], .. },
-                )
-              } else {
-                let imports = extract_imports(file.Root())
-                let lowered = lower_program(file.Root(), source)
-                for d in lowered.diags {
-                  diags = diags.append(d)
-                }
-                next_frontier = next_frontier.append(
-                  ParsedUnit { source, imports, program: lowered.program },
-                )
+              // No tree to lower; the zero-filled Program is empty.
+              next_frontier = next_frontier.append(
+                ParsedUnit { source, imports: [], .. },
+              )
+            } else {
+              let imports = extract_imports(file.Root())
+              let lowered = lower_program(file.Root(), source)
+              for d in lowered.diags {
+                diags = diags.append(d)
               }
-            },
+              next_frontier = next_frontier.append(
+                ParsedUnit { source, imports, program: lowered.program },
+              )
+            }
           }
         }
         pr.Close()

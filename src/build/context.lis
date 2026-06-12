@@ -131,9 +131,8 @@ pub struct ProjectRoot {
 //   Frameworks/Foundation  — Application project root
 //   Info.plist             — Framework or Theme project root
 fn is_project_root(dir: string) -> bool {
-  match os.Stat(filepath.Join(dir, "Frameworks", "Foundation")) {
-    Ok(_) => return true,
-    Err(_) => (),
+  if let Ok(_) = os.Stat(filepath.Join(dir, "Frameworks", "Foundation")) {
+    return true
   }
   os.Stat(filepath.Join(dir, "Info.plist")).is_ok()
 }

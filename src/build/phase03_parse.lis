@@ -133,34 +133,31 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
   let mut statement_count = 0
 
   for file_opt in pr.Files {
-    match file_opt {
-      None => (),
-      Some(file) => {
-        if file.HasError() {
-          for e in file.Errors {
-            diags = diags.append(diag_error_at(
-              phase,
-              e.Message,
-              file.Path,
-              e.Row as int,
-              e.Column as int,
-            ))
-          }
-        } else {
-          let imports = extract_imports(file.Root())
-          let source = SourceFile { path: file.Path, kind: classify(file.Path) }
-          let lowered = lower_program(file.Root(), source)
-          for d in lowered.diags {
-            diags = diags.append(d)
-            print_lowering_diag(d)
-          }
-          lower_diag_count += lowered.diags.length()
-          statement_count += lowered.program.body.length()
-          units = units.append(
-            ParsedUnit { source, imports, program: lowered.program },
-          )
+    if let Some(file) = file_opt {
+      if file.HasError() {
+        for e in file.Errors {
+          diags = diags.append(diag_error_at(
+            phase,
+            e.Message,
+            file.Path,
+            e.Row as int,
+            e.Column as int,
+          ))
         }
-      },
+      } else {
+        let imports = extract_imports(file.Root())
+        let source = SourceFile { path: file.Path, kind: classify(file.Path) }
+        let lowered = lower_program(file.Root(), source)
+        for d in lowered.diags {
+          diags = diags.append(d)
+          print_lowering_diag(d)
+        }
+        lower_diag_count += lowered.diags.length()
+        statement_count += lowered.program.body.length()
+        units = units.append(
+          ParsedUnit { source, imports, program: lowered.program },
+        )
+      }
     }
   }
 

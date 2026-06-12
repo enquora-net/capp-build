@@ -148,10 +148,7 @@ pub fn lower_program(root: capp.CSTNode, source: SourceFile) -> LoweredUnit {
     } else {
       let (stmt_opt, stmt_diags) = lowering.statement(child)
       diags = merge_diags(diags, stmt_diags)
-      match stmt_opt {
-        Some(stmt) => body = body.append(stmt),
-        None => (), // unhandled or malformed; diagnostic already recorded
-      }
+      if let Some(stmt) = stmt_opt { body = body.append(stmt) } // unhandled or malformed; diagnostic already recorded
     }
   }
 
@@ -276,6 +273,27 @@ impl Lowering {
     if kind == capp.NodeKindLabeledStatement {
       return self.labeled_statement(node)
     }
+    if kind == capp.NodeKindObjjClassForwardDeclaration {
+      return self.objj_class_forward_declaration(node)
+    }
+    if kind == capp.NodeKindObjjGlobalDeclaration {
+      return self.objj_global_declaration(node)
+    }
+    if kind == capp.NodeKindObjjTypedef { return self.objj_typedef(node) }
+    if kind == capp.NodeKindObjjProtocolDeclaration {
+      return self.objj_protocol_declaration(node)
+    }
+    if kind == capp.NodeKindPreprocIfBlock {
+      let (block_opt, diags) = self.preproc_if_block_struct(node)
+      let Some(block) = block_opt else {
+        return (None, diags)
+      }
+      return (Some(Statement.PreprocIf(block)), diags)
+    }
+    if kind == capp.NodeKindPreprocDirective {
+      let directive = PreprocDirective { text: node.Text(), pos }
+      return (Some(Statement.PreprocDirective(directive)), [])
+    }
 
     (None, self.unhandled(node, "statement", kind))
   }
@@ -348,10 +366,7 @@ impl Lowering {
       if skippable(child.Kind()) { continue }
       let (stmt_opt, ds) = self.statement(child)
       diags = merge_diags(diags, ds)
-      match stmt_opt {
-        Some(stmt) => body = body.append(stmt),
-        None => (),
-      }
+      if let Some(stmt) = stmt_opt { body = body.append(stmt) }
     }
     (StatementBlock { body, pos: node_pos(node) }, diags)
   }
@@ -408,13 +423,10 @@ impl Lowering {
     }
 
     let mut alternative: Option<ElseClause> = None
-    match node.ChildByFieldName(capp.FieldAlternative) {
-      Some(else_node) => {
-        let (else_opt, else_diags) = self.else_clause(else_node)
-        diags = merge_diags(diags, else_diags)
-        alternative = else_opt
-      },
-      None => (),
+    if let Some(else_node) = node.ChildByFieldName(capp.FieldAlternative) {
+      let (else_opt, else_diags) = self.else_clause(else_node)
+      diags = merge_diags(diags, else_diags)
+      alternative = else_opt
     }
 
     let lowered = IfStatement { 
@@ -607,11 +619,8 @@ impl Lowering {
       if kind == capp.NodeKindSwitchCase {
         let (case_opt, ds) = self.switch_case(child)
         diags = merge_diags(diags, ds)
-        match case_opt {
-          Some(case_entry) => entries = entries.append(SwitchEntry.Case(
-            case_entry,
-          )),
-          None => (),
+        if let Some(case_entry) = case_opt {
+          entries = entries.append(SwitchEntry.Case(case_entry))
         }
       } else if kind == capp.NodeKindSwitchDefault {
         let (default_entry, ds) = self.switch_default(child)
@@ -647,10 +656,7 @@ impl Lowering {
       } else {
         let (stmt_opt, ds) = self.statement(child)
         diags = merge_diags(diags, ds)
-        match stmt_opt {
-          Some(stmt) => body = body.append(stmt),
-          None => (),
-        }
+        if let Some(stmt) = stmt_opt { body = body.append(stmt) }
       }
     }
 
@@ -671,10 +677,7 @@ impl Lowering {
       if skippable(child.Kind()) { continue }
       let (stmt_opt, ds) = self.statement(child)
       diags = merge_diags(diags, ds)
-      match stmt_opt {
-        Some(stmt) => body = body.append(stmt),
-        None => (),
-      }
+      if let Some(stmt) = stmt_opt { body = body.append(stmt) }
     }
     (SwitchDefault { body, pos: node_pos(node) }, diags)
   }
@@ -722,13 +725,10 @@ impl Lowering {
     }
 
     let mut increment: Option<Expressions> = None
-    match node.ChildByFieldName(capp.FieldIncrement) {
-      Some(increment_node) => {
-        let (exprs_opt, ds) = self.expressions(increment_node)
-        diags = merge_diags(diags, ds)
-        increment = exprs_opt
-      },
-      None => (),
+    if let Some(increment_node) = node.ChildByFieldName(capp.FieldIncrement) {
+      let (exprs_opt, ds) = self.expressions(increment_node)
+      diags = merge_diags(diags, ds)
+      increment = exprs_opt
     }
 
     let (body_opt, body_diags) = self.statement_field(
@@ -841,17 +841,14 @@ impl Lowering {
         // optional `value` field; Initializer.pos anchors at the value
         // expression, as the grammar has no initializer node.
         let mut initializer: Option<Initializer> = None
-        match node.ChildByFieldName(capp.FieldValue) {
-          Some(value_node) => {
-            let (expr_opt, ds) = self.expression(value_node)
-            diags = merge_diags(diags, ds)
-            if let Some(expr) = expr_opt {
-              initializer = Some(
-                Initializer { value: &expr, pos: node_pos(value_node) },
-              )
-            }
-          },
-          None => (),
+        if let Some(value_node) = node.ChildByFieldName(capp.FieldValue) {
+          let (expr_opt, ds) = self.expression(value_node)
+          diags = merge_diags(diags, ds)
+          if let Some(expr) = expr_opt {
+            initializer = Some(
+              Initializer { value: &expr, pos: node_pos(value_node) },
+            )
+          }
         }
         ForBinding.Declared(
           ForDeclaredBinding { 
@@ -931,23 +928,17 @@ impl Lowering {
     diags = merge_diags(diags, body_diags)
 
     let mut handler: Option<CatchClause> = None
-    match node.ChildByFieldName(capp.FieldHandler) {
-      Some(handler_node) => {
-        let (handler_opt, ds) = self.catch_clause(handler_node)
-        diags = merge_diags(diags, ds)
-        handler = handler_opt
-      },
-      None => (),
+    if let Some(handler_node) = node.ChildByFieldName(capp.FieldHandler) {
+      let (handler_opt, ds) = self.catch_clause(handler_node)
+      diags = merge_diags(diags, ds)
+      handler = handler_opt
     }
 
     let mut finalizer: Option<FinallyClause> = None
-    match node.ChildByFieldName(capp.FieldFinalizer) {
-      Some(finalizer_node) => {
-        let (finalizer_opt, ds) = self.finally_clause(finalizer_node)
-        diags = merge_diags(diags, ds)
-        finalizer = finalizer_opt
-      },
-      None => (),
+    if let Some(finalizer_node) = node.ChildByFieldName(capp.FieldFinalizer) {
+      let (finalizer_opt, ds) = self.finally_clause(finalizer_node)
+      diags = merge_diags(diags, ds)
+      finalizer = finalizer_opt
     }
 
     let lowered = TryStatement { body, handler, finalizer, pos }
@@ -959,24 +950,21 @@ impl Lowering {
     let mut diags: Slice<Diagnostic> = []
 
     let mut parameter: Option<CatchParameter> = None
-    match node.ChildByFieldName(capp.FieldParameter) {
-      Some(parameter_node) => {
-        if parameter_node.Kind() == capp.NodeKindIdentifier {
-          parameter = Some(CatchParameter.Identifier(ident_of(parameter_node)))
-        } else {
-          // Destructuring catch parameters are deferred; the clause itself
-          // still lowers.
-          diags = merge_diags(
-            diags,
-            self.unhandled(
-              parameter_node,
-              "catch parameter",
-              parameter_node.Kind(),
-            ),
-          )
-        }
-      },
-      None => (),
+    if let Some(parameter_node) = node.ChildByFieldName(capp.FieldParameter) {
+      if parameter_node.Kind() == capp.NodeKindIdentifier {
+        parameter = Some(CatchParameter.Identifier(ident_of(parameter_node)))
+      } else {
+        // Destructuring catch parameters are deferred; the clause itself
+        // still lowers.
+        diags = merge_diags(
+          diags,
+          self.unhandled(
+            parameter_node,
+            "catch parameter",
+            parameter_node.Kind(),
+          ),
+        )
+      }
     }
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
@@ -1120,9 +1108,8 @@ impl Lowering {
       }
       let (declarator_opt, ds) = self.variable_declarator(child)
       diags = merge_diags(diags, ds)
-      match declarator_opt {
-        Some(declarator) => declarators = declarators.append(declarator),
-        None => (),
+      if let Some(declarator) = declarator_opt {
+        declarators = declarators.append(declarator)
       }
     }
     (declarators, diags)
@@ -1151,17 +1138,14 @@ impl Lowering {
     let name = VariableDeclaratorName.Identifier(ident_of(name_node))
 
     let mut initializer: Option<Initializer> = None
-    match node.ChildByFieldName(capp.FieldValue) {
-      Some(value_node) => {
-        let (expr_opt, ds) = self.expression(value_node)
-        diags = merge_diags(diags, ds)
-        if let Some(expr) = expr_opt {
-          initializer = Some(
-            Initializer { value: &expr, pos: node_pos(value_node) },
-          )
-        }
-      },
-      None => (),
+    if let Some(value_node) = node.ChildByFieldName(capp.FieldValue) {
+      let (expr_opt, ds) = self.expression(value_node)
+      diags = merge_diags(diags, ds)
+      if let Some(expr) = expr_opt {
+        initializer = Some(
+          Initializer { value: &expr, pos: node_pos(value_node) },
+        )
+      }
     }
 
     (Some(VariableDeclarator { name, initializer, pos }), diags)
@@ -1182,10 +1166,7 @@ impl Lowering {
         if skippable(child.Kind()) { continue }
         let (expr_opt, ds) = self.expression(child)
         diags = merge_diags(diags, ds)
-        match expr_opt {
-          Some(expr) => items = items.append(expr),
-          None => (),
-        }
+        if let Some(expr) = expr_opt { items = items.append(expr) }
       }
       let sequence = SequenceExpression { items, pos: node_pos(node) }
       return (Some(Expressions.Sequence(sequence)), diags)
@@ -1312,15 +1293,15 @@ impl Lowering {
     if kind == capp.NodeKindAwaitExpression {
       return self.await_expression(node)
     }
+    if kind == capp.NodeKindYieldExpression {
+      return self.yield_expression(node)
+    }
     if kind == capp.NodeKindObject {
       let (object_opt, diags) = self.object_literal(node)
       let Some(object) = object_opt else {
         return (None, diags)
       }
-      return (
-        Some(Expression.Primary(PrimaryExpression.Object(object))),
-        diags,
-      )
+      return (Some(Expression.Primary(PrimaryExpression.Object(object))), diags)
     }
     if kind == capp.NodeKindNativeArray {
       let (array_opt, diags) = self.native_array(node)
@@ -1337,10 +1318,7 @@ impl Lowering {
       let Some(func) = func_opt else {
         return (None, diags)
       }
-      return (
-        Some(Expression.Primary(PrimaryExpression.Function(func))),
-        diags,
-      )
+      return (Some(Expression.Primary(PrimaryExpression.Function(func))), diags)
     }
     if kind == capp.NodeKindRegex {
       let (regex_opt, diags) = self.regex_literal(node)
@@ -1359,6 +1337,73 @@ impl Lowering {
       }
       return (
         Some(Expression.Primary(PrimaryExpression.ObjjDeref(deref))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindObjjStringLiteral {
+      let (literal_opt, diags) = self.objj_string_literal(node)
+      let Some(literal) = literal_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.ObjjString(literal))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindObjjSelectorExpression {
+      let (selector_opt, diags) = self.objj_selector_expression(node)
+      let Some(selector) = selector_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.ObjjSelector(selector))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindObjjDictionaryLiteral {
+      let (dictionary_opt, diags) = self.objj_dictionary_literal(node)
+      let Some(dictionary) = dictionary_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.ObjjDictionary(dictionary))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindObjjArrayLiteral {
+      let (array_opt, diags) = self.objj_array_literal(node)
+      let Some(array) = array_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.ObjjArray(array))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindTemplateString {
+      let (template_opt, diags) = self.template_string(node)
+      let Some(template) = template_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.Template(template))),
+        diags,
+      )
+    }
+    if kind == capp.NodeKindArrowFunction {
+      let (arrow_opt, diags) = self.arrow_function(node)
+      let Some(arrow) = arrow_opt else {
+        return (None, diags)
+      }
+      return (Some(Expression.Primary(PrimaryExpression.Arrow(arrow))), diags)
+    }
+    if kind == capp.NodeKindGeneratorFunction {
+      let (generator_opt, diags) = self.generator_function(node)
+      let Some(generator) = generator_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(Expression.Primary(PrimaryExpression.Generator(generator))),
         diags,
       )
     }
@@ -1409,12 +1454,8 @@ impl Lowering {
 
     // Optional-chain calls (f?.()) and template calls (f`...`) are distinct
     // CallExpression variants; both deferred.
-    match node.ChildByFieldName(capp.FieldOptionalChain) {
-      Some(_) => return (
-        None,
-        self.unhandled(node, "call form", "optional-chain call"),
-      ),
-      None => (),
+    if let Some(_) = node.ChildByFieldName(capp.FieldOptionalChain) {
+      return (None, self.unhandled(node, "call form", "optional-chain call"))
     }
     let arguments_node = match node.ChildByFieldName(capp.FieldArguments) {
       Some(n) => n,
@@ -1461,16 +1502,14 @@ impl Lowering {
       if kind == capp.NodeKindSpreadElement {
         let (spread_opt, ds) = self.spread(child)
         diags = merge_diags(diags, ds)
-        match spread_opt {
-          Some(spread) => items = items.append(Argument.Spread(spread)),
-          None => (),
+        if let Some(spread) = spread_opt {
+          items = items.append(Argument.Spread(spread))
         }
       } else {
         let (expr_opt, ds) = self.expression(child)
         diags = merge_diags(diags, ds)
-        match expr_opt {
-          Some(expr) => items = items.append(Argument.Expression(&expr)),
-          None => (),
+        if let Some(expr) = expr_opt {
+          items = items.append(Argument.Expression(&expr))
         }
       }
     }
@@ -1699,8 +1738,7 @@ impl Lowering {
     }
     // The left side may be a private property identifier (the `#x in obj`
     // brand check), which is not an expression.
-    let left = if left_node.Kind() ==
-    capp.NodeKindPrivatePropertyIdentifier {
+    let left = if left_node.Kind() == capp.NodeKindPrivatePropertyIdentifier {
       BinaryLeft.PrivateProperty(
         PrivatePropertyIdentifier { 
           text: left_node.Text(),
@@ -1851,14 +1889,19 @@ impl Lowering {
     let node_row = node.StartRow()
     let arg_row = argument_node.StartRow()
     let is_prefix = node_row < arg_row ||
-      (node_row == arg_row && node.StartColumn() < argument_node.StartColumn())
+    (node_row == arg_row && node.StartColumn() < argument_node.StartColumn())
 
     let (argument_opt, diags) = self.expression(argument_node)
     let Some(argument) = argument_opt else {
       return (None, diags)
     }
 
-    let lowered = UpdateExpression { operator, argument: &argument, is_prefix, pos }
+    let lowered = UpdateExpression { 
+      operator,
+      argument: &argument,
+      is_prefix,
+      pos,
+    }
     (Some(Expression.Update(lowered)), diags)
   }
 
@@ -1875,6 +1918,25 @@ impl Lowering {
       return (Some(Expression.Await(lowered)), diags)
     }
     (None, self.malformed(node, "await without argument"))
+  }
+
+  // yield_expression: the argument is optional (bare `yield` is valid) and
+  // the anonymous '*' marks the delegating `yield*` form.
+  fn yield_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_delegate = has_anonymous_child(node, "*")
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (expr_opt, diags) = self.expression(child)
+      let Some(expr) = expr_opt else {
+        return (None, diags)
+      }
+      let lowered = YieldExpression { argument: Some(&expr), is_delegate, pos }
+      return (Some(Expression.Yield(lowered)), diags)
+    }
+    let lowered = YieldExpression { argument: None, is_delegate, pos }
+    (Some(Expression.Yield(lowered)), [])
   }
 
   // -------------------------------------------------------------------------
@@ -1912,7 +1974,12 @@ impl Lowering {
       // The @deref assignment operator is an unfielded anonymous choice; it is
       // recovered by scanning for the operator token between target and value.
       let operator = self.scan_assignment_op(node)
-      let lowered = ObjjDerefAssignment { left: deref, operator, right: &right, pos }
+      let lowered = ObjjDerefAssignment { 
+        left: deref,
+        operator,
+        right: &right,
+        pos,
+      }
       return (
         Some(Expression.Assignment(AssignmentExpression.ObjjDeref(lowered))),
         diags,
@@ -1925,10 +1992,7 @@ impl Lowering {
       return (None, diags)
     }
     let lowered = StandardAssignment { left: target, right: &right, pos }
-    (
-      Some(Expression.Assignment(AssignmentExpression.Standard(lowered))),
-      diags,
-    )
+    (Some(Expression.Assignment(AssignmentExpression.Standard(lowered))), diags)
   }
 
   // scan_assignment_op recovers the @deref-assignment operator from the
@@ -1937,10 +2001,7 @@ impl Lowering {
   fn scan_assignment_op(self, node: capp.CSTNode) -> AssignmentOp {
     for i in 0..node.ChildCount() {
       let child = node.Child(i)
-      match self.assignment_op(child) {
-        Some(op) => return op,
-        None => (),
-      }
+      if let Some(op) = self.assignment_op(child) { return op }
     }
     AssignmentOp.Assign
   }
@@ -2125,13 +2186,10 @@ impl Lowering {
     }
 
     let mut arguments: Option<Arguments> = None
-    match node.ChildByFieldName(capp.FieldArguments) {
-      Some(arguments_node) => {
-        let (args, args_diags) = self.arguments(arguments_node)
-        diags = merge_diags(diags, args_diags)
-        arguments = Some(args)
-      },
-      None => (),
+    if let Some(arguments_node) = node.ChildByFieldName(capp.FieldArguments) {
+      let (args, args_diags) = self.arguments(arguments_node)
+      diags = merge_diags(diags, args_diags)
+      arguments = Some(args)
     }
 
     (Some(NewExpression { constructor, arguments, pos }), diags)
@@ -2148,10 +2206,13 @@ impl Lowering {
     }
     match expr {
       Expression.Primary(primary) => (Some(primary), diags),
-      _ => (None, merge_diags(
-        diags,
-        self.malformed(node, "new constructor is not a primary expression"),
-      )),
+      _ => (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "new constructor is not a primary expression"),
+        ),
+      ),
     }
   }
 
@@ -2165,16 +2226,14 @@ impl Lowering {
       if kind == capp.NodeKindPair {
         let (pair_opt, ds) = self.pair(child)
         diags = merge_diags(diags, ds)
-        match pair_opt {
-          Some(pair) => members = members.append(ObjectMember.Pair(pair)),
-          None => (),
+        if let Some(pair) = pair_opt {
+          members = members.append(ObjectMember.Pair(pair))
         }
       } else if kind == capp.NodeKindSpreadElement {
         let (spread_opt, ds) = self.spread(child)
         diags = merge_diags(diags, ds)
-        match spread_opt {
-          Some(spread) => members = members.append(ObjectMember.Spread(spread)),
-          None => (),
+        if let Some(spread) = spread_opt {
+          members = members.append(ObjectMember.Spread(spread))
         }
       } else if kind == capp.NodeKindMethodDefinition {
         // The ECMAScript object-method shorthand { foo() {} } is distinct
@@ -2241,7 +2300,9 @@ impl Lowering {
     }
     if kind == capp.NodeKindNumber {
       return (
-        Some(PropertyName.Number(NumberLiteral { text: node.Text(), pos: node_pos(node) })),
+        Some(PropertyName.Number(
+          NumberLiteral { text: node.Text(), pos: node_pos(node) },
+        )),
         [],
       )
     }
@@ -2253,8 +2314,11 @@ impl Lowering {
       return (Some(PropertyName.Computed(computed)), diags)
     }
     if kind == capp.NodeKindObjjStringLiteral {
-      // objj_string_literal as a property key lands with the ObjJ tier.
-      return (None, self.unhandled(node, "property name", kind))
+      let (literal_opt, diags) = self.objj_string_literal(node)
+      let Some(literal) = literal_opt else {
+        return (None, diags)
+      }
+      return (Some(PropertyName.ObjjString(literal)), diags)
     }
     (None, self.unhandled(node, "property name", kind))
   }
@@ -2283,16 +2347,14 @@ impl Lowering {
       if kind == capp.NodeKindSpreadElement {
         let (spread_opt, ds) = self.spread(child)
         diags = merge_diags(diags, ds)
-        match spread_opt {
-          Some(spread) => elements = elements.append(ArrayElement.Spread(spread)),
-          None => (),
+        if let Some(spread) = spread_opt {
+          elements = elements.append(ArrayElement.Spread(spread))
         }
       } else {
         let (expr_opt, ds) = self.expression(child)
         diags = merge_diags(diags, ds)
-        match expr_opt {
-          Some(expr) => elements = elements.append(ArrayElement.Expression(&expr)),
-          None => (),
+        if let Some(expr) = expr_opt {
+          elements = elements.append(ArrayElement.Expression(&expr))
         }
       }
     }
@@ -2318,16 +2380,16 @@ impl Lowering {
       Some(n) => n,
       None => return (
         None,
-        merge_diags(diags, self.malformed(node, "function expression without body")),
+        merge_diags(
+          diags,
+          self.malformed(node, "function expression without body"),
+        ),
       ),
     }
     let (body, body_diags) = self.statement_block(body_node)
     diags = merge_diags(diags, body_diags)
 
-    (
-      Some(FunctionExpression { is_async, name, parameters, body, pos }),
-      diags,
-    )
+    (Some(FunctionExpression { is_async, name, parameters, body, pos }), diags)
   }
 
   // regex carries pattern and optional flags as named fields of literal text.
@@ -2342,15 +2404,179 @@ impl Lowering {
       pos: node_pos(pattern_node),
     }
     let mut flags: Option<RegexFlags> = None
-    match node.ChildByFieldName(capp.FieldFlags) {
-      Some(flags_node) => {
-        flags = Some(
-          RegexFlags { text: flags_node.Text(), pos: node_pos(flags_node) },
-        )
-      },
-      None => (),
+    if let Some(flags_node) = node.ChildByFieldName(capp.FieldFlags) {
+      flags = Some(
+        RegexFlags { text: flags_node.Text(), pos: node_pos(flags_node) },
+      )
     }
     (Some(Regex { pattern, flags, pos }), [])
+  }
+
+  fn template_string(self, node: capp.CSTNode) -> (Option<TemplateString>, Slice<Diagnostic>) {
+    let mut parts: Slice<TemplatePart> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindStringFragment {
+        let fragment = StringFragment { 
+          text: child.Text(),
+          pos: node_pos(child),
+        }
+        parts = parts.append(TemplatePart.Fragment(fragment))
+      } else if kind == capp.NodeKindEscapeSequence {
+        let escape = EscapeSequence { text: child.Text(), pos: node_pos(child) }
+        parts = parts.append(TemplatePart.Escape(escape))
+      } else if kind == capp.NodeKindTemplateSubstitution {
+        let (substitution_opt, ds) = self.template_substitution(child)
+        diags = merge_diags(diags, ds)
+        if let Some(substitution) = substitution_opt {
+          parts = parts.append(TemplatePart.Substitution(substitution))
+        }
+      } else if skippable(kind) {
+        ()
+      } else {
+        diags = merge_diags(diags, self.unhandled(child, "template part", kind))
+      }
+    }
+    (Some(TemplateString { parts, pos: node_pos(node) }), diags)
+  }
+
+  fn template_substitution(self, node: capp.CSTNode) -> (Option<TemplateSubstitution>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (exprs_opt, diags) = self.expressions(child)
+      let Some(exprs) = exprs_opt else {
+        return (None, diags)
+      }
+      return (Some(TemplateSubstitution { expression: exprs, pos }), diags)
+    }
+    (None, self.malformed(node, "template substitution without expression"))
+  }
+
+  // arrow_function: a bare identifier parameter arrives in the `parameter`
+  // field, a parenthesized list in `parameters`; the body is an expression
+  // or a statement block.
+  fn arrow_function(self, node: capp.CSTNode) -> (Option<ArrowFunction>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_async = has_anonymous_child(node, "async")
+    let mut diags: Slice<Diagnostic> = []
+
+    let parameters = match node.ChildByFieldName(capp.FieldParameter) {
+      Some(parameter_node) => ArrowParameters.Single(ident_of(parameter_node)),
+      None => {
+        let parameters_node = match node.ChildByFieldName(capp.FieldParameters) {
+          Some(n) => n,
+          None => return (
+            None,
+            self.malformed(node, "arrow function without parameters"),
+          ),
+        }
+        let (list, ds) = self.formal_parameters(parameters_node)
+        diags = merge_diags(diags, ds)
+        ArrowParameters.List(list)
+      },
+    }
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "arrow function without body")),
+      ),
+    }
+    let body = if body_node.Kind() == capp.NodeKindStatementBlock {
+      let (block, ds) = self.statement_block(body_node)
+      diags = merge_diags(diags, ds)
+      ArrowBody.Block(block)
+    } else {
+      let (expr_opt, ds) = self.expression(body_node)
+      diags = merge_diags(diags, ds)
+      match expr_opt {
+        Some(expr) => ArrowBody.Expression(&expr),
+        None => return (None, diags),
+      }
+    }
+
+    (Some(ArrowFunction { is_async, parameters, body, pos }), diags)
+  }
+
+  fn generator_function(self, node: capp.CSTNode) -> (Option<GeneratorFunction>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_async = has_anonymous_child(node, "async")
+    let name = node.ChildByFieldName(capp.FieldName).map(ident_of)
+
+    let parameters_node = match node.ChildByFieldName(capp.FieldParameters) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "generator function without parameters"),
+      ),
+    }
+    let (parameters, param_diags) = self.formal_parameters(parameters_node)
+    let mut diags = param_diags
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "generator function without body"),
+        ),
+      ),
+    }
+    let (body, body_diags) = self.statement_block(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    (Some(GeneratorFunction { is_async, name, parameters, body, pos }), diags)
+  }
+
+  fn generator_function_declaration(self, node: capp.CSTNode) -> (Option<GeneratorFunctionDeclaration>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let is_async = has_anonymous_child(node, "async")
+
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "generator declaration without name"),
+      ),
+    }
+
+    let parameters_node = match node.ChildByFieldName(capp.FieldParameters) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "generator declaration without parameters"),
+      ),
+    }
+    let (parameters, param_diags) = self.formal_parameters(parameters_node)
+    let mut diags = param_diags
+
+    let body_node = match node.ChildByFieldName(capp.FieldBody) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "generator declaration without body"),
+        ),
+      ),
+    }
+    let (body, body_diags) = self.statement_block(body_node)
+    diags = merge_diags(diags, body_diags)
+
+    let declaration = GeneratorFunctionDeclaration { 
+      is_async,
+      name: ident_of(name_node),
+      parameters,
+      body,
+      pos,
+    }
+    (Some(declaration), diags)
   }
 
   // -------------------------------------------------------------------------
@@ -2387,6 +2613,863 @@ impl Lowering {
       return (Some(ObjjDerefExpression { argument: &expr, pos }), diags)
     }
     (None, self.malformed(node, "@deref without argument"))
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — literals
+  // -------------------------------------------------------------------------
+
+  // objj_string_literal wraps a single string node: @"...".
+  fn objj_string_literal(self, node: capp.CSTNode) -> (Option<ObjjStringLiteral>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindString { continue }
+      let (value, diags) = self.string_literal(child)
+      return (Some(ObjjStringLiteral { value, pos }), diags)
+    }
+    (None, self.malformed(node, "objj string without string"))
+  }
+
+  fn objj_selector_expression(self, node: capp.CSTNode) -> (Option<ObjjSelectorExpression>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindObjjSelectorName { continue }
+      let (name_opt, diags) = self.objj_selector_name(child)
+      let Some(name) = name_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjSelectorExpression { name, pos }), diags)
+    }
+    (None, self.malformed(node, "@selector without name"))
+  }
+
+  // objj_selector_name: the named children are the selector identifiers and
+  // the colons are anonymous.  A colon anywhere makes it a keyword selector;
+  // otherwise the single identifier is the unary form.
+  fn objj_selector_name(self, node: capp.CSTNode) -> (Option<ObjjSelectorName>, Slice<Diagnostic>) {
+    if has_anonymous_child(node, ":") {
+      let mut parts: Slice<ObjjSelectorNamePart> = []
+      for i in 0..node.NamedChildCount() {
+        let child = node.NamedChild(i)
+        if child.Kind() != capp.NodeKindObjjSelectorIdentifier { continue }
+        let part = ObjjSelectorNamePart { 
+          name: selector_ident_of(child),
+          pos: node_pos(child),
+        }
+        parts = parts.append(part)
+      }
+      if parts.is_empty() {
+        return (None, self.malformed(node, "selector without identifiers"))
+      }
+      return (Some(ObjjSelectorName.Keyword(parts)), [])
+    }
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindObjjSelectorIdentifier { continue }
+      return (Some(ObjjSelectorName.Unary(selector_ident_of(child))), [])
+    }
+    (None, self.malformed(node, "selector without identifiers"))
+  }
+
+  fn objj_dictionary_literal(self, node: capp.CSTNode) -> (Option<ObjjDictionaryLiteral>, Slice<Diagnostic>) {
+    let mut pairs: Slice<ObjjDictionaryPair> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind != capp.NodeKindObjjDictionaryPair {
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "dictionary entry", kind),
+        )
+        continue
+      }
+      let (pair_opt, ds) = self.objj_dictionary_pair(child)
+      diags = merge_diags(diags, ds)
+      if let Some(pair) = pair_opt { pairs = pairs.append(pair) }
+    }
+    (Some(ObjjDictionaryLiteral { pairs, pos: node_pos(node) }), diags)
+  }
+
+  // key and value arrive in single-purpose wrapper nodes (objj_dictionary_key
+  // / objj_dictionary_value) whose meaning is the single named child.
+  fn objj_dictionary_pair(self, node: capp.CSTNode) -> (Option<ObjjDictionaryPair>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let key_node = match node.ChildByFieldName(capp.FieldKey) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "dictionary pair without key")),
+    }
+    let (key_opt, key_diags) = self.wrapped_expression(
+      key_node,
+      "dictionary key without expression",
+    )
+    diags = merge_diags(diags, key_diags)
+    let Some(key) = key_opt else {
+      return (None, diags)
+    }
+
+    let value_node = match node.ChildByFieldName(capp.FieldValue) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "dictionary pair without value"),
+        ),
+      ),
+    }
+    let (value_opt, value_diags) = self.wrapped_expression(
+      value_node,
+      "dictionary value without expression",
+    )
+    diags = merge_diags(diags, value_diags)
+    let Some(value) = value_opt else {
+      return (None, diags)
+    }
+
+    (Some(ObjjDictionaryPair { key: &key, value: &value, pos }), diags)
+  }
+
+  // wrapped_expression descends through a single-purpose wrapper node to its
+  // one named child and lowers it as an expression.  `what` is the complete
+  // malformed message for an empty wrapper.
+  fn wrapped_expression(self, node: capp.CSTNode, what: string) -> (Option<Expression>, Slice<Diagnostic>) {
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      return self.expression(child)
+    }
+    (None, self.malformed(node, what))
+  }
+
+  // objj_array_literal wraps a single native_array: @[...].
+  fn objj_array_literal(self, node: capp.CSTNode) -> (Option<ObjjArrayLiteral>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindNativeArray { continue }
+      let (array_opt, diags) = self.native_array(child)
+      let Some(array) = array_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjArrayLiteral { array, pos }), diags)
+    }
+    (None, self.malformed(node, "objj array without array"))
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — declarations
+  // -------------------------------------------------------------------------
+
+  fn objj_class_forward_declaration(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "@class without name")),
+    }
+    let declaration = ObjjClassForwardDeclaration { 
+      name: ident_of(name_node),
+      pos: node_pos(node),
+    }
+    (Some(Statement.ObjjClassForward(declaration)), [])
+  }
+
+  fn objj_global_struct(self, node: capp.CSTNode) -> (Option<ObjjGlobalDeclaration>, Slice<Diagnostic>) {
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "@global without name")),
+    }
+    let declaration = ObjjGlobalDeclaration { 
+      name: ident_of(name_node),
+      pos: node_pos(node),
+    }
+    (Some(declaration), [])
+  }
+
+  fn objj_global_declaration(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let (global_opt, diags) = self.objj_global_struct(node)
+    let Some(global) = global_opt else {
+      return (None, diags)
+    }
+    (Some(Statement.ObjjGlobal(global)), diags)
+  }
+
+  fn objj_typedef(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "@typedef without name")),
+    }
+    let declaration = ObjjTypedef { 
+      name: ident_of(name_node),
+      pos: node_pos(node),
+    }
+    (Some(Statement.ObjjTypedef(declaration)), [])
+  }
+
+  // The protocol body interleaves anonymous @optional/@required markers with
+  // objj_method_declaration members; ordering matters, so the walk covers all
+  // children rather than only named ones.
+  fn objj_protocol_declaration(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let name_node = match node.ChildByFieldName(capp.FieldName) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "@protocol without name")),
+    }
+
+    let mut protocols: Option<ObjjProtocolReferenceList> = None
+    if let Some(list_node) = node.ChildByFieldName(capp.FieldProtocols) {
+      protocols = Some(protocol_list(list_node))
+    }
+
+    let mut members: Slice<ObjjProtocolMember> = []
+    for i in 0..node.ChildCount() {
+      let child = node.Child(i)
+      let kind = child.Kind()
+      if kind == "@optional" {
+        members = members.append(ObjjProtocolMember.Optional(node_pos(child)))
+        continue
+      }
+      if kind == "@required" {
+        members = members.append(ObjjProtocolMember.Required(node_pos(child)))
+        continue
+      }
+      if kind != capp.NodeKindObjjMethodDeclaration { continue }
+      let (method_opt, ds) = self.objj_method_declaration(child)
+      diags = merge_diags(diags, ds)
+      if let Some(method) = method_opt {
+        members = members.append(ObjjProtocolMember.Method(method))
+      }
+    }
+
+    let declaration = ObjjProtocolDeclaration { 
+      name: ident_of(name_node),
+      protocols,
+      members,
+      pos,
+    }
+    (Some(Statement.ObjjProtocol(declaration)), diags)
+  }
+
+  // objj_method_declaration is the bodiless protocol form of
+  // objj_method_definition; scope, return type, and selector lower
+  // identically.
+  fn objj_method_declaration(self, node: capp.CSTNode) -> (Option<ObjjMethodDeclaration>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    // The method_type field holds the anonymous '+' or '-' token.
+    let scope = match node.ChildByFieldName(capp.FieldMethodType) {
+      Some(scope_node) => {
+        if scope_node.Text() == "+" {
+          ObjjMethodScope.Class
+        } else {
+          ObjjMethodScope.Instance
+        }
+      },
+      None => return (
+        None,
+        self.malformed(node, "method declaration without +/- indicator"),
+      ),
+    }
+
+    let return_type_node = match node.ChildByFieldName(capp.FieldReturnType) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "method declaration without return type"),
+      ),
+    }
+    let (return_type_opt, return_diags) = self.method_type(return_type_node)
+    diags = merge_diags(diags, return_diags)
+    let return_type = match return_type_opt {
+      Some(t) => t,
+      None => return (None, diags),
+    }
+
+    // Unary methods carry a fielded method_name; keyword methods carry one or
+    // more unfielded objj_method_parameter_part children.
+    let selector = match node.ChildByFieldName(capp.FieldMethodName) {
+      Some(name_node) => ObjjMethodSelector.Unary(selector_ident_of(name_node)),
+      None => {
+        let mut parts: Slice<ObjjMethodParameterPart> = []
+        for i in 0..node.NamedChildCount() {
+          let child = node.NamedChild(i)
+          if child.Kind() != capp.NodeKindObjjMethodParameterPart { continue }
+          let (part_opt, ds) = self.parameter_part(child)
+          diags = merge_diags(diags, ds)
+          if let Some(part) = part_opt { parts = parts.append(part) }
+        }
+        if parts.is_empty() {
+          return (
+            None,
+            merge_diags(
+              diags,
+              self.malformed(node, "method declaration without selector"),
+            ),
+          )
+        }
+        ObjjMethodSelector.Keyword(parts)
+      },
+    }
+
+    let declaration = ObjjMethodDeclaration { 
+      scope,
+      return_type,
+      selector,
+      pos,
+    }
+    (Some(declaration), diags)
+  }
+
+  // -------------------------------------------------------------------------
+  // Objective-J — accessors
+  // -------------------------------------------------------------------------
+
+  fn accessors_directive(self, node: capp.CSTNode) -> (Option<ObjjAccessorsDirective>, Slice<Diagnostic>) {
+    let mut attributes: Slice<ObjjAccessorAttribute> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind != capp.NodeKindObjjAccessorAttribute {
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "accessor attribute", kind),
+        )
+        continue
+      }
+      let (attribute_opt, ds) = self.accessor_attribute(child)
+      diags = merge_diags(diags, ds)
+      if let Some(attribute) = attribute_opt {
+        attributes = attributes.append(attribute)
+      }
+    }
+    (Some(ObjjAccessorsDirective { attributes, pos: node_pos(node) }), diags)
+  }
+
+  // objj_accessor_attribute: `key = name` (the '=' is anonymous) or a bare
+  // flag identifier.  Presence of an objj_accessor_name child selects the
+  // key-value form.
+  fn accessor_attribute(self, node: capp.CSTNode) -> (Option<ObjjAccessorAttribute>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+    let mut key: Option<Identifier> = None
+    let mut name: Option<ObjjAccessorName> = None
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindIdentifier {
+        key = Some(ident_of(child))
+        continue
+      }
+      if kind == capp.NodeKindObjjAccessorName {
+        let (name_opt, ds) = self.accessor_name(child)
+        diags = merge_diags(diags, ds)
+        let Some(value) = name_opt else {
+          return (None, diags)
+        }
+        name = Some(value)
+      }
+    }
+
+    let Some(attribute_key) = key else {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "accessor attribute without key"),
+        ),
+      )
+    }
+    name.map_or_else(
+      || (Some(ObjjAccessorAttribute.Flag(attribute_key)), diags),
+      |value| (
+        Some(ObjjAccessorAttribute.KeyValue(
+          ObjjAccessorKeyValue { key: attribute_key, value, pos },
+        )),
+        diags,
+      ),
+    )
+  }
+
+  // objj_accessor_name: identifiers with anonymous colons.  No colon is the
+  // simple form; a colon with a single identifier is a setter; further
+  // identifiers make the keyword form.
+  fn accessor_name(self, node: capp.CSTNode) -> (Option<ObjjAccessorName>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut head: Option<Identifier> = None
+    let mut parts: Slice<Identifier> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindIdentifier { continue }
+      match head {
+        None => head = Some(ident_of(child)),
+        Some(_) => parts = parts.append(ident_of(child)),
+      }
+    }
+    let Some(name_head) = head else {
+      return (None, self.malformed(node, "accessor name without identifier"))
+    }
+    if has_anonymous_child(node, ":") {
+      if parts.is_empty() {
+        return (
+          Some(ObjjAccessorName.Setter(
+            ObjjAccessorSetter { name: name_head, pos },
+          )),
+          [],
+        )
+      }
+      return (
+        Some(ObjjAccessorName.Keyword(
+          ObjjAccessorKeyword { head: name_head, parts, pos },
+        )),
+        [],
+      )
+    }
+    (Some(ObjjAccessorName.Simple(name_head)), [])
+  }
+
+  // -------------------------------------------------------------------------
+  // Preprocessor
+  // -------------------------------------------------------------------------
+
+  // The if/else/endif lines are fielded; the body items are unfielded
+  // children appearing in order, with the else line splitting body from the
+  // else branch.  The walk covers all children, switching accumulation at
+  // the else line.
+  fn preproc_if_block_struct(self, node: capp.CSTNode) -> (Option<PreprocIfBlock>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let if_line_node = match node.ChildByFieldName(capp.FieldIf) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "#if block without #if line")),
+    }
+    let (if_line_opt, if_diags) = self.preproc_if_line(if_line_node)
+    diags = merge_diags(diags, if_diags)
+    let Some(if_line) = if_line_opt else {
+      return (None, diags)
+    }
+
+    let endif_node = match node.ChildByFieldName(capp.FieldEndif) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "#if block without #endif")),
+      ),
+    }
+    let endif = PreprocEndifLine { 
+      text: endif_node.Text(),
+      pos: node_pos(endif_node),
+    }
+
+    let mut body: Slice<PreprocBlockItem> = []
+    let mut else_body: Slice<PreprocBlockItem> = []
+    let mut else_node: Option<capp.CSTNode> = None
+    let mut in_else = false
+    for i in 0..node.ChildCount() {
+      let child = node.Child(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindPreprocIfLine { continue }
+      if kind == capp.NodeKindPreprocEndifLine { continue }
+      if skippable(kind) { continue }
+      // The grammar tolerates bare 'else' / 'else if' keyword tokens here —
+      // its accommodation for if/else statements split across preprocessor
+      // branches.  The model deliberately carries no representation for them.
+      if kind == "else" { continue }
+      if kind == "else if" { continue }
+      if kind == capp.NodeKindPreprocElseLine {
+        else_node = Some(child)
+        in_else = true
+        continue
+      }
+      let (item_opt, ds) = self.preproc_block_item(child)
+      diags = merge_diags(diags, ds)
+      if let Some(item) = item_opt {
+        if in_else {
+          else_body = else_body.append(item)
+        } else {
+          body = body.append(item)
+        }
+      }
+    }
+
+    let mut else_branch: Option<PreprocElseBranch> = None
+    if let Some(line_node) = else_node {
+      let else_line = PreprocElseLine { 
+        text: line_node.Text(),
+        pos: node_pos(line_node),
+      }
+      else_branch = Some(
+        PreprocElseBranch { 
+          else_line,
+          body: else_body,
+          pos: node_pos(line_node),
+        },
+      )
+    }
+
+    let block = PreprocIfBlock { if_line, body, else_branch, endif, pos }
+    (Some(block), diags)
+  }
+
+  fn preproc_block_item(self, node: capp.CSTNode) -> (Option<PreprocBlockItem>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindPreprocIfBlock {
+      let (nested_opt, diags) = self.preproc_if_block_struct(node)
+      let Some(nested) = nested_opt else {
+        return (None, diags)
+      }
+      return (Some(PreprocBlockItem.Nested(nested)), diags)
+    }
+    if kind == capp.NodeKindPreprocDirective {
+      let directive = PreprocDirective { 
+        text: node.Text(),
+        pos: node_pos(node),
+      }
+      return (Some(PreprocBlockItem.Directive(directive)), [])
+    }
+    let (stmt_opt, diags) = self.statement(node)
+    let Some(stmt) = stmt_opt else {
+      return (None, diags)
+    }
+    (Some(PreprocBlockItem.Statement(stmt)), diags)
+  }
+
+  // preproc_ivar_if_block mirrors preproc_if_block over ivar items, with
+  // recursive nesting.
+  fn preproc_ivar_if_block_struct(self, node: capp.CSTNode) -> (Option<PreprocIvarIfBlock>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let if_line_node = match node.ChildByFieldName(capp.FieldIf) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "#if ivar block without #if line"),
+      ),
+    }
+    let (if_line_opt, if_diags) = self.preproc_if_line(if_line_node)
+    diags = merge_diags(diags, if_diags)
+    let Some(if_line) = if_line_opt else {
+      return (None, diags)
+    }
+
+    let endif_node = match node.ChildByFieldName(capp.FieldEndif) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "#if ivar block without #endif"),
+        ),
+      ),
+    }
+    let endif = PreprocEndifLine { 
+      text: endif_node.Text(),
+      pos: node_pos(endif_node),
+    }
+
+    let mut body: Slice<PreprocIvarItem> = []
+    let mut else_body: Slice<PreprocIvarItem> = []
+    let mut else_node: Option<capp.CSTNode> = None
+    let mut in_else = false
+    for i in 0..node.ChildCount() {
+      let child = node.Child(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindPreprocIfLine { continue }
+      if kind == capp.NodeKindPreprocEndifLine { continue }
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindPreprocElseLine {
+        else_node = Some(child)
+        in_else = true
+        continue
+      }
+      let (item_opt, ds) = self.preproc_ivar_item(child)
+      diags = merge_diags(diags, ds)
+      if let Some(item) = item_opt {
+        if in_else {
+          else_body = else_body.append(item)
+        } else {
+          body = body.append(item)
+        }
+      }
+    }
+
+    let mut else_branch: Option<PreprocIvarElseBranch> = None
+    if let Some(line_node) = else_node {
+      let else_line = PreprocElseLine { 
+        text: line_node.Text(),
+        pos: node_pos(line_node),
+      }
+      else_branch = Some(
+        PreprocIvarElseBranch { 
+          else_line,
+          body: else_body,
+          pos: node_pos(line_node),
+        },
+      )
+    }
+
+    let block = PreprocIvarIfBlock { if_line, body, else_branch, endif, pos }
+    (Some(block), diags)
+  }
+
+  fn preproc_ivar_item(self, node: capp.CSTNode) -> (Option<PreprocIvarItem>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindObjjInstanceVariable {
+      let (variable_opt, diags) = self.instance_variable(node)
+      let Some(variable) = variable_opt else {
+        return (None, diags)
+      }
+      return (Some(PreprocIvarItem.Variable(variable)), diags)
+    }
+    if kind == capp.NodeKindPreprocIvarIfBlock {
+      let (nested_opt, diags) = self.preproc_ivar_if_block_struct(node)
+      let Some(nested) = nested_opt else {
+        return (None, diags)
+      }
+      return (Some(PreprocIvarItem.Nested(nested)), diags)
+    }
+    if kind == capp.NodeKindPreprocDirective {
+      let directive = PreprocDirective { 
+        text: node.Text(),
+        pos: node_pos(node),
+      }
+      return (Some(PreprocIvarItem.Directive(directive)), [])
+    }
+    (None, self.unhandled(node, "preprocessor ivar item", kind))
+  }
+
+  fn preproc_if_line(self, node: capp.CSTNode) -> (Option<PreprocIfLine>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let condition_node = match node.ChildByFieldName(capp.FieldCondition) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "#if without condition")),
+    }
+    let (condition_opt, diags) = self.preproc_condition(condition_node)
+    let Some(condition) = condition_opt else {
+      return (None, diags)
+    }
+    (Some(PreprocIfLine { condition, pos }), diags)
+  }
+
+  fn preproc_condition(self, node: capp.CSTNode) -> (Option<PreprocCondition>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindPreprocDisjunction { continue }
+      let (disjunction_opt, diags) = self.preproc_disjunction(child)
+      let Some(disjunction) = disjunction_opt else {
+        return (None, diags)
+      }
+      return (Some(PreprocCondition { disjunction, pos }), diags)
+    }
+    (None, self.malformed(node, "preprocessor condition without content"))
+  }
+
+  fn preproc_disjunction(self, node: capp.CSTNode) -> (Option<PreprocDisjunction>, Slice<Diagnostic>) {
+    let mut conjunctions: Slice<PreprocConjunction> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindPreprocConjunction { continue }
+      let (conjunction_opt, ds) = self.preproc_conjunction(child)
+      diags = merge_diags(diags, ds)
+      match conjunction_opt {
+        Some(conjunction) => conjunctions = conjunctions.append(conjunction),
+        None => return (None, diags),
+      }
+    }
+    if conjunctions.is_empty() {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "preprocessor disjunction without terms"),
+        ),
+      )
+    }
+    (Some(PreprocDisjunction { conjunctions, pos: node_pos(node) }), diags)
+  }
+
+  fn preproc_conjunction(self, node: capp.CSTNode) -> (Option<PreprocConjunction>, Slice<Diagnostic>) {
+    let mut negations: Slice<PreprocNegation> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindPreprocNegation { continue }
+      let (negation_opt, ds) = self.preproc_negation(child)
+      diags = merge_diags(diags, ds)
+      match negation_opt {
+        Some(negation) => negations = negations.append(negation),
+        None => return (None, diags),
+      }
+    }
+    if negations.is_empty() {
+      return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "preprocessor conjunction without terms"),
+        ),
+      )
+    }
+    (Some(PreprocConjunction { negations, pos: node_pos(node) }), diags)
+  }
+
+  // preproc_negation holds either a nested negation (the '!' form, with the
+  // bang anonymous) or a primary.
+  fn preproc_negation(self, node: capp.CSTNode) -> (Option<PreprocNegation>, Slice<Diagnostic>) {
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if kind == capp.NodeKindPreprocNegation {
+        let (inner_opt, diags) = self.preproc_negation(child)
+        let Some(inner) = inner_opt else {
+          return (None, diags)
+        }
+        return (
+          Some(PreprocNegation.Not(
+            PreprocNegationInner { operand: &inner, pos: node_pos(node) },
+          )),
+          diags,
+        )
+      }
+      if kind == capp.NodeKindPreprocPrimary {
+        let (primary_opt, diags) = self.preproc_primary(child)
+        let Some(primary) = primary_opt else {
+          return (None, diags)
+        }
+        return (Some(PreprocNegation.Primary(primary)), diags)
+      }
+    }
+    (None, self.malformed(node, "preprocessor negation without operand"))
+  }
+
+  // preproc_primary discriminates four ways: a callee field marks the call
+  // form; a nested condition marks grouping; an anonymous comparison
+  // operator marks comparison; otherwise the single identifier stands alone.
+  fn preproc_primary(self, node: capp.CSTNode) -> (Option<PreprocPrimary>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+
+    if let Some(callee_node) = node.ChildByFieldName(capp.FieldCallee) {
+      // The callee is itself an identifier among identifier children; it
+      // is excluded from the arguments by position.
+      let callee_row = callee_node.StartRow()
+      let callee_column = callee_node.StartColumn()
+      let mut arguments: Slice<Identifier> = []
+      for i in 0..node.NamedChildCount() {
+        let child = node.NamedChild(i)
+        if child.Kind() != capp.NodeKindIdentifier { continue }
+        if child.StartRow() == callee_row &&
+        child.StartColumn() == callee_column {
+          continue
+        }
+        arguments = arguments.append(ident_of(child))
+      }
+      return (
+        Some(PreprocPrimary.Call(
+          PreprocCall { callee: ident_of(callee_node), arguments, pos },
+        )),
+        [],
+      )
+    }
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindPreprocCondition { continue }
+      let (condition_opt, diags) = self.preproc_condition(child)
+      let Some(condition) = condition_opt else {
+        return (None, diags)
+      }
+      return (
+        Some(PreprocPrimary.Grouped(
+          PreprocGrouped { condition: &condition, pos },
+        )),
+        diags,
+      )
+    }
+
+    let mut compare_op: Option<PreprocCompareOp> = None
+    if has_anonymous_child(node, "==") {
+      compare_op = Some(PreprocCompareOp.Equal)
+    }
+    if has_anonymous_child(node, "!=") {
+      compare_op = Some(PreprocCompareOp.NotEqual)
+    }
+    if has_anonymous_child(node, "<=") {
+      compare_op = Some(PreprocCompareOp.LessEqual)
+    }
+    if has_anonymous_child(node, ">=") {
+      compare_op = Some(PreprocCompareOp.GreaterEqual)
+    }
+    if has_anonymous_child(node, "<") {
+      compare_op = Some(PreprocCompareOp.LessThan)
+    }
+    if has_anonymous_child(node, ">") {
+      compare_op = Some(PreprocCompareOp.GreaterThan)
+    }
+    if let Some(operator) = compare_op {
+      let mut left: Option<Identifier> = None
+      let mut right: Option<PreprocOperand> = None
+      for i in 0..node.NamedChildCount() {
+        let child = node.NamedChild(i)
+        let kind = child.Kind()
+        if kind == capp.NodeKindIdentifier {
+          match left {
+            None => left = Some(ident_of(child)),
+            Some(_) => {
+              if right.is_none() {
+                right = Some(PreprocOperand.Identifier(ident_of(child)))
+              }
+            },
+          }
+          continue
+        }
+        if kind == capp.NodeKindNumber && right.is_none() {
+          let number = NumberLiteral { 
+            text: child.Text(),
+            pos: node_pos(child),
+          }
+          right = Some(PreprocOperand.Number(number))
+        }
+      }
+      let Some(compare_left) = left else {
+        return (
+          None,
+          self.malformed(node, "preprocessor comparison without left side"),
+        )
+      }
+      let Some(compare_right) = right else {
+        return (
+          None,
+          self.malformed(node, "preprocessor comparison without right side"),
+        )
+      }
+      let comparison = PreprocComparison { 
+        left: compare_left,
+        operator,
+        right: compare_right,
+        pos,
+      }
+      return (Some(PreprocPrimary.Comparison(comparison)), [])
+    }
+
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if child.Kind() != capp.NodeKindIdentifier { continue }
+      return (Some(PreprocPrimary.Identifier(ident_of(child))), [])
+    }
+    (None, self.malformed(node, "preprocessor primary without content"))
   }
 
   // -------------------------------------------------------------------------
@@ -2445,9 +3528,8 @@ impl Lowering {
       if kind == capp.NodeKindObjjMessageKeywordArgument {
         let (argument_opt, ds) = self.keyword_argument(child)
         diags = merge_diags(diags, ds)
-        match argument_opt {
-          Some(argument) => arguments = arguments.append(argument),
-          None => (),
+        if let Some(argument) = argument_opt {
+          arguments = arguments.append(argument)
         }
       } else {
         diags = merge_diags(
@@ -2490,10 +3572,7 @@ impl Lowering {
       }
       let (expr_opt, ds) = self.expression(child)
       diags = merge_diags(diags, ds)
-      match expr_opt {
-        Some(expr) => arguments = arguments.append(expr),
-        None => (),
-      }
+      if let Some(expr) = expr_opt { arguments = arguments.append(expr) }
     }
 
     if arguments.is_empty() {
@@ -2550,10 +3629,7 @@ impl Lowering {
       } else if kind == capp.NodeKindObjjImplementationMember {
         let (member_opt, ds) = self.implementation_member(child)
         diags = merge_diags(diags, ds)
-        match member_opt {
-          Some(member) => members = members.append(member),
-          None => (),
-        }
+        if let Some(member) = member_opt { members = members.append(member) }
       } else {
         diags = merge_diags(
           diags,
@@ -2615,9 +3691,28 @@ impl Lowering {
       }
       return (Some(ObjjImplementationMember.PreprocDirective(directive)), [])
     }
+    if kind == capp.NodeKindObjjGlobalDeclaration {
+      let (global_opt, diags) = self.objj_global_struct(child)
+      let Some(global) = global_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjImplementationMember.Global(global)), diags)
+    }
+    if kind == capp.NodeKindVariableDeclaration {
+      let (decl_opt, diags) = self.variable_declaration(child)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjImplementationMember.Variable(decl)), diags)
+    }
+    if kind == capp.NodeKindGeneratorFunctionDeclaration {
+      let (decl_opt, diags) = self.generator_function_declaration(child)
+      let Some(decl) = decl_opt else {
+        return (None, diags)
+      }
+      return (Some(ObjjImplementationMember.GeneratorFunction(decl)), diags)
+    }
 
-    // objj_global_declaration, variable_declaration, and generator functions
-    // inside class bodies are deferred.
     (None, self.unhandled(child, "implementation member", kind))
   }
 
@@ -2636,14 +3731,16 @@ impl Lowering {
       if kind == capp.NodeKindObjjInstanceVariable {
         let (variable_opt, ds) = self.instance_variable(child)
         diags = merge_diags(diags, ds)
-        match variable_opt {
-          Some(variable) => members = members.append(ObjjIvarMember.Variable(
-            variable,
-          )),
-          None => (),
+        if let Some(variable) = variable_opt {
+          members = members.append(ObjjIvarMember.Variable(variable))
+        }
+      } else if kind == capp.NodeKindPreprocIvarIfBlock {
+        let (block_opt, ds) = self.preproc_ivar_if_block_struct(child)
+        diags = merge_diags(diags, ds)
+        if let Some(block) = block_opt {
+          members = members.append(ObjjIvarMember.PreprocIf(block))
         }
       } else {
-        // preproc_ivar_if_block is deferred.
         diags = merge_diags(
           diags,
           self.unhandled(child, "ivar block item", kind),
@@ -2738,26 +3835,18 @@ impl Lowering {
       None => return (None, diags),
     }
 
-    // @accessors lowering is deferred; its presence is surfaced.
-    match node.ChildByFieldName(capp.FieldAccessors) {
-      Some(accessors_node) => {
-        diags = merge_diags(
-          diags,
-          self.unhandled(
-            accessors_node,
-            "ivar component",
-            "accessors directive",
-          ),
-        )
-      },
-      None => (),
+    let mut accessors: Option<ObjjAccessorsDirective> = None
+    if let Some(accessors_node) = node.ChildByFieldName(capp.FieldAccessors) {
+      let (accessors_opt, ds) = self.accessors_directive(accessors_node)
+      diags = merge_diags(diags, ds)
+      accessors = accessors_opt
     }
 
     let field = ObjjFieldDefinition { 
       modifiers,
       field_type,
       name: ident_of(name_node),
-      accessors: None,
+      accessors,
       pos,
     }
     (Some(field), diags)
@@ -2831,10 +3920,7 @@ impl Lowering {
           if child.Kind() != capp.NodeKindObjjMethodParameterPart { continue }
           let (part_opt, ds) = self.parameter_part(child)
           diags = merge_diags(diags, ds)
-          match part_opt {
-            Some(part) => parts = parts.append(part),
-            None => (),
-          }
+          if let Some(part) = part_opt { parts = parts.append(part) }
         }
         if parts.is_empty() {
           return (
