@@ -7,54 +7,602 @@
 //
 // Phase 7: TypeCheck
 //
-// Verifies the internal consistency of the parsed and sorted units against
-// the symbol table constructed by phase 6.  Files are processed in
-// dependency order so that every type referenced by a file is resolved
-// before that file is checked.
+// Verifies the consistency of the symbol table constructed by phase 6.
+// Operates entirely on ctx.symbols; no AST or CST is consulted.
+//
+// Scope is governed by decidability.  During bootstrap the symbol table
+// covers project sources only — framework classes and protocols live in
+// legacy-built ./Frameworks bundles and are invisible here — so a check is
+// performed exactly when its inputs are fully project-known, and is
+// recorded as indeterminate (counted, silent) when the world is open.
+// The decidable set grows as frameworks become natively compiled; nothing
+// below changes shape when that happens.
+//
+// Checked now (decidable):
+//   — Inheritance cycles among project-known classes: Error.  A chain that
+//     exits the project (external superclass) simply terminates; only a
+//     walk that revisits a known class is a defect.
+//   — Protocol-inheritance cycles among project-known protocols: Error.
+//   — Protocol conformance: a class (or category) declaring <P> must
+//     implement every required selector of P and of P's project-known
+//     ancestors — Warning per missing selector.  Reported only when the
+//     class's ancestry terminates at a project-known root; an external
+//     superclass could supply any selector, so an open chain is
+//     indeterminate.  Implementations are sought across the whole class
+//     group: primary, all categories, synthesized accessors, and guarded
+//     declarations (union across #if branches — the lenient reading;
+//     a guard-aware consumer can do better once conditions evaluate).
+//
+// Deferred until the world closes (recorded June 12, see
+// PROGRESS-SNAPSHOT.md): message-send resolution, selector signature
+// verification at call sites, and variable scope/usage analysis.  All
+// three require the full framework symbol surface to avoid systematic
+// false positives, and the last requires AST dataflow that belongs with
+// phase 8 design.
+//
+// Positions on symbols are stored 1-based; the diag_*_at constructors
+// expect 0-based and normalise, so positions convert back at call sites
+// here, as in phase 6.
 //
 // **
+import "go:errors"
 import "go:fmt"
+import "go:strings"
 
-// The absence of Error-level diagnostics indicates a type-correct program.
-// Every Error diagnostic carries precise provenance: file, line, col, cause.
+// The absence of Error-level diagnostics indicates a type-correct program
+// to the extent the bootstrap world permits deciding.  Every positioned
+// diagnostic carries precise provenance: file, line, col, cause.
 pub struct TypeCheckResult {
   pub diags: Slice<Diagnostic>,
 }
 
-// Files are processed in ctx.sorted.order so all imported types are resolved
-// before the file that depends on them is checked.  ctx.symbols is the
-// read-only symbol table produced by phase 6.
-//
-// Scope of checking for Objective-J:
-//   - Message send resolution against known class interfaces
-//   - Selector signature verification at call sites
-//   - Variable scope and usage validity
-//   - Protocol conformance
-pub fn run_type_check(_ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error> {
-  let phase = BuildPhase.TypeCheck
-  fmt.Println("  type check")
-  let mut diags: Slice<Diagnostic> = []
+// ---------------------------------------------------------------------------
+// Internal worlds — name-unified views of the symbol table
+// ---------------------------------------------------------------------------
 
-  // TODO: resolve message sends against known class interfaces in ctx.symbols;
-  //       emit Error diagnostics for unresolved selectors
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: resolve message send types against symbol table",
-  ))
+// ClassGroup unifies every ClassSymbol sharing one name: the primary
+// implementation, its categories, and any #if-guarded variants.  selectors
+// is the union of their scope-keyed selector universes (selector_key from
+// phase 6).  has_primary distinguishes a class defined in-project from a
+// group induced solely by categories on an external class; the latter has
+// no knowable ancestry.  Site fields anchor diagnostics at the first
+// primary (or are empty when none exists).
+struct ClassGroup {
+  name: string,
+  superclass: Option<string>,
+  has_primary: bool,
+  selectors: Map<string, bool>,
+  file: string,
+  line: int,
+  col: int,
+}
 
-  // TODO: verify selector argument counts and labels at each call site
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: verify selector signatures at call sites",
-  ))
+struct ClassWorld {
+  groups: Slice<ClassGroup>,
+  index: Map<string, int>, // name → index+1 into groups; 0 = unknown
+}
 
-  // TODO: check variable declarations, assignments, and scope;
-  //       emit Error diagnostics for use-before-declare and shadowing
-  diags = diags.append(diag_info(phase, "TODO: check variable scope and usage"))
+// Requirement is one required selector of a protocol, scope-keyed exactly
+// as the implementation universe ("-selector" / "+selector"), carrying the
+// declaring protocol for diagnostic attribution.
+struct Requirement { key: string, protocol: string }
 
-  // TODO: verify that classes declared as conforming to a protocol
-  //       implement all required methods from ctx.symbols.protocols
-  diags = diags.append(diag_info(phase, "TODO: verify protocol conformance"))
+// ProtoGroup unifies every ProtocolSymbol sharing one name, mirroring
+// ClassGroup: inherited protocol references and direct requirements are
+// unioned across guarded variants.
+struct ProtoGroup {
+  name: string,
+  inherited: Slice<string>,
+  requirements: Slice<Requirement>,
+  file: string,
+  line: int,
+  col: int,
+}
+
+struct ProtoWorld {
+  groups: Slice<ProtoGroup>,
+  index: Map<string, int>, // name → index+1 into groups; 0 = unknown
+}
+
+// RequirementSet is the transitive requirement closure of one protocol.
+// complete is false when any ancestor protocol is unknown — the known
+// requirements are still checkable, but their absence cannot prove
+// conformance.
+struct RequirementSet { requirements: Slice<Requirement>, complete: bool }
+
+// AncestryChain is the resolved superclass walk of one class.  ancestors
+// lists every name encountered above the class itself, project-known or
+// not; terminal states whether the walk proved a closed world.
+struct AncestryChain { ancestors: Slice<string>, terminal: AncestryTerminal }
+
+// Root: the chain ended at a project-known class with no superclass — the
+// implementation universe is fully known.  External: the chain reached a
+// name with no project-known primary; the named class could supply any
+// selector.  Cycle: the walk revisited a known class; reported separately
+// by inheritance_cycle_diags, treated as indeterminate here.
+enum AncestryTerminal {
+  Root,
+  External(string),
+  Cycle,
+}
+
+// ConformanceOutcome accumulates the conformance pass: diagnostics plus
+// the counters the summary line reports.
+struct ConformanceOutcome {
+  diags: Slice<Diagnostic>,
+  conformances: int,
+  verified: int,
+  indeterminate: int,
+  requirements: int,
+  missing: int,
+}
+
+// ---------------------------------------------------------------------------
+// Phase entry point
+// ---------------------------------------------------------------------------
+
+pub fn run_type_check(ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error> {
+  let table = match ctx.symbols {
+    Some(t) => t,
+    None => return Err(errors.New("type check: symbol table unavailable")),
+  }
+
+  let classes = class_world(table)
+  let protocols = proto_world(table)
+
+  let mut diags = inheritance_cycle_diags(classes)
+  diags = merge_diags(diags, protocol_cycle_diags(protocols))
+
+  let outcome = conformance_outcome(table, classes, protocols)
+  diags = merge_diags(diags, outcome.diags)
+
+  for d in diags {
+    print_check_diag(d)
+  }
+
+  fmt.Println(
+    f"✓  type check: {classes.groups.length()} classes, {protocols.groups.length()} protocols, {outcome.conformances} conformances — {outcome.verified} verified, {outcome.indeterminate} indeterminate, {outcome.missing} missing of {outcome.requirements} requirements checked",
+  )
 
   Ok(TypeCheckResult { diags })
+}
+
+// print_check_diag surfaces one phase-7 diagnostic in the build output.
+fn print_check_diag(d: Diagnostic) {
+  let Some(file) = d.file else {
+    fmt.Println(f"   {d.message}")
+    return
+  }
+  let line = d.line.unwrap_or(0)
+  let col = d.col.unwrap_or(0)
+  fmt.Println(f"   {d.message}  {file}:{line}:{col}")
+}
+
+// ---------------------------------------------------------------------------
+// World construction
+// ---------------------------------------------------------------------------
+
+// class_world unifies table.classes by name.  Construction is pure and
+// quadratic in the symbol count (names × symbols); the corpora put this in
+// the hundreds-squared range, well below concern.
+fn class_world(table: SymbolTable) -> ClassWorld {
+  let mut index: Map<string, int> = Map.new<string, int>()
+  let mut names: Slice<string> = []
+  for symbol in table.classes {
+    if index[symbol.name] == 0 {
+      names = names.append(symbol.name)
+      index[symbol.name] = names.length()
+    }
+  }
+
+  let mut groups: Slice<ClassGroup> = []
+  for name in names {
+    let mut selectors: Map<string, bool> = Map.new<string, bool>()
+    let mut superclass: Option<string> = None
+    let mut has_primary = false
+    let mut file = ""
+    let mut line = 0
+    let mut col = 0
+    for symbol in table.classes {
+      if symbol.name == name {
+        for method in symbol.methods {
+          selectors[selector_key(method.is_class_method, method.selector)] = true
+        }
+        if symbol.category.is_none() && !has_primary {
+          has_primary = true
+          superclass = symbol.superclass
+          file = symbol.file
+          line = symbol.line
+          col = symbol.col
+        }
+      }
+    }
+    groups = groups.append(
+      ClassGroup { name, superclass, has_primary, selectors, file, line, col },
+    )
+  }
+  ClassWorld { groups, index }
+}
+
+// proto_world unifies table.protocols by name, mirroring class_world.
+// Only required methods become Requirements; optional methods impose no
+// conformance obligation.
+fn proto_world(table: SymbolTable) -> ProtoWorld {
+  let mut index: Map<string, int> = Map.new<string, int>()
+  let mut names: Slice<string> = []
+  for protocol in table.protocols {
+    if index[protocol.name] == 0 {
+      names = names.append(protocol.name)
+      index[protocol.name] = names.length()
+    }
+  }
+
+  let mut groups: Slice<ProtoGroup> = []
+  for name in names {
+    let mut inherited: Slice<string> = []
+    let mut requirements: Slice<Requirement> = []
+    let mut sited = false
+    let mut file = ""
+    let mut line = 0
+    let mut col = 0
+    for protocol in table.protocols {
+      if protocol.name == name {
+        for parent in protocol.protocols {
+          inherited = inherited.append(parent)
+        }
+        for method in protocol.required {
+          requirements = requirements.append(
+            Requirement { 
+              key: selector_key(method.is_class_method, method.selector),
+              protocol: name,
+            },
+          )
+        }
+        if !sited {
+          sited = true
+          file = protocol.file
+          line = protocol.line
+          col = protocol.col
+        }
+      }
+    }
+    groups = groups.append(
+      ProtoGroup { name, inherited, requirements, file, line, col },
+    )
+  }
+  ProtoWorld { groups, index }
+}
+
+// ---------------------------------------------------------------------------
+// Inheritance cycles
+// ---------------------------------------------------------------------------
+
+// inheritance_cycle_diags walks every class's superclass chain.  The chain
+// is single-parent, so a plain walk with a per-walk membership map suffices;
+// a revisit identifies the cycle exactly.  reported marks every member of
+// an emitted cycle so each cycle produces one Error regardless of how many
+// of its members seed a walk.
+fn inheritance_cycle_diags(world: ClassWorld) -> Slice<Diagnostic> {
+  let mut diags: Slice<Diagnostic> = []
+  let mut reported: Map<string, bool> = Map.new<string, bool>()
+
+  for group in world.groups {
+    let mut on_walk: Map<string, bool> = Map.new<string, bool>()
+    let mut path: Slice<string> = []
+    let mut current = group.name
+    loop {
+      if reported[current] { break }
+      if on_walk[current] {
+        diags = diags.append(cycle_error(current, path, world, reported))
+        break
+      }
+      on_walk[current] = true
+      path = path.append(current)
+      let idx = world.index[current]
+      if idx == 0 { break }
+      // external superclass — the chain leaves the project
+      let Some(next) = world.groups[idx - 1].superclass else {
+        break // project-known root
+      }
+      current = next
+    }
+  }
+  diags
+}
+
+// cycle_error extracts the cycle members from the walk path (the sub-path
+// from the first occurrence of entry, closed by entry), marks them
+// reported, and anchors the Error at the entry class's declaration site.
+fn cycle_error(
+  entry: string,
+  path: Slice<string>,
+  world: ClassWorld,
+  mut reported: Map<string, bool>,
+) -> Diagnostic {
+  let phase = BuildPhase.TypeCheck
+  let mut members: Slice<string> = []
+  let mut in_cycle = false
+  for name in path {
+    if name == entry { in_cycle = true }
+    if in_cycle { members = members.append(name) }
+  }
+  for name in members {
+    reported[name] = true
+  }
+  let closed = members.append(entry)
+  let display = strings.Join(closed, " → ")
+
+  let idx = world.index[entry]
+  if idx == 0 { return diag_error(phase, f"inheritance cycle: {display}") }
+  let group = world.groups[idx - 1]
+  diag_error_at(
+    phase,
+    f"inheritance cycle: {display}",
+    group.file,
+    group.line - 1,
+    group.col - 1,
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Protocol cycles
+// ---------------------------------------------------------------------------
+
+// protocol_cycle_diags runs DFS over the project-known protocol-inheritance
+// graph (multi-parent, unlike class inheritance).  Structure follows
+// phase05's dfs_cycle: visited spans the scan, on_stack tracks the active
+// recursion, and a back edge identifies a cycle exactly.  Members of an
+// emitted cycle are visited, so each cycle reports once.
+fn protocol_cycle_diags(world: ProtoWorld) -> Slice<Diagnostic> {
+  let phase = BuildPhase.TypeCheck
+  let mut diags: Slice<Diagnostic> = []
+  let mut visited: Map<string, bool> = Map.new<string, bool>()
+  let mut on_stack: Map<string, bool> = Map.new<string, bool>()
+
+  for group in world.groups {
+    if !visited[group.name] {
+      if let Some(cycle) = proto_cycle_dfs(
+        group.name,
+        [],
+        world,
+        visited,
+        on_stack,
+      ) {
+        let display = strings.Join(cycle, " → ")
+        let idx = world.index[cycle[0]]
+        if idx == 0 {
+          diags = diags.append(diag_error(
+            phase,
+            f"protocol inheritance cycle: {display}",
+          ))
+        } else {
+          let site = world.groups[idx - 1]
+          diags = diags.append(diag_error_at(
+            phase,
+            f"protocol inheritance cycle: {display}",
+            site.file,
+            site.line - 1,
+            site.col - 1,
+          ))
+        }
+      }
+    }
+  }
+  diags
+}
+
+// proto_cycle_dfs performs one DFS step.  path is rebuilt from scratch at
+// each call rather than extended via append — the same backing-array
+// aliasing hazard documented at phase05 dfs_cycle applies here.
+fn proto_cycle_dfs(
+  name: string,
+  path: Slice<string>,
+  world: ProtoWorld,
+  mut visited: Map<string, bool>,
+  mut on_stack: Map<string, bool>,
+) -> Option<Slice<string>> {
+  visited[name] = true
+  on_stack[name] = true
+
+  let mut fresh: Slice<string> = []
+  for p in path {
+    fresh = fresh.append(p)
+  }
+  let path = fresh.append(name)
+
+  let idx = world.index[name]
+  if idx != 0 {
+    for parent in world.groups[idx - 1].inherited {
+      if on_stack[parent] {
+        let mut cycle: Slice<string> = []
+        let mut in_cycle = false
+        for p in path {
+          if p == parent { in_cycle = true }
+          if in_cycle { cycle = cycle.append(p) }
+        }
+        return Some(cycle.append(parent))
+      }
+      if !visited[parent] {
+        if let Some(cycle) = proto_cycle_dfs(
+          parent,
+          path,
+          world,
+          visited,
+          on_stack,
+        ) {
+          return Some(cycle)
+        }
+      }
+    }
+  }
+
+  on_stack[name] = false
+  None
+}
+
+// ---------------------------------------------------------------------------
+// Protocol conformance
+// ---------------------------------------------------------------------------
+
+// collect_requirements computes the transitive requirement closure of one
+// protocol over project-known edges.  visited makes the walk terminate on
+// cyclic graphs (the cycle itself is diagnosed by protocol_cycle_diags);
+// an unknown ancestor clears complete but does not suppress the known
+// requirements, which remain individually checkable.
+fn collect_requirements(
+  name: string,
+  world: ProtoWorld,
+  mut visited: Map<string, bool>,
+) -> RequirementSet {
+  if visited[name] {
+    return RequirementSet { requirements: [], complete: true }
+  }
+  visited[name] = true
+
+  let idx = world.index[name]
+  if idx == 0 { return RequirementSet { requirements: [], .. } }
+  let group = world.groups[idx - 1]
+
+  let mut requirements: Slice<Requirement> = []
+  for requirement in group.requirements {
+    requirements = requirements.append(requirement)
+  }
+  let mut complete = true
+  for parent in group.inherited {
+    let parent_set = collect_requirements(parent, world, visited)
+    for requirement in parent_set.requirements {
+      requirements = requirements.append(requirement)
+    }
+    if !parent_set.complete { complete = false }
+  }
+  RequirementSet { requirements, complete }
+}
+
+// resolve_ancestry walks the superclass chain of a project-known class.
+// A group without a primary implementation (induced solely by categories
+// on an external class) terminates External immediately: the class's
+// definition, and therefore its method surface, lives outside the project.
+fn resolve_ancestry(name: string, world: ClassWorld) -> AncestryChain {
+  let mut ancestors: Slice<string> = []
+  let mut on_walk: Map<string, bool> = Map.new<string, bool>()
+  let mut current = name
+  loop {
+    let idx = world.index[current]
+    if idx == 0 {
+      return AncestryChain { 
+        ancestors,
+        terminal: AncestryTerminal.External(current),
+      }
+    }
+    let group = world.groups[idx - 1]
+    if !group.has_primary {
+      return AncestryChain { 
+        ancestors,
+        terminal: AncestryTerminal.External(current),
+      }
+    }
+    on_walk[current] = true
+    let Some(next) = group.superclass else {
+      return AncestryChain { ancestors, terminal: AncestryTerminal.Root }
+    }
+    if on_walk[next] {
+      return AncestryChain { ancestors, terminal: AncestryTerminal.Cycle }
+    }
+    ancestors = ancestors.append(next)
+    current = next
+  }
+}
+
+// universe_has reports whether the class group of class_name, or any
+// project-known ancestor's group, implements the scope-keyed selector.
+fn universe_has(
+  key: string,
+  class_name: string,
+  ancestors: Slice<string>,
+  world: ClassWorld,
+) -> bool {
+  let idx = world.index[class_name]
+  if idx != 0 && world.groups[idx - 1].selectors[key] { return true }
+  for ancestor in ancestors {
+    let aidx = world.index[ancestor]
+    if aidx != 0 && world.groups[aidx - 1].selectors[key] { return true }
+  }
+  false
+}
+
+// conformance_outcome checks every conformance declaration in the table.
+// Iteration is over the symbols themselves — not the unified groups — so
+// each diagnostic anchors at the declaration that made the promise,
+// including a category adding conformance on behalf of its class.
+//
+// A conformance is verified when its requirement closure is complete, its
+// class ancestry terminates at a project-known root, and no requirement is
+// missing.  It is indeterminate when the protocol is unknown, the closure
+// is incomplete, or the ancestry is open — in each case the known
+// requirements are still checked against the known universe, but absence
+// of a selector proves nothing and stays silent.
+fn conformance_outcome(
+  table: SymbolTable,
+  classes: ClassWorld,
+  protocols: ProtoWorld,
+) -> ConformanceOutcome {
+  let phase = BuildPhase.TypeCheck
+  let mut out = ConformanceOutcome { diags: [], .. }
+
+  for symbol in table.classes {
+    for protocol_name in symbol.protocols {
+      out.conformances += 1
+
+      let pidx = protocols.index[protocol_name]
+      if pidx == 0 {
+        out.indeterminate += 1
+      } else {
+        let mut visited: Map<string, bool> = Map.new<string, bool>()
+        let set = collect_requirements(protocol_name, protocols, visited)
+        let chain = resolve_ancestry(symbol.name, classes)
+
+        let decidable = match chain.terminal {
+          Root => true,
+          External(_) => false,
+          Cycle => false,
+        }
+
+        if decidable {
+          let display = symbol.category.map_or(
+            symbol.name,
+            |category| f"{symbol.name}({category})",
+          )
+          let mut checked: Map<string, bool> = Map.new<string, bool>()
+          let mut missing_here = 0
+          for requirement in set.requirements {
+            if !checked[requirement.key] {
+              checked[requirement.key] = true
+              out.requirements += 1
+              if !universe_has(
+                requirement.key,
+                symbol.name,
+                chain.ancestors,
+                classes,
+              ) {
+                missing_here += 1
+                out.missing += 1
+                out.diags = out.diags.append(diag_warn_at(
+                  phase,
+                  f"{display} does not implement {requirement.key}, required by @protocol {requirement.protocol}",
+                  symbol.file,
+                  symbol.line - 1,
+                  symbol.col - 1,
+                ))
+              }
+            }
+          }
+          if set.complete && missing_here == 0 { out.verified += 1 }
+          if !set.complete { out.indeterminate += 1 }
+        } else {
+          out.indeterminate += 1
+        }
+      }
+    }
+  }
+  out
 }
