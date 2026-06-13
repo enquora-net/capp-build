@@ -32,12 +32,23 @@ TARGET       := target
 PARSE_DIR    := $(HOME)/Desktop/capp-parse
 PARSE_MODULE := github.com/enquora-net/capp-parse
 
-.PHONY: all run clean bump-parse
+TOOLCHAIN_TEST := $(HOME)/Desktop/toolchain_test
+
+.PHONY: all run clean bump-parse gate
 
 all: run
 
 run:
 	lis run
+
+# Phase 8 tier gate: build, compile toolchain_test in debug mode, and
+# byte-compare our main.j record against the legacy oracle (S stripped).
+gate:
+	lis build
+	"$(TARGET)/$(BINARY)" build --mode debug "$(TOOLCHAIN_TEST)"
+	python3 payload_oracle.py diff \
+		"$(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources/main.j" \
+		"$(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources/main.j"
 
 clean:
 	rm -rf $(TARGET)/vendor
