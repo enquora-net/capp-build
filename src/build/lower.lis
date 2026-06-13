@@ -1446,7 +1446,7 @@ impl Lowering {
         diags = merge_diags(diags, self.unhandled(child, "string part", kind))
       }
     }
-    (StringLiteral { parts, pos: node_pos(node) }, diags)
+    (StringLiteral { parts, text: node.Text(), pos: node_pos(node) }, diags)
   }
 
   fn call_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {

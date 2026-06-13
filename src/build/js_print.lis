@@ -1,0 +1,1693 @@
+//**
+// build/js_print.lis
+// capp-build
+//
+// Created by David Richardson on Friday, June 12, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Phase 8, tier A: the JavaScript printer.  Typed AST (cst.lis) in,
+// legacy-byte-exact JavaScript text out.
+//
+// The emitter law is not designed here — it is transcribed.  The legacy
+// code generator ships inside Frameworks/Objective-J/Objective-J.js (the
+// acorn-based ObjJAcornCompiler); its visitor table was beautified and
+// read directly, and PHASE-8-BRIEF.md ("The emitter law") records every
+// template, quirk, and the P/T parenthesization tables reproduced below.
+// Where the legacy generator is quirky (for-of without indentation,
+// `switch(` without a space, un-indented `default:`, labels without
+// indentation, `await (x)` always parenthesized, `(a) ?? (b)` always
+// parenthesized), the quirk is the law: the oracle is byte equality
+// against legacy output (payload_oracle.py).
+//
+// The global-escape rewrite: static-blob builds run the legacy compiler
+// with transformNamedFunctionDeclarationToAssignment enabled (the runtime
+// defaults it on), so every named function — declaration or expression,
+// top level or nested — prints as `name = function(...)`.  This printer
+// applies the same rewrite unconditionally.
+//
+// Recorded deviations from the legacy mechanics (all corpus-invisible):
+//   — Object-literal and class methods print with the rewrite OFF.  The
+//     legacy emitter with the transform enabled would produce `name = (...)`
+//     inside braces — invalid JavaScript.  No corpus file contains either
+//     form; the valid-JS reading is taken.  (PROGRESS-SNAPSHOT.md.)
+//   — `using` / `await using` declarations have no legacy emitter; they
+//     print mechanically in variable-declaration shape.
+//
+// Deferred constructs route through named catch-all diagnostics, per the
+// house pattern: ObjJ statements (tier B), message sends (tier C), ObjJ
+// expression literals (tier D), and #if blocks (pending the build-feature
+// environment, PHASE-8-BRIEF.md decision 4).  Each deferral emits no text,
+// so payloads for files containing them are incomplete by construction;
+// the diagnostics say exactly what is missing.
+//
+// Everything here is pure: typed values in, JsPrinted out.  Indentation
+// is an explicit parameter (4-space unit); a block prints its braces one
+// step shallower than its contents, exactly as the legacy indentation
+// bookkeeping does.
+//
+// **
+import "go:strings"
+
+// JsPrinted is the printer's accumulation unit: emitted text plus any
+// deferral diagnostics encountered beneath the printed node.
+pub struct JsPrinted {
+  pub text: string,
+  pub diags: Slice<Diagnostic>,
+}
+
+// print_js_program renders a typed Program as the JavaScript payload body.
+// The debug-mode "\n\n" prologue is NOT emitted here — it belongs to
+// per-file record composition (phase 8 proper), since it is a property of
+// the build mode, not of the program.
+pub fn print_js_program(program: Program, file: string) -> JsPrinted {
+  let p = JsPrint { file }
+  let mut out = text_of("")
+  if let Some(hash_bang) = program.hash_bang {
+    out.text += hash_bang.text
+    out.text += "\n"
+  }
+  let prologue = directive_prologue_len(program.body)
+  for i in 0..program.body.length() {
+    emit(&out, p.statement(program.body[i], "", i < prologue))
+  }
+  out
+}
+
+// ---------------------------------------------------------------------------
+// Accumulation helpers
+// ---------------------------------------------------------------------------
+
+struct JsPrint {
+  file: string,
+}
+
+fn text_of(text: string) -> JsPrinted {
+  JsPrinted { text, .. }
+}
+
+fn emit(acc: Ref<JsPrinted>, piece: JsPrinted) {
+  acc.text = acc.text + piece.text
+  acc.diags = merge_diags(acc.diags, piece.diags)
+}
+
+fn indent_step() -> string {
+  "    "
+}
+
+// outdent removes one indentation step; block braces print at this level.
+fn outdent(ind: string) -> string {
+  if ind.length() >= 4 { ind.substring(4..ind.length()) } else { "" }
+}
+
+// ---------------------------------------------------------------------------
+// Precedence tables (PHASE-8-BRIEF.md, "Parenthesization")
+// ---------------------------------------------------------------------------
+
+// expr_prec is the legacy node-precedence table P.  Smaller binds tighter;
+// -1 means the node never takes precedence parentheses.
+fn expr_prec(e: Expression) -> int {
+  match e {
+    Primary(primary) => primary_prec(primary),
+    Assignment(_) => 8,
+    AugmentedAssignment(_) => 8,
+    Await(_) => -1,
+    Unary(_) => 4,
+    Binary(binary) => {
+      if binary_op_is_logical(binary.operator) { 6 } else { 5 }
+    },
+    Ternary(_) => 7,
+    Update(_) => 4,
+    New(_) => 1,
+    Yield(_) => -1,
+  }
+}
+
+fn primary_prec(primary: PrimaryExpression) -> int {
+  match primary {
+    Subscript(_) |
+    Member(_) |
+    Call(_) => 1,
+    Function(_) |
+    Generator(_) |
+    Arrow(_) => 3,
+    _ => -1,
+  }
+}
+
+// binary_op_t is the legacy operator-precedence table T.  0 marks an
+// operator absent from the table (only `**`); comparisons against an
+// absent entry are false in both directions, as in the original.
+fn binary_op_t(op: BinaryOp) -> int {
+  match op {
+    Mul | Div | Mod => 3,
+    Add | Sub => 4,
+    ShiftLeft | ShiftRight | UnsignedShiftRight => 5,
+    LessThan | LessEqual | GreaterThan | GreaterEqual | In | Instanceof => 6,
+    Equal | NotEqual | StrictEqual | StrictNotEqual => 7,
+    BitAnd => 8,
+    BitXor => 9,
+    BitOr => 10,
+    LogicalAnd => 11,
+    LogicalOr => 12,
+    NullishCoalesce => 13,
+    Exp => 0,
+  }
+}
+
+// The legacy generator types `&&`/`||`/`??` as LogicalExpression (P = 6);
+// every other operator is BinaryExpression (P = 5).
+fn binary_op_is_logical(op: BinaryOp) -> bool {
+  match op {
+    LogicalAnd | LogicalOr | NullishCoalesce => true,
+    _ => false,
+  }
+}
+
+fn binary_op_text(op: BinaryOp) -> string {
+  match op {
+    LogicalAnd => "&&",
+    LogicalOr => "||",
+    ShiftRight => ">>",
+    UnsignedShiftRight => ">>>",
+    ShiftLeft => "<<",
+    BitAnd => "&",
+    BitXor => "^",
+    BitOr => "|",
+    Add => "+",
+    Sub => "-",
+    Mul => "*",
+    Div => "/",
+    Mod => "%",
+    Exp => "**",
+    LessThan => "<",
+    LessEqual => "<=",
+    Equal => "==",
+    StrictEqual => "===",
+    NotEqual => "!=",
+    StrictNotEqual => "!==",
+    GreaterEqual => ">=",
+    GreaterThan => ">",
+    NullishCoalesce => "??",
+    Instanceof => "instanceof",
+    In => "in",
+  }
+}
+
+fn unary_op_text(op: UnaryOp) -> string {
+  match op {
+    Not => "!",
+    BitNot => "~",
+    Negate => "-",
+    Plus => "+",
+    Typeof => "typeof",
+    Void => "void",
+    Delete => "delete",
+  }
+}
+
+// Word operators take a space before their operand (legacy regex
+// `delete in instanceof new typeof void`).
+fn unary_op_is_word(op: UnaryOp) -> bool {
+  match op {
+    Typeof | Void | Delete => true,
+    _ => false,
+  }
+}
+
+fn update_op_text(op: UpdateOp) -> string {
+  match op {
+    Increment => "++",
+    Decrement => "--",
+  }
+}
+
+fn augmented_op_text(op: AugmentedAssignmentOp) -> string {
+  match op {
+    Add => "+=",
+    Sub => "-=",
+    Mul => "*=",
+    Div => "/=",
+    Mod => "%=",
+    BitXor => "^=",
+    BitAnd => "&=",
+    BitOr => "|=",
+    ShiftRight => ">>=",
+    UnsignedShiftRight => ">>>=",
+    ShiftLeft => "<<=",
+    Exp => "**=",
+    LogicalAnd => "&&=",
+    LogicalOr => "||=",
+    NullishCoalesce => "??=",
+  }
+}
+
+fn lexical_kind_text(kind: LexicalKind) -> string {
+  match kind {
+    Let => "let",
+    Const => "const",
+  }
+}
+
+fn variable_kind_text(kind: VariableKind) -> string {
+  match kind {
+    Var => "var",
+    Let => "let",
+    Const => "const",
+    Using => "using",
+    AwaitUsing => "await using",
+  }
+}
+
+// operand_needs_parens is the legacy A() predicate: a child operand is
+// parenthesized iff its P exceeds the parent's, or P ties and the parent
+// is an operator expression whose T-precedence is looser than the
+// child's (or equal, on the right operand).
+fn operand_needs_parens(
+  parent_prec: int,
+  parent_t: int,
+  parent_is_operator: bool,
+  e: Expression,
+  is_right: bool,
+) -> bool {
+  let child_prec = expr_prec(e)
+  if parent_prec < child_prec { return true }
+  if parent_prec != child_prec || !parent_is_operator { return false }
+  let child_t = match e {
+    Binary(binary) => binary_op_t(binary.operator),
+    _ => 0,
+  }
+  if parent_t == 0 || child_t == 0 { return false }
+  parent_t < child_t || (is_right && parent_t == child_t)
+}
+
+// ---------------------------------------------------------------------------
+// Directive prologue
+// ---------------------------------------------------------------------------
+
+// directive_prologue_len counts the leading run of string-literal
+// expression statements: acorn's directive set.  A "use strict" literal
+// inside the prologue prints bare; the same statement elsewhere is
+// parenthesized (legacy ExpressionStatement special case).
+fn directive_prologue_len(body: Slice<Statement>) -> int {
+  let mut n = 0
+  for st in body {
+    let is_directive = match st {
+      Expression(es) => match es.expression.* {
+        Single(e) => expression_is_string(e),
+        Sequence(_) => false,
+      },
+      _ => false,
+    }
+    if !is_directive { return n }
+    n += 1
+  }
+  n
+}
+
+fn expression_is_string(e: Expression) -> bool {
+  match e {
+    Primary(primary) => match primary {
+      String(_) => true,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn is_use_strict(literal: StringLiteral) -> bool {
+  literal.text == "\"use strict\"" || literal.text == "'use strict'"
+}
+
+// ---------------------------------------------------------------------------
+// Statements
+// ---------------------------------------------------------------------------
+
+impl JsPrint {
+  fn statement(self, st: Statement, ind: string, is_directive: bool) -> JsPrinted {
+    match st {
+      Expression(es) => self.expression_statement(es, ind, is_directive),
+      Declaration(declaration) => self.declaration(declaration, ind),
+      BlockScope(block) => self.block(block, ind, false, true),
+      If(if_st) => self.if_statement(if_st, ind, false),
+      Switch(switch_st) => self.switch_statement(switch_st, ind),
+      For(for_st) => self.for_statement(for_st, ind),
+      ForIn(for_in) => self.for_in_statement(for_in, ind),
+      While(while_st) => self.while_statement(while_st, ind),
+      Do(do_st) => self.do_statement(do_st, ind),
+      Try(try_st) => self.try_statement(try_st, ind),
+      With(with_st) => self.with_statement(with_st, ind),
+      Break(break_st) => {
+        let label = match break_st.label {
+          Some(identifier) => f" {identifier.text}",
+          None => "",
+        }
+        text_of(f"{ind}break{label};\n")
+      },
+      Continue(continue_st) => {
+        let label = match continue_st.label {
+          Some(identifier) => f" {identifier.text}",
+          None => "",
+        }
+        text_of(f"{ind}continue{label};\n")
+      },
+      Return(return_st) => {
+        let mut out = text_of(ind + "return")
+        if let Some(value) = return_st.value {
+          out.text += " "
+          emit(&out, self.expressions(value, ind))
+        }
+        out.text += ";\n"
+        out
+      },
+      Throw(throw_st) => {
+        let mut out = text_of(ind + "throw ")
+        emit(&out, self.expressions(throw_st.value.*, ind))
+        out.text += ";\n"
+        out
+      },
+      Empty(_) => text_of(";\n"),
+      Labeled(labeled) => {
+        // Legacy quirk: the label prints with no leading indentation.
+        let mut out = text_of(labeled.label.text + ": ")
+        emit(&out, self.statement(labeled.body.*, ind, false))
+        out
+      },
+      Debugger(_) => text_of(ind + "debugger;\n"),
+      Import(import_st) => self.es_import(import_st),
+      Export(export_st) => self.es_export(export_st, ind),
+      ObjjImport(import_directive) => self.objj_import(import_directive),
+      ObjjGlobal(global) =>
+        self.deferred("@global declaration", "tier B", global.pos),
+      ObjjClassForward(forward) =>
+        self.deferred("@class forward declaration", "tier B", forward.pos),
+      ObjjTypedef(typedef) =>
+        self.deferred("@typedef", "tier B", typedef.pos),
+      ObjjProtocol(protocol) =>
+        self.deferred("@protocol declaration", "tier B", protocol.pos),
+      ObjjClassImpl(implementation) =>
+        self.deferred("@implementation", "tier B", implementation.pos),
+      PreprocIf(preproc) => self.deferred(
+        "#if block",
+        "build-feature environment (PHASE-8-BRIEF.md decision 4)",
+        preproc.pos,
+      ),
+      PreprocDirective(directive) => self.deferred(
+        "#preproc directive",
+        "build-feature environment (PHASE-8-BRIEF.md decision 4)",
+        directive.pos,
+      ),
+    }
+  }
+
+  // deferred is the named catch-all: no text, one warning saying exactly
+  // which construct is awaiting which tier.
+  fn deferred(self, what: string, pending: string, pos: Position) -> JsPrinted {
+    JsPrinted {
+      diags: [diag_warn_at(
+        BuildPhase.Compile,
+        f"codegen: {what} deferred pending {pending}",
+        self.file,
+        pos.row,
+        pos.col,
+      )],
+      ..,
+    }
+  }
+
+  fn expression_statement(
+    self,
+    st: ExpressionStatement,
+    ind: string,
+    is_directive: bool,
+  ) -> JsPrinted {
+    let mut out = text_of(ind)
+    match st.expression.* {
+      Sequence(sequence) => emit(&out, self.sequence(sequence, ind)),
+      Single(e) => {
+        if statement_needs_parens(e, is_directive) {
+          emit(&out, self.wrapped(e, ind))
+        } else {
+          emit(&out, self.expression(e, ind))
+        }
+      },
+    }
+    out.text += ";\n"
+    out
+  }
+
+  // block prints `{`/`}` one indentation step shallower than its contents
+  // (content_ind).  skip_indent suppresses the leading outdent (try/catch/
+  // finally and arrow bodies, where the brace follows on the same line);
+  // trailing_newline is off for function-expression bodies and skip-indent
+  // positions, exactly as the legacy isDecl/skipIndentation bookkeeping.
+  fn block(
+    self,
+    block: StatementBlock,
+    content_ind: string,
+    skip_indent: bool,
+    trailing_newline: bool,
+  ) -> JsPrinted {
+    let mut out = text_of("")
+    if !skip_indent { out.text += outdent(content_ind) }
+    out.text += "{\n"
+    let prologue = directive_prologue_len(block.body)
+    for i in 0..block.body.length() {
+      let st = block.body[i]
+      match st {
+        // A bare block nested directly in a block indents one extra step
+        // (legacy BlockStatement special case).
+        BlockScope(inner) =>
+          emit(&out, self.block(inner, content_ind + indent_step(), false, true)),
+        _ => emit(&out, self.statement(st, content_ind, i < prologue)),
+      }
+    }
+    out.text += outdent(content_ind)
+    out.text += "}"
+    if trailing_newline { out.text += "\n" }
+    out
+  }
+
+  fn if_statement(self, st: IfStatement, ind: string, as_else: bool) -> JsPrinted {
+    let mut out = text_of("")
+    if !as_else { out.text += ind }
+    out.text += "if ("
+    emit(&out, self.expressions(st.condition.expression.*, ind))
+    out.text += ")"
+    let consequent_empty = match st.consequence.* {
+      Empty(_) => true,
+      _ => false,
+    }
+    if !consequent_empty { out.text += "\n" }
+    emit(&out, self.statement(st.consequence.*, ind + indent_step(), false))
+    if let Some(alternative) = st.alternative {
+      match alternative.body.* {
+        If(nested) => {
+          out.text += ind + "else "
+          emit(&out, self.if_statement(nested, ind, true))
+        },
+        Empty(_) => out.text += ind + "else;\n",
+        _ => {
+          out.text += ind + "else\n"
+          emit(&out, self.statement(alternative.body.*, ind + indent_step(), false))
+        },
+      }
+    }
+    out
+  }
+
+  fn switch_statement(self, st: SwitchStatement, ind: string) -> JsPrinted {
+    // Legacy quirks: no space after `switch`; `{` on the same line;
+    // `default:` prints with NO indentation.
+    let mut out = text_of(ind + "switch(")
+    emit(&out, self.expressions(st.value.expression.*, ind))
+    out.text += ") {\n"
+    let case_ind = ind + indent_step()
+    for entry in st.body.entries {
+      match entry {
+        Case(case) => {
+          out.text += case_ind + "case "
+          emit(&out, self.expressions(case.value.*, case_ind))
+          out.text += ":\n"
+          for body_st in case.body {
+            emit(&out, self.statement(body_st, case_ind + indent_step(), false))
+          }
+        },
+        Default(default) => {
+          out.text += "default:\n"
+          for body_st in default.body {
+            emit(&out, self.statement(body_st, case_ind + indent_step(), false))
+          }
+        },
+      }
+    }
+    out.text += ind + "}\n"
+    out
+  }
+
+  fn for_statement(self, st: ForStatement, ind: string) -> JsPrinted {
+    let mut out = text_of(ind + "for (")
+    match st.initializer {
+      Lexical(lexical) => emit(
+        &out,
+        self.declarators_inline(lexical_kind_text(lexical.kind), lexical.declarators, ind),
+      ),
+      Variable(variable) =>
+        emit(&out, self.declarators_inline("var", variable.declarators, ind)),
+      Expression(exprs) => emit(&out, self.for_init_expression(exprs.*, ind)),
+      Empty(_) => {},
+    }
+    out.text += "; "
+    match st.condition {
+      Expression(exprs) => emit(&out, self.expressions(exprs.*, ind)),
+      Empty(_) => {},
+    }
+    out.text += "; "
+    if let Some(increment) = st.increment {
+      emit(&out, self.expressions(increment, ind))
+    }
+    out.text += ")"
+    let body_empty = match st.body.* {
+      Empty(_) => true,
+      _ => false,
+    }
+    if !body_empty { out.text += "\n" }
+    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
+    out
+  }
+
+  // A bare `in` binary expression in for-init position is parenthesized
+  // (legacy ForInit), disambiguating it from a for-in header.
+  fn for_init_expression(self, exprs: Expressions, ind: string) -> JsPrinted {
+    match exprs {
+      Single(e) => {
+        let bare_in = match e {
+          Binary(binary) => match binary.operator {
+            In => true,
+            _ => false,
+          },
+          _ => false,
+        }
+        if bare_in { self.wrapped(e, ind) } else { self.expression(e, ind) }
+      },
+      Sequence(sequence) => self.sequence(sequence, ind),
+    }
+  }
+
+  fn for_in_statement(self, st: ForInStatement, ind: string) -> JsPrinted {
+    let is_of = match st.header.operator {
+      Of => true,
+      In => false,
+    }
+    let mut out = text_of("")
+    if is_of {
+      // Legacy quirk: for-of prints with no leading indentation and no
+      // space after `for`.
+      out.text += "for"
+      if st.is_await { out.text += " await " }
+      out.text += "("
+    } else {
+      out.text += ind + "for ("
+    }
+    emit(&out, self.for_binding(st.header.binding, ind))
+    let operator = if is_of { " of " } else { " in " }
+    out.text += operator
+    emit(&out, self.expressions(st.header.right.*, ind))
+    out.text += ")\n"
+    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
+    out
+  }
+
+  fn for_binding(self, binding: ForBinding, ind: string) -> JsPrinted {
+    match binding {
+      Plain(plain) => match plain.left {
+        Lhs(lhs) => self.lhs_expression(lhs, ind),
+        Parenthesized(parenthesized) => self.parenthesized(parenthesized, ind),
+      },
+      Declared(declared) => {
+        let mut out = text_of(variable_kind_text(declared.kind) + " ")
+        match declared.left {
+          Identifier(identifier) => out.text += identifier.text,
+          Destructuring(pattern) => emit(&out, self.destructuring(pattern, ind)),
+        }
+        if let Some(initializer) = declared.initializer {
+          out.text += " = "
+          emit(&out, self.expression(initializer.value.*, ind))
+        }
+        out
+      },
+    }
+  }
+
+  fn while_statement(self, st: WhileStatement, ind: string) -> JsPrinted {
+    let mut out = text_of(ind + "while (")
+    emit(&out, self.expressions(st.condition.expression.*, ind))
+    out.text += ")"
+    let body_empty = match st.body.* {
+      Empty(_) => true,
+      _ => false,
+    }
+    if !body_empty { out.text += "\n" }
+    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
+    out
+  }
+
+  fn do_statement(self, st: DoStatement, ind: string) -> JsPrinted {
+    let mut out = text_of(ind + "do\n")
+    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
+    out.text += ind + "while ("
+    emit(&out, self.expressions(st.condition.expression.*, ind))
+    out.text += ");\n"
+    out
+  }
+
+  fn with_statement(self, st: WithStatement, ind: string) -> JsPrinted {
+    // Legacy: no space after `with`.
+    let mut out = text_of(ind + "with(")
+    emit(&out, self.expressions(st.object.expression.*, ind))
+    out.text += ")\n"
+    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
+    out
+  }
+
+  fn try_statement(self, st: TryStatement, ind: string) -> JsPrinted {
+    let mut out = text_of(ind + "try ")
+    emit(&out, self.block(st.body, ind + indent_step(), true, false))
+    if let Some(handler) = st.handler {
+      out.text += "\n" + ind + "catch"
+      if let Some(parameter) = handler.parameter {
+        out.text += "("
+        match parameter {
+          Identifier(identifier) => out.text += identifier.text,
+          Destructuring(pattern) => emit(&out, self.destructuring(pattern, ind)),
+        }
+        out.text += ") "
+      }
+      emit(&out, self.block(handler.body, ind + indent_step(), true, false))
+    }
+    if let Some(finalizer) = st.finalizer {
+      out.text += "\n" + ind + "finally "
+      emit(&out, self.block(finalizer.body, ind + indent_step(), true, false))
+    }
+    out.text += "\n"
+    out
+  }
+
+  // ---------------------------------------------------------------------------
+  // Declarations
+  // ---------------------------------------------------------------------------
+
+  fn declaration(self, declaration: Declaration, ind: string) -> JsPrinted {
+    match declaration {
+      Function(function) => self.function_like(
+        ind,
+        Some(function.name),
+        function.is_async,
+        false,
+        function.parameters,
+        function.body,
+        true,
+      ),
+      GeneratorFunction(generator) => self.function_like(
+        ind,
+        Some(generator.name),
+        generator.is_async,
+        true,
+        generator.parameters,
+        generator.body,
+        true,
+      ),
+      Class(class) =>
+        self.class_like(Some(class.name), class.heritage, class.body, ind, false),
+      Lexical(lexical) => self.variable_declaration(
+        lexical_kind_text(lexical.kind),
+        lexical.declarators,
+        ind,
+      ),
+      Variable(variable) =>
+        self.variable_declaration("var", variable.declarators, ind),
+      Using(using) => {
+        // No legacy emitter exists for using declarations; mechanical
+        // variable-declaration shape (recorded decision).
+        let kind = if using.is_await { "await using" } else { "using" }
+        self.variable_declaration(kind, using.declarators, ind)
+      },
+    }
+  }
+
+  // variable_declaration is the statement form: continuation declarators
+  // each start a new line at the declaration's indentation plus four
+  // literal spaces (legacy VariableDeclaration).
+  fn variable_declaration(
+    self,
+    kind: string,
+    declarators: Slice<VariableDeclarator>,
+    ind: string,
+  ) -> JsPrinted {
+    let mut out = text_of(ind + kind + " ")
+    let mut first = true
+    for declarator in declarators {
+      if !first { out.text += ",\n" + ind + "    " }
+      emit(&out, self.declarator(declarator, ind))
+      first = false
+    }
+    out.text += ";\n"
+    out
+  }
+
+  // declarators_inline is the for-init form: comma-space separators, no
+  // indentation, no terminator.
+  fn declarators_inline(
+    self,
+    kind: string,
+    declarators: Slice<VariableDeclarator>,
+    ind: string,
+  ) -> JsPrinted {
+    let mut out = text_of(kind + " ")
+    let mut first = true
+    for declarator in declarators {
+      if !first { out.text += ", " }
+      emit(&out, self.declarator(declarator, ind))
+      first = false
+    }
+    out
+  }
+
+  fn declarator(self, declarator: VariableDeclarator, ind: string) -> JsPrinted {
+    let mut out = match declarator.name {
+      Identifier(identifier) => text_of(identifier.text),
+      Destructuring(pattern) => self.destructuring(pattern, ind),
+    }
+    if let Some(initializer) = declarator.initializer {
+      out.text += " = "
+      emit(&out, self.expression(initializer.value.*, ind))
+    }
+    out
+  }
+
+  // function_like covers function declarations and expressions, plain and
+  // generator.  The global-escape rewrite applies to every named function
+  // (see header); the legacy emitter prefixes the CURRENT indentation even
+  // mid-expression — that quirk is preserved by emitting `ind` first.
+  fn function_like(
+    self,
+    ind: string,
+    name: Option<Identifier>,
+    is_async: bool,
+    is_generator: bool,
+    parameters: FormalParameters,
+    body: StatementBlock,
+    is_declaration: bool,
+  ) -> JsPrinted {
+    let mut out = text_of(ind)
+    if let Some(identifier) = name {
+      out.text += identifier.text + " = "
+    }
+    let mut keywords: Slice<string> = []
+    if is_async { keywords = keywords.append("async") }
+    keywords = keywords.append("function")
+    if is_generator { keywords = keywords.append("*") }
+    out.text += strings.Join(keywords, " ")
+    out.text += "("
+    emit(&out, self.formal_parameters(parameters, ind))
+    out.text += ")\n"
+    emit(&out, self.block(body, ind + indent_step(), false, is_declaration))
+    out
+  }
+
+  fn formal_parameters(self, parameters: FormalParameters, ind: string) -> JsPrinted {
+    let mut out = text_of("")
+    let mut first = true
+    for parameter in parameters.parameters {
+      if !first { out.text += ", " }
+      match parameter {
+        Pattern(pattern) => emit(&out, self.pattern(pattern, ind)),
+        Assignment(assignment) => emit(&out, self.assignment_pattern(assignment, ind)),
+      }
+      first = false
+    }
+    out
+  }
+
+  // ---------------------------------------------------------------------------
+  // Classes (corpus-rare; transcribed from the legacy emitters, with the
+  // recorded method-rewrite deviation — see header)
+  // ---------------------------------------------------------------------------
+
+  fn class_like(
+    self,
+    name: Option<Identifier>,
+    heritage: Option<ClassHeritage>,
+    body: ClassBody,
+    ind: string,
+    is_expression: bool,
+  ) -> JsPrinted {
+    // Legacy quirk: class declarations print no leading indentation.
+    let mut out = text_of("")
+    if is_expression { out.text += "(" }
+    out.text += "class "
+    if let Some(identifier) = name { out.text += identifier.text }
+    if let Some(parent) = heritage {
+      out.text += " extends "
+      emit(&out, self.expression(parent.parent.*, ind))
+    }
+    emit(&out, self.class_body(body, ind + indent_step()))
+    if is_expression { out.text += ")" }
+    out
+  }
+
+  fn class_body(self, body: ClassBody, ind: string) -> JsPrinted {
+    let mut out = text_of(" {\n")
+    for member in body.members {
+      match member {
+        Method(method) => emit(&out, self.class_method(method, ind)),
+        Field(field) => emit(&out, self.field_definition(field, ind)),
+        StaticBlock(static_block) => emit(&out, self.static_block(static_block, ind)),
+      }
+      out.text += "\n"
+    }
+    out.text += "}\n"
+    out
+  }
+
+  fn class_method(self, method: MethodDefinition, ind: string) -> JsPrinted {
+    let mut keywords: Slice<string> = []
+    if method.is_static { keywords = keywords.append("static") }
+    let mut is_generator = false
+    if let Some(accessor) = method.accessor {
+      match accessor {
+        Get => keywords = keywords.append("get"),
+        Set => keywords = keywords.append("set"),
+        Generator => is_generator = true,
+      }
+    }
+    if method.is_async { keywords = keywords.append("async") }
+    if is_generator { keywords = keywords.append("*") }
+    let mut out = text_of(ind)
+    out.text += strings.Join(keywords, " ")
+    out.text += " "
+    emit(&out, self.property_name(method.name, ind))
+    out.text += "("
+    emit(&out, self.formal_parameters(method.parameters, ind))
+    out.text += ")\n"
+    emit(&out, self.block(method.body, ind + indent_step(), false, false))
+    out
+  }
+
+  fn field_definition(self, field: FieldDefinition, ind: string) -> JsPrinted {
+    let mut out = text_of(ind)
+    if field.is_static { out.text += "static " }
+    emit(&out, self.property_name(field.property, ind))
+    if let Some(initializer) = field.initializer {
+      out.text += " = "
+      emit(&out, self.expression(initializer.value.*, ind))
+    }
+    out.text += ";"
+    out
+  }
+
+  fn static_block(self, static_block: ClassStaticBlock, ind: string) -> JsPrinted {
+    // Legacy StaticBlock: `static{` with no spacing or newline.
+    let mut out = text_of(ind + "static{")
+    for st in static_block.body.body {
+      emit(&out, self.statement(st, ind, false))
+    }
+    out.text += "}"
+    out
+  }
+
+  // ---------------------------------------------------------------------------
+  // ES module statements (transcribed; corpus-absent)
+  // ---------------------------------------------------------------------------
+
+  fn es_import(self, st: ImportStatement) -> JsPrinted {
+    // Legacy ImportDeclaration: no leading indentation; trailing newline.
+    let mut out = text_of("import ")
+    if let Some(clause) = st.clause {
+      match clause {
+        Namespace(namespace) => out.text += f"* as {namespace.alias.text}",
+        Named(named) => emit(&out, self.named_imports(named)),
+        Default(default) => {
+          out.text += default.name.text
+          if let Some(extra) = default.extra {
+            out.text += ", "
+            match extra {
+              Namespace(namespace) => out.text += f"* as {namespace.alias.text}",
+              Named(named) => emit(&out, self.named_imports(named)),
+            }
+          }
+        },
+      }
+      out.text += " from "
+    }
+    out.text += st.source.text
+    out.text += "\n"
+    if let Some(attribute) = st.attribute {
+      out.diags = merge_diags(
+        out.diags,
+        [diag_warn_at(
+          BuildPhase.Compile,
+          "codegen: import attribute deferred — no legacy emitter",
+          self.file,
+          attribute.pos.row,
+          attribute.pos.col,
+        )],
+      )
+    }
+    out
+  }
+
+  fn named_imports(self, named: NamedImports) -> JsPrinted {
+    let mut out = text_of("{")
+    let mut first = true
+    for specifier in named.specifiers {
+      if !first { out.text += ", " }
+      out.text += module_export_name_text(specifier.name)
+      if let Some(alias) = specifier.alias {
+        out.text += f" as {alias.text}"
+      }
+      first = false
+    }
+    out.text += "}"
+    out
+  }
+
+  fn es_export(self, st: ExportStatement, ind: string) -> JsPrinted {
+    match st {
+      // Legacy ExportAllDeclaration concatenates "export * " and " from ",
+      // yielding a double space when no alias intervenes.  The quirk is
+      // the law.
+      All(all) => text_of(f"export *  from {all.source.text}\n"),
+      Namespace(namespace) => {
+        let name = module_export_name_text(namespace.name)
+        text_of(f"export * as {name} from {namespace.source.text}\n")
+      },
+      Named(named) => {
+        let mut out = text_of("export {")
+        let mut first = true
+        for specifier in named.clause.specifiers {
+          if !first { out.text += ", " }
+          out.text += module_export_name_text(specifier.name)
+          if let Some(alias) = specifier.alias {
+            out.text += f" as {module_export_name_text(alias)}"
+          }
+          first = false
+        }
+        out.text += "}"
+        if let Some(source) = named.source {
+          out.text += f" from {source.text}"
+        }
+        out.text += "\n"
+        out
+      },
+      Declaration(declaration) => {
+        let mut out = text_of("export ")
+        emit(&out, self.declaration(declaration, ind))
+        out
+      },
+      DefaultDeclaration(declaration) => {
+        let mut out = text_of("export default ")
+        emit(&out, self.declaration(declaration, ind))
+        out
+      },
+      DefaultValue(e) => {
+        let mut out = text_of("export default ")
+        emit(&out, self.expression(e, ind))
+        out
+      },
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // @import → objj_executeFile (the one ObjJ statement tier A must own:
+  // the main.j oracle includes the import prelude, and the legacy emitter
+  // writes these inline at the statement's source position)
+  // ---------------------------------------------------------------------------
+
+  fn objj_import(self, st: ObjjImport) -> JsPrinted {
+    match st.path {
+      System(lib) => {
+        // SystemLibString text is the raw token: <Foundation/Foundation.j>
+        let length = lib.text.length()
+        let inner = if length > 2 { lib.text.substring(1..length - 1) } else { "" }
+        text_of("objj_executeFile(\"" + inner + "\", NO);")
+      },
+      Local(literal) => {
+        let inner = string_literal_inner(literal)
+        text_of("objj_executeFile(\"" + inner + "\", YES);")
+      },
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Expressions
+  // ---------------------------------------------------------------------------
+
+  fn expressions(self, exprs: Expressions, ind: string) -> JsPrinted {
+    match exprs {
+      Single(e) => self.expression(e, ind),
+      Sequence(sequence) => self.sequence(sequence, ind),
+    }
+  }
+
+  // Sequences always print their own parentheses (legacy SequenceExpression).
+  fn sequence(self, sequence: SequenceExpression, ind: string) -> JsPrinted {
+    let mut out = text_of("(")
+    let mut first = true
+    for item in sequence.items {
+      if !first { out.text += ", " }
+      emit(&out, self.expression(item, ind))
+      first = false
+    }
+    out.text += ")"
+    out
+  }
+
+  fn expression(self, e: Expression, ind: string) -> JsPrinted {
+    match e {
+      Primary(primary) => self.primary(primary, ind),
+      Assignment(assignment) => self.assignment(assignment, ind),
+      AugmentedAssignment(augmented) => self.augmented_assignment(augmented, ind),
+      Await(await_expr) => {
+        // Legacy AwaitExpression always parenthesizes its argument.
+        let mut out = text_of("await (")
+        emit(&out, self.expression(await_expr.argument.*, ind))
+        out.text += ")"
+        out
+      },
+      Unary(unary) => {
+        let mut out = text_of(unary_op_text(unary.operator))
+        if unary_op_is_word(unary.operator) { out.text += " " }
+        emit(&out, self.operand(4, 0, false, unary.argument.*, false, ind))
+        out
+      },
+      Binary(binary) => self.binary(binary, ind),
+      Ternary(ternary) => {
+        let mut out = self.operand(7, 0, false, ternary.condition.*, false, ind)
+        out.text += " ? "
+        emit(&out, self.expression(ternary.consequence.*, ind))
+        out.text += " : "
+        emit(&out, self.expression(ternary.alternative.*, ind))
+        out
+      },
+      Update(update) => {
+        if update.is_prefix {
+          let mut out = text_of(update_op_text(update.operator))
+          emit(&out, self.operand(4, 0, false, update.argument.*, false, ind))
+          out
+        } else {
+          let mut out = self.operand(4, 0, false, update.argument.*, false, ind)
+          out.text += update_op_text(update.operator)
+          out
+        }
+      },
+      New(new_expr) => self.new_expression(new_expr, ind),
+      Yield(yield_expr) => {
+        let mut out = text_of("yield")
+        if yield_expr.is_delegate { out.text += "*" }
+        if let Some(argument) = yield_expr.argument {
+          out.text += " "
+          emit(&out, self.expression(argument.*, ind))
+        }
+        out
+      },
+    }
+  }
+
+  // operand prints a child expression, parenthesized per the A() predicate.
+  fn operand(
+    self,
+    parent_prec: int,
+    parent_t: int,
+    parent_is_operator: bool,
+    e: Expression,
+    is_right: bool,
+    ind: string,
+  ) -> JsPrinted {
+    if operand_needs_parens(parent_prec, parent_t, parent_is_operator, e, is_right) {
+      self.wrapped(e, ind)
+    } else {
+      self.expression(e, ind)
+    }
+  }
+
+  fn wrapped(self, e: Expression, ind: string) -> JsPrinted {
+    let inner = self.expression(e, ind)
+    JsPrinted { text: f"({inner.text})", diags: inner.diags }
+  }
+
+  fn binary(self, binary: BinaryExpression, ind: string) -> JsPrinted {
+    let parent_prec = if binary_op_is_logical(binary.operator) { 6 } else { 5 }
+    let parent_t = binary_op_t(binary.operator)
+    let nullish = match binary.operator {
+      NullishCoalesce => true,
+      _ => false,
+    }
+    let exponent = match binary.operator {
+      Exp => true,
+      _ => false,
+    }
+    let mut out = text_of("")
+    match binary.left {
+      PrivateProperty(private) => out.text += f"#{private.text}",
+      Expression(left) => {
+        // Forced parentheses: the left operand of `**`, an arrow function
+        // as a binary left operand, and both operands of `??`.
+        let left_is_arrow = match left.* {
+          Primary(primary) => match primary {
+            Arrow(_) => true,
+            _ => false,
+          },
+          _ => false,
+        }
+        if nullish || exponent || left_is_arrow {
+          emit(&out, self.wrapped(left.*, ind))
+        } else {
+          emit(&out, self.operand(parent_prec, parent_t, true, left.*, false, ind))
+        }
+      },
+    }
+    out.text += f" {binary_op_text(binary.operator)} "
+    if nullish {
+      emit(&out, self.wrapped(binary.right.*, ind))
+    } else {
+      emit(&out, self.operand(parent_prec, parent_t, true, binary.right.*, true, ind))
+    }
+    out
+  }
+
+  fn assignment(self, assignment: AssignmentExpression, ind: string) -> JsPrinted {
+    match assignment {
+      Standard(standard) => {
+        let mut out = self.assignment_target(standard.left, ind)
+        out.text += " = "
+        emit(&out, self.operand(8, 0, false, standard.right.*, true, ind))
+        out
+      },
+      ObjjDeref(deref) =>
+        self.deferred("@deref assignment", "tier D", deref.pos),
+    }
+  }
+
+  fn assignment_target(self, target: AssignmentTarget, ind: string) -> JsPrinted {
+    match target {
+      Parenthesized(parenthesized) => self.parenthesized(parenthesized.*, ind),
+      Lhs(lhs) => self.lhs_expression(lhs.*, ind),
+    }
+  }
+
+  fn augmented_assignment(
+    self,
+    augmented: AugmentedAssignmentExpression,
+    ind: string,
+  ) -> JsPrinted {
+    let mut out = match augmented.left {
+      Member(member) => self.member(member.*, ind),
+      Subscript(subscript) => self.subscript(subscript.*, ind),
+      Identifier(identifier) => text_of(identifier.text),
+      Parenthesized(parenthesized) => self.parenthesized(parenthesized.*, ind),
+    }
+    out.text += f" {augmented_op_text(augmented.operator)} "
+    emit(&out, self.operand(8, 0, false, augmented.right.*, true, ind))
+    out
+  }
+
+  fn new_expression(self, new_expr: NewExpression, ind: string) -> JsPrinted {
+    let mut out = text_of("new ")
+    match new_expr.constructor {
+      Primary(primary) => {
+        if 1 < primary_prec(primary.*) {
+          let inner = self.primary(primary.*, ind)
+          out.text += f"({inner.text})"
+          out.diags = merge_diags(out.diags, inner.diags)
+        } else {
+          emit(&out, self.primary(primary.*, ind))
+        }
+      },
+      New(nested) => emit(&out, self.new_expression(nested.*, ind)),
+    }
+    // Legacy NewExpression always prints the argument parentheses.
+    out.text += "("
+    if let Some(arguments) = new_expr.arguments {
+      emit(&out, self.arguments(arguments, ind))
+    }
+    out.text += ")"
+    out
+  }
+
+  fn primary(self, primary: PrimaryExpression, ind: string) -> JsPrinted {
+    match primary {
+      Subscript(subscript) => self.subscript(subscript, ind),
+      Member(member) => self.member(member, ind),
+      Parenthesized(parenthesized) => self.parenthesized(parenthesized, ind),
+      Identifier(identifier) => text_of(identifier.text),
+      Undefined(_) => text_of("undefined"),
+      This(_) => text_of("this"),
+      Super(_) => text_of("super"),
+      Number(number) => text_of(number.text),
+      String(literal) => text_of(literal.text),
+      Template(template) => self.template(template, ind),
+      Regex(regex) => {
+        let flags = match regex.flags {
+          Some(regex_flags) => regex_flags.text,
+          None => "",
+        }
+        text_of(f"/{regex.pattern.text}/{flags}")
+      },
+      True(_) => text_of("true"),
+      False(_) => text_of("false"),
+      Null(_) => text_of("null"),
+      Object(object) => self.object_literal(object, ind),
+      Function(function) => self.function_like(
+        ind,
+        function.name,
+        function.is_async,
+        false,
+        function.parameters,
+        function.body,
+        false,
+      ),
+      Arrow(arrow) => self.arrow(arrow, ind),
+      Generator(generator) => self.function_like(
+        ind,
+        generator.name,
+        generator.is_async,
+        true,
+        generator.parameters,
+        generator.body,
+        false,
+      ),
+      Class(class) =>
+        self.class_like(class.name, class.heritage, class.body, ind, true),
+      MetaProperty(meta) => match meta {
+        NewTarget(_) => text_of("new.target"),
+        ImportMeta(_) => text_of("import.meta"),
+      },
+      Call(call) => self.call(call, ind),
+      NativeArray(array) => self.array_literal(array, ind),
+      ObjjDictionary(dictionary) =>
+        self.deferred("@{...} dictionary literal", "tier D", dictionary.pos),
+      ObjjArray(array_literal) =>
+        self.deferred("@[...] array literal", "tier D", array_literal.pos),
+      ObjjString(literal) =>
+        self.deferred("@\"...\" string literal", "tier D", literal.pos),
+      ObjjSelector(selector) =>
+        self.deferred("@selector expression", "tier D", selector.pos),
+      ObjjProtocol(protocol) =>
+        self.deferred("@protocol expression", "tier D", protocol.pos),
+      ObjjMessage(message) =>
+        self.deferred("message send", "tier C", message.pos),
+      ObjjRef(reference) =>
+        self.deferred("@ref expression", "tier D", reference.pos),
+      ObjjDeref(dereference) =>
+        self.deferred("@deref expression", "tier D", dereference.pos),
+    }
+  }
+
+  fn subscript(self, subscript: SubscriptExpression, ind: string) -> JsPrinted {
+    let mut out = self.operand(1, 0, false, subscript.object.*, false, ind)
+    let bracket = if subscript.optional_chain { "?.[" } else { "[" }
+    out.text += bracket
+    emit(&out, self.expressions(subscript.index.*, ind))
+    out.text += "]"
+    out
+  }
+
+  fn member(self, member: MemberExpression, ind: string) -> JsPrinted {
+    let mut out = match member.object {
+      Expression(object) => self.operand(1, 0, false, object.*, false, ind),
+      Import(_) => text_of("import"),
+    }
+    let accessor = if member.optional_chain { "?." } else { "." }
+    out.text += accessor
+    match member.property {
+      Private(private) => out.text += f"#{private.text}",
+      Property(identifier) => out.text += identifier.text,
+    }
+    out
+  }
+
+  fn parenthesized(self, parenthesized: ParenthesizedExpression, ind: string) -> JsPrinted {
+    let mut out = text_of("(")
+    emit(&out, self.expressions(parenthesized.expression.*, ind))
+    out.text += ")"
+    out
+  }
+
+  fn template(self, template: TemplateString, ind: string) -> JsPrinted {
+    let mut out = text_of("`")
+    for part in template.parts {
+      match part {
+        Fragment(fragment) => out.text += fragment.text,
+        Escape(escape) => out.text += escape.text,
+        Substitution(substitution) => {
+          out.text += "${"
+          emit(&out, self.expressions(substitution.expression, ind))
+          out.text += "}"
+        },
+      }
+    }
+    out.text += "`"
+    out
+  }
+
+  fn object_literal(self, object: Object, ind: string) -> JsPrinted {
+    let mut out = text_of("{")
+    let mut first = true
+    for member in object.members {
+      if !first { out.text += ", " }
+      match member {
+        Pair(pair) => {
+          emit(&out, self.property_name(pair.key, ind))
+          out.text += ": "
+          emit(&out, self.expression(pair.value.*, ind))
+        },
+        Spread(spread) => {
+          out.text += "..."
+          emit(&out, self.expression(spread.argument.*, ind))
+        },
+        Method(method) => emit(&out, self.object_method(method, ind)),
+        Shorthand(identifier) => out.text += identifier.text,
+      }
+      first = false
+    }
+    out.text += "}"
+    out
+  }
+
+  // object_method follows the legacy Property emitter: a kind prefix
+  // ("get "/"set ", or a bare space for plain methods), then the function
+  // printed without the `function` keyword.  The legacy indentation-prefix
+  // quirk is preserved; the global-escape rewrite is not applied (recorded
+  // deviation — see header).
+  fn object_method(self, method: MethodDefinition, ind: string) -> JsPrinted {
+    let mut prefix = " "
+    let mut is_generator = false
+    if let Some(accessor) = method.accessor {
+      match accessor {
+        Get => prefix = "get ",
+        Set => prefix = "set ",
+        Generator => is_generator = true,
+      }
+    }
+    let mut keywords: Slice<string> = []
+    if method.is_async { keywords = keywords.append("async") }
+    if is_generator { keywords = keywords.append("*") }
+    let mut out = text_of(prefix + ind)
+    out.text += strings.Join(keywords, " ")
+    out.text += " "
+    emit(&out, self.property_name(method.name, ind))
+    out.text += "("
+    emit(&out, self.formal_parameters(method.parameters, ind))
+    out.text += ")\n"
+    emit(&out, self.block(method.body, ind + indent_step(), false, false))
+    out
+  }
+
+  fn property_name(self, name: PropertyName, ind: string) -> JsPrinted {
+    match name {
+      Identifier(identifier) => text_of(identifier.text),
+      Private(private) => text_of(f"#{private.text}"),
+      String(literal) => text_of(literal.text),
+      Number(number) => text_of(number.text),
+      Computed(computed) => {
+        let mut out = text_of("[")
+        emit(&out, self.expression(computed.expression.*, ind))
+        out.text += "]"
+        out
+      },
+      ObjjString(literal) =>
+        self.deferred("@\"...\" property name", "tier D", literal.pos),
+    }
+  }
+
+  fn array_literal(self, array: NativeArray, ind: string) -> JsPrinted {
+    let mut out = text_of("[")
+    let mut first = true
+    for element in array.elements {
+      if !first { out.text += ", " }
+      match element {
+        Expression(e) => emit(&out, self.expression(e.*, ind)),
+        Spread(spread) => {
+          out.text += "..."
+          emit(&out, self.expression(spread.argument.*, ind))
+        },
+      }
+      first = false
+    }
+    out.text += "]"
+    out
+  }
+
+  fn arrow(self, arrow: ArrowFunction, ind: string) -> JsPrinted {
+    let mut out = text_of("")
+    if arrow.is_async { out.text += "async " }
+    match arrow.parameters {
+      Single(identifier) => out.text += identifier.text,
+      List(parameters) => {
+        // Legacy rule: parentheses unless exactly one plain identifier.
+        let bare = parameters.parameters.length() == 1
+          && formal_parameter_is_plain_identifier(parameters.parameters[0])
+        if bare {
+          emit(&out, self.formal_parameters(parameters, ind))
+        } else {
+          out.text += "("
+          emit(&out, self.formal_parameters(parameters, ind))
+          out.text += ")"
+        }
+      },
+    }
+    out.text += " => "
+    match arrow.body {
+      Expression(e) => {
+        if arrow_body_needs_parens(e.*) {
+          emit(&out, self.wrapped(e.*, ind))
+        } else {
+          emit(&out, self.expression(e.*, ind))
+        }
+      },
+      Block(block) => emit(&out, self.block(block, ind + indent_step(), true, false)),
+    }
+    out
+  }
+
+  fn call(self, call: CallExpression, ind: string) -> JsPrinted {
+    match call {
+      Call(plain) => {
+        let mut out = match plain.callee {
+          Expression(callee) => self.operand(1, 0, false, callee.*, false, ind),
+          Import(_) => text_of("import"),
+        }
+        out.text += "("
+        emit(&out, self.arguments(plain.arguments, ind))
+        out.text += ")"
+        out
+      },
+      OptionalCall(optional) => {
+        let mut out = text_of("")
+        if 1 < primary_prec(optional.callee.*) {
+          let inner = self.primary(optional.callee.*, ind)
+          out.text += f"({inner.text})"
+          out.diags = merge_diags(out.diags, inner.diags)
+        } else {
+          emit(&out, self.primary(optional.callee.*, ind))
+        }
+        out.text += "?.("
+        emit(&out, self.arguments(optional.arguments, ind))
+        out.text += ")"
+        out
+      },
+      TemplateCall(template_call) => {
+        let mut out = match template_call.callee {
+          Primary(callee) => self.primary(callee.*, ind),
+          New(callee) => self.new_expression(callee.*, ind),
+        }
+        emit(&out, self.template(template_call.arguments, ind))
+        out
+      },
+    }
+  }
+
+  fn arguments(self, arguments: Arguments, ind: string) -> JsPrinted {
+    let mut out = text_of("")
+    let mut first = true
+    for item in arguments.items {
+      if !first { out.text += ", " }
+      match item {
+        Expression(e) => emit(&out, self.expression(e.*, ind)),
+        Spread(spread) => {
+          out.text += "..."
+          emit(&out, self.expression(spread.argument.*, ind))
+        },
+      }
+      first = false
+    }
+    out
+  }
+
+  // ---------------------------------------------------------------------------
+  // Patterns
+  // ---------------------------------------------------------------------------
+
+  fn lhs_expression(self, lhs: LhsExpression, ind: string) -> JsPrinted {
+    match lhs {
+      Member(member) => self.member(member.*, ind),
+      Subscript(subscript) => self.subscript(subscript.*, ind),
+      Identifier(identifier) => text_of(identifier.text),
+      Undefined(_) => text_of("undefined"),
+      Destructuring(pattern) => self.destructuring(pattern.*, ind),
+    }
+  }
+
+  fn pattern(self, pattern: Pattern, ind: string) -> JsPrinted {
+    match pattern {
+      Lhs(lhs) => self.lhs_expression(lhs, ind),
+      Rest(rest) => {
+        let mut out = text_of("...")
+        emit(&out, self.lhs_expression(rest.argument.*, ind))
+        out
+      },
+    }
+  }
+
+  fn assignment_pattern(self, pattern: AssignmentPattern, ind: string) -> JsPrinted {
+    let mut out = self.pattern(pattern.left.*, ind)
+    out.text += " = "
+    emit(&out, self.expression(pattern.right.*, ind))
+    out
+  }
+
+  fn destructuring(self, pattern: DestructuringPattern, ind: string) -> JsPrinted {
+    match pattern {
+      Object(object) => self.object_pattern(object, ind),
+      Array(array) => self.array_pattern(array, ind),
+    }
+  }
+
+  fn object_pattern(self, pattern: ObjectPattern, ind: string) -> JsPrinted {
+    let mut out = text_of("{")
+    let mut first = true
+    for member in pattern.members {
+      if !first { out.text += ", " }
+      match member {
+        Pair(pair) => {
+          emit(&out, self.property_name(pair.key, ind))
+          out.text += ": "
+          match pair.value {
+            Pattern(value) => emit(&out, self.pattern(value.*, ind)),
+            Assignment(value) => emit(&out, self.assignment_pattern(value.*, ind)),
+          }
+        },
+        Rest(rest) => {
+          out.text += "..."
+          emit(&out, self.lhs_expression(rest.argument.*, ind))
+        },
+        Assignment(assignment) => {
+          match assignment.left {
+            Shorthand(identifier) => out.text += identifier.text,
+            Destructuring(nested) => emit(&out, self.destructuring(nested.*, ind)),
+          }
+          out.text += " = "
+          emit(&out, self.expression(assignment.right.*, ind))
+        },
+        Shorthand(identifier) => out.text += identifier.text,
+      }
+      first = false
+    }
+    out.text += "}"
+    out
+  }
+
+  fn array_pattern(self, pattern: ArrayPattern, ind: string) -> JsPrinted {
+    let mut out = text_of("[")
+    let mut first = true
+    for element in pattern.elements {
+      if !first { out.text += ", " }
+      match element {
+        Pattern(value) => emit(&out, self.pattern(value.*, ind)),
+        Assignment(value) => emit(&out, self.assignment_pattern(value.*, ind)),
+      }
+      first = false
+    }
+    out.text += "]"
+    out
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers
+// ---------------------------------------------------------------------------
+
+// statement_needs_parens is the legacy ExpressionStatement special case:
+// expressions that would be misparsed (or reinterpreted) at statement
+// position print inside parentheses.
+fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
+  match e {
+    Primary(primary) => match primary {
+      Object(_) |
+      Function(_) |
+      Generator(_) => true,
+      String(literal) => !is_directive && is_use_strict(literal),
+      _ => false,
+    },
+    Assignment(assignment) => match assignment {
+      Standard(standard) => assignment_left_is_object_pattern(standard),
+      ObjjDeref(_) => false,
+    },
+    Binary(binary) => match binary.left {
+      Expression(left) => match left.* {
+        Primary(primary) => match primary {
+          Function(_) |
+          Generator(_) => true,
+          _ => false,
+        },
+        _ => false,
+      },
+      PrivateProperty(_) => false,
+    },
+    _ => false,
+  }
+}
+
+// arrow_body_needs_parens is the legacy arrow-body subset of the same rule.
+fn arrow_body_needs_parens(e: Expression) -> bool {
+  match e {
+    Primary(primary) => match primary {
+      Object(_) |
+      Function(_) |
+      Generator(_) => true,
+      _ => false,
+    },
+    Assignment(assignment) => match assignment {
+      Standard(standard) => assignment_left_is_object_pattern(standard),
+      ObjjDeref(_) => false,
+    },
+    _ => false,
+  }
+}
+
+fn assignment_left_is_object_pattern(standard: StandardAssignment) -> bool {
+  match standard.left {
+    Lhs(lhs) => match lhs.* {
+      Destructuring(pattern) => match pattern.* {
+        Object(_) => true,
+        Array(_) => false,
+      },
+      _ => false,
+    },
+    Parenthesized(_) => false,
+  }
+}
+
+fn formal_parameter_is_plain_identifier(parameter: FormalParameter) -> bool {
+  match parameter {
+    Pattern(pattern) => match pattern {
+      Lhs(lhs) => match lhs {
+        Identifier(_) => true,
+        _ => false,
+      },
+      Rest(_) => false,
+    },
+    Assignment(_) => false,
+  }
+}
+
+fn module_export_name_text(name: ModuleExportName) -> string {
+  match name {
+    Identifier(identifier) => identifier.text,
+    String(literal) => literal.text,
+    Default(_) => "default",
+  }
+}
+
+// string_literal_inner reassembles the content between the quotes —
+// fragments and escapes verbatim.
+fn string_literal_inner(literal: StringLiteral) -> string {
+  let mut out = ""
+  for part in literal.parts {
+    match part {
+      Fragment(fragment) => out += fragment.text,
+      Escape(escape) => out += escape.text,
+    }
+  }
+  out
+}

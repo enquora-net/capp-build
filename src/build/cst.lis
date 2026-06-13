@@ -119,8 +119,12 @@ pub struct ImportToken {
 } // the bare `import` token rule
 
 // String literals are sequences of raw fragments and escape sequences.
+// `text` is the complete raw token as written in source, quotes included —
+// the code generator echoes literals verbatim (PHASE-8-BRIEF.md, emitter
+// law), and the quote character is not recoverable from the parts alone.
 pub struct StringLiteral {
   pub parts: Slice<StringPart>,
+  pub text: string,
   pub pos: Position,
 }
 

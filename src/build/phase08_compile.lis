@@ -10,22 +10,42 @@
 // Transforms each dependency-ordered Objective-J source file into a
 // per-file static record: the @STATIC;1.0; format consumed by phase 9.
 // Each record encodes the file's import declarations followed by its
-// compiled JavaScript payload.  ctx.symbols provides the name resolution
-// and type information required for code generation.
+// compiled JavaScript payload.
 //
-// The form of the JavaScript payload is governed by the build mode:
+// Tier A (June 12): the JavaScript printer (js_print.lis) is wired in.
+// The payload is the printed program behind the debug-mode prologue;
+// ObjJ constructs route through js_print's named deferral diagnostics
+// (tiers B–D), so JS-only files — main.j among them — are byte-exact
+// against the legacy oracle, and files containing ObjJ constructs are
+// explicitly incomplete.  Per PHASE-8-BRIEF.md decision 2 the records
+// carry no S (source map) record.
 //
-//   Debug:   compiled JavaScript with an S (source map) record per file
-//   Release: compiled JavaScript, no source maps
-//   Clean:   no output; artefact directories are removed
+// Record framing: lengths are UTF-16 code units, not bytes (June 12
+// correction in STATIC-BLOB-FORMAT.md).  record_length counts code
+// points, which equals code units for every character in the BMP;
+// supplementary-plane characters would each need one more unit.  None
+// exist in any observed corpus, and payload_oracle.py check would
+// expose one immediately.  (Recorded decision.)
 //
-// During the bootstrap period this phase is satisfied externally: the
-// existing jake toolchain produces the per-file static records manually.
-// The native Objective-J to JavaScript compiler will replace that process
-// when complete, without structural change to this phase or phase 9.
+// Output: each record is also written under
+// Build/capp-build.build/<Mode>/Sources/ inside the project, mirroring
+// the legacy layout under a distinct directory name so the legacy
+// Build/<project>.build oracle is never overwritten.  The tier gate is:
+//
+//   payload_oracle.py diff \
+//     <project>/Build/<project>.build/Debug/Browser.environment/Sources/main.j \
+//     <project>/Build/capp-build.build/Debug/Sources/main.j
+//
+// Deferred within phase 8 (unchanged): source maps (S records), release
+// optimisations, HTTP/2 delivery, #if evaluation, Clean-mode artefact
+// removal.
 //
 // **
+import "go:errors"
 import "go:fmt"
+import "go:os"
+import "go:path/filepath"
+import "go:unicode/utf8"
 
 // CompileOutput is the input to phase 9 (Archive).
 // Each entry in `records` is a complete per-file static record string
@@ -38,42 +58,112 @@ pub struct CompileOutput {
 
 pub struct CompiledRecord {
   pub name: string, // source-relative filename, e.g. "CPObject.j"
-  pub record: string, // complete @STATIC;1.0;...e; per-file record
+  pub record: string, // complete @STATIC;1.0;... per-file record (no e;)
 }
 
-pub fn run_compile(_ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
+pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   let phase = BuildPhase.Compile
   fmt.Println("  compile")
   let mut diags: Slice<Diagnostic> = []
-  let records: Slice<CompiledRecord> = []
 
-  // TODO: iterate ctx.sorted.order and compile each source file in
-  //       dependency order using ctx.symbols for name resolution,
-  //       producing one CompiledRecord per file
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: compile each source file to a per-file static record",
-  ))
+  if let Clean = ctx.config.mode {
+    diags = diags.append(diag_info(
+      phase,
+      "clean mode: artefact-directory removal deferred",
+    ))
+    return Ok(CompileOutput { records: [], diags })
+  }
 
-  // TODO: in Debug mode, include an S record (base64 source map) in
-  //       each per-file static record
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: include source map S records in debug mode",
-  ))
+  let parsed = match ctx.parsed {
+    Some(p) => p,
+    None => return Err(errors.New("compile: parsed units unavailable")),
+  }
+  let sorted = match ctx.sorted {
+    Some(s) => s,
+    None => return Err(errors.New("compile: sorted units unavailable")),
+  }
 
-  // TODO: in Release mode, apply dead-code elimination, constant folding,
-  //       and identifier minification to each JavaScript payload
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: apply optimisations in release mode",
-  ))
+  // The "\n\n" prologue is the legacy compiler's debug-mode artifact,
+  // emitted iff source maps are enabled (PHASE-8-BRIEF.md, emitter law).
+  // Our first target is the debug form without the S record, so the
+  // prologue stays; release payloads have none.
+  let prologue = match ctx.config.mode {
+    Debug => "\n\n",
+    Release => "",
+    Clean => "",
+  }
 
-  // TODO: in Clean mode, enumerate and remove build artefact directories
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: remove artefact directories in clean mode",
-  ))
+  let mut records: Slice<CompiledRecord> = []
+  for path in sorted.order {
+    let mut found: Option<ParsedUnit> = None
+    for unit in parsed.units {
+      if unit.source.path == path { found = Some(unit) }
+    }
+    let Some(unit) = found else {
+      diags = diags.append(diag_warn(
+        phase,
+        f"compile: no parsed unit for {path}; skipped",
+      ))
+      continue
+    }
 
+    let printed = print_js_program(unit.program, path)
+    diags = merge_diags(diags, printed.diags)
+    let payload = prologue + printed.text
+
+    let mut record = "@STATIC;1.0;"
+    for raw_import in unit.imports {
+      match raw_import {
+        Framework(framework, file_path, _, _) => {
+          let full = f"{framework}/{file_path}"
+          record += f"I;{record_length(full)};{full}"
+        },
+        Local(local_path, _, _) => {
+          record += f"i;{record_length(local_path)};{local_path}"
+        },
+      }
+    }
+    record += f"t;{record_length(payload)};{payload}"
+
+    records = records.append(CompiledRecord { name: record_name(ctx, path), record })
+  }
+
+  write_records(ctx, records)?
   Ok(CompileOutput { records, diags })
+}
+
+// record_length is the record-framing length: UTF-16 code units, counted
+// as code points (exact for the BMP; see the header note).
+fn record_length(content: string) -> int {
+  utf8.RuneCountInString(content)
+}
+
+// record_name is the source-relative filename used for the bundle `p`
+// record and the on-disk output path.
+fn record_name(ctx: Ref<BuildContext>, path: string) -> string {
+  match filepath.Rel(ctx.root.path, path) {
+    Ok(relative) => relative,
+    Err(_) => filepath.Base(path),
+  }
+}
+
+// write_records materialises the per-file records under
+// Build/capp-build.build/<Mode>/Sources/, the comparison surface for
+// payload_oracle.py.
+fn write_records(ctx: Ref<BuildContext>, records: Slice<CompiledRecord>) -> Result<(), error> {
+  let mode_dir = match ctx.config.mode {
+    Debug => "Debug",
+    Release => "Release",
+    Clean => "Clean",
+  }
+  let out_dir = filepath.Join(ctx.root.path, "Build", "capp-build.build", mode_dir, "Sources")
+  for compiled in records {
+    let out_path = filepath.Join(out_dir, compiled.name)
+    os.MkdirAll(filepath.Dir(out_path), os.ModePerm)?
+    let file = os.Create(out_path)?
+    file.WriteString(compiled.record)?
+    file.Close()?
+  }
+  fmt.Println(f"✓  compile: {records.length()} per-file records → {out_dir}")
+  Ok(())
 }
