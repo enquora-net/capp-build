@@ -331,11 +331,17 @@ impl JsPrint {
       Try(try_st) => self.try_statement(try_st, ind),
       With(with_st) => self.with_statement(with_st, ind),
       Break(break_st) => {
-        let label = break_st.label.map_or("", |identifier| f" {identifier.text}")
+        let label = break_st.label.map_or(
+          "",
+          |identifier| f" {identifier.text}",
+        )
         text_of(f"{ind}break{label};\n")
       },
       Continue(continue_st) => {
-        let label = continue_st.label.map_or("", |identifier| f" {identifier.text}")
+        let label = continue_st.label.map_or(
+          "",
+          |identifier| f" {identifier.text}",
+        )
         text_of(f"{ind}continue{label};\n")
       },
       Return(return_st) => {
