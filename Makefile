@@ -42,24 +42,17 @@ run:
 	lis run
 
 # Phase 8 tier gate: build, compile toolchain_test in debug mode, and
-# byte-compare our main.j record against the legacy oracle (S stripped).
+# byte-compare both per-file records against the legacy oracle (S stripped).
+# Through tier C both files are byte-exact — the whole toolchain_test app
+# round-trips.
+LEGACY := $(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources
+OURS   := $(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources
+
 gate:
 	lis build
 	"$(TARGET)/$(BINARY)" build --mode debug "$(TOOLCHAIN_TEST)"
-	python3 payload_oracle.py diff \
-		"$(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources/main.j" \
-		"$(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources/main.j"
-
-# Tier B progress check: AppController.j against the legacy oracle.
-# EXPECTED TO DIVERGE until tier C lands — the divergence must sit exactly
-# at the awakeFromCib message send (legacy shows `((___r1 = self.theWindow)`,
-# ours the deferred send's bare `;`).  Anything earlier is a tier B defect.
-# --t-only: the record's t-length field necessarily differs while the
-# payload is incomplete, so compare the payloads themselves.
-gate-b:
-	-python3 payload_oracle.py diff --t-only \
-		"$(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources/AppController.j" \
-		"$(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources/AppController.j"
+	python3 payload_oracle.py diff "$(LEGACY)/main.j" "$(OURS)/main.j"
+	python3 payload_oracle.py diff "$(LEGACY)/AppController.j" "$(OURS)/AppController.j"
 
 clean:
 	rm -rf $(TARGET)/vendor

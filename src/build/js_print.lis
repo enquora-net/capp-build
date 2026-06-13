@@ -78,8 +78,33 @@ pub fn print_js_program(
   program: Program,
   file: string,
   symbols: Option<SymbolTable>,
+  debug_dispatch: bool,
 ) -> JsPrinted {
-  let p = JsPrint { file, symbols, .. }
+  // The known-class set governs null-guard decisions on class-named
+  // receivers: symbol-table classes plus @class forwards, mirroring the
+  // legacy classDefs table (within the project world — see the brief's
+  // recorded cross-framework limitation).
+  let mut known_classes = Map.new<string, bool>()
+  if let Some(table) = symbols {
+    for class_symbol in table.classes {
+      known_classes[class_symbol.name] = true
+    }
+    for forward in table.forwards {
+      known_classes[forward.name] = true
+    }
+  }
+  // Top-level sends number their temporaries through a program-level
+  // state but never get a var declaration — the legacy leaks them as
+  // implicit globals, copied faithfully.
+  let mut top_receivers = ReceiverState { .. }
+  let p = JsPrint { 
+    file,
+    symbols,
+    known_classes,
+    debug_dispatch,
+    receivers: Some(&top_receivers),
+    ..,
+  }
   let mut out = text_of("")
   if let Some(hash_bang) = program.hash_bang {
     out.text += hash_bang.text
@@ -96,24 +121,35 @@ pub fn print_js_program(
 // Accumulation helpers
 // ---------------------------------------------------------------------------
 
-// JsPrint carries the printing context.  file and symbols are fixed for
-// the whole program; current_class, in_instance_method, and locals are
-// scope state — the printer is a value, so entering a class, method, or
-// function scope copies it with the new state, and the recursion carries
-// the copy (no mutation, no restore).
+// JsPrint carries the printing context.  file, symbols, known_classes,
+// and debug_dispatch are fixed for the whole program; current_class,
+// in_instance_method, self_assigned, and locals are scope state — the
+// printer is a value, so entering a class, method, or function scope
+// copies it with the new state, and the recursion carries the copy (no
+// mutation, no restore).  receivers is deliberately a Ref: the ___rN
+// counter is shared mutable state across one function scope, mirroring
+// the legacy var-scope object.
 struct JsPrint {
   file: string,
   symbols: Option<SymbolTable>,
+  known_classes: Map<string, bool>,
+  debug_dispatch: bool,
   current_class: Option<ClassContext>,
   in_instance_method: bool,
+  self_assigned: bool,
   locals: Slice<string>,
+  receivers: Option<Ref<ReceiverState>>,
 }
 
-// ClassContext is the current @implementation's ivar universe (own +
-// inherited project-known), the domain of the ivar → self.ivar rewrite.
-// Method function naming takes the class name by parameter; no other
-// state is needed.
-struct ClassContext { ivars: Map<string, bool> }
+// ClassContext is the current @implementation: its name (super-send
+// class lookups) and its ivar universe (own + inherited project-known),
+// the domain of the ivar → self.ivar rewrite.
+struct ClassContext { name: string, ivars: Map<string, bool> }
+
+// ReceiverState is one function scope's ___rN bookkeeping: level is the
+// current send-nesting depth, max the high-water mark the end-of-scope
+// `var ___r1, …;` declaration covers.
+struct ReceiverState { level: int, max: int }
 
 fn text_of(text: string) -> JsPrinted {
   JsPrinted { text, .. }
@@ -357,7 +393,7 @@ impl JsPrint {
     match st {
       Expression(es) => self.expression_statement(es, ind, is_directive),
       Declaration(declaration) => self.declaration(declaration, ind),
-      BlockScope(block) => self.block(block, ind, false, true),
+      BlockScope(block) => self.block(block, ind, false, true, false),
       If(if_st) => self.if_statement(if_st, ind, false),
       Switch(switch_st) => self.switch_statement(switch_st, ind),
       For(for_st) => self.for_statement(for_st, ind),
@@ -477,6 +513,7 @@ impl JsPrint {
     content_ind: string,
     skip_indent: bool,
     trailing_newline: bool,
+    end_of_scope: bool,
   ) -> JsPrinted {
     let mut out = text_of("")
     if !skip_indent { out.text += outdent(content_ind) }
@@ -489,9 +526,23 @@ impl JsPrint {
         // (legacy BlockStatement special case).
         BlockScope(inner) => emit(
           &out,
-          self.block(inner, content_ind + indent_step(), false, true),
+          self.block(inner, content_ind + indent_step(), false, true, false),
         ),
         _ => emit(&out, self.statement(st, content_ind, i < prologue)),
+      }
+    }
+    // Function bodies declare their dispatch temporaries before the
+    // closing brace (the legacy endOfScopeBody hook).
+    if end_of_scope {
+      if let Some(state) = self.receivers {
+        if state.max > 0 {
+          out.text += content_ind + "var "
+          for i in 0..state.max {
+            if i > 0 { out.text += ", " }
+            out.text += f"___r{i + 1}"
+          }
+          out.text += ";\n"
+        }
       }
     }
     out.text += outdent(content_ind)
@@ -692,7 +743,7 @@ impl JsPrint {
 
   fn try_statement(self, st: TryStatement, ind: string) -> JsPrinted {
     let mut out = text_of(ind + "try ")
-    emit(&out, self.block(st.body, ind + indent_step(), true, false))
+    emit(&out, self.block(st.body, ind + indent_step(), true, false, false))
     if let Some(handler) = st.handler {
       out.text += "\n" + ind + "catch"
       if let Some(parameter) = handler.parameter {
@@ -703,11 +754,17 @@ impl JsPrint {
         }
         out.text += ") "
       }
-      emit(&out, self.block(handler.body, ind + indent_step(), true, false))
+      emit(
+        &out,
+        self.block(handler.body, ind + indent_step(), true, false, false),
+      )
     }
     if let Some(finalizer) = st.finalizer {
       out.text += "\n" + ind + "finally "
-      emit(&out, self.block(finalizer.body, ind + indent_step(), true, false))
+      emit(
+        &out,
+        self.block(finalizer.body, ind + indent_step(), true, false, false),
+      )
     }
     out.text += "\n"
     out
@@ -838,8 +895,13 @@ impl JsPrint {
     emit(&out, self.formal_parameters(parameters, ind))
     out.text += ")\n"
     let mut inner = self
+    let mut dispatch_state = ReceiverState { .. }
+    inner.receivers = Some(&dispatch_state)
     inner.locals = function_scope_locals(self.locals, name, parameters, body)
-    emit(&out, inner.block(body, ind + indent_step(), false, is_declaration))
+    emit(
+      &out,
+      inner.block(body, ind + indent_step(), false, is_declaration, true),
+    )
     out
   }
 
@@ -924,7 +986,19 @@ impl JsPrint {
     out.text += "("
     emit(&out, self.formal_parameters(method.parameters, ind))
     out.text += ")\n"
-    emit(&out, self.block(method.body, ind + indent_step(), false, false))
+    let mut inner = self
+    let mut dispatch_state = ReceiverState { .. }
+    inner.receivers = Some(&dispatch_state)
+    inner.locals = function_scope_locals(
+      self.locals,
+      None,
+      method.parameters,
+      method.body,
+    )
+    emit(
+      &out,
+      inner.block(method.body, ind + indent_step(), false, false, true),
+    )
     out
   }
 
@@ -1132,7 +1206,12 @@ impl JsPrint {
         out
       },
       Update(update) => {
-        if update.is_prefix {
+        // Update on an @deref target rewrites through the setter form:
+        // prefix `(x)(x() + 1)`, postfix `((x)(x() + 1) - 1)` (mirrored
+        // for --).  Recorded in the brief; no corpus instance.
+        if let Some(deref) = expression_as_deref(update.argument.*) {
+          self.deref_update(deref, update.operator, update.is_prefix, ind)
+        } else if update.is_prefix {
           let mut out = text_of(update_op_text(update.operator))
           emit(&out, self.operand(4, 0, false, update.argument.*, false, ind))
           out
@@ -1237,11 +1316,24 @@ impl JsPrint {
         emit(&out, self.operand(8, 0, false, standard.right.*, true, ind))
         out
       },
-      ObjjDeref(deref) => self.deferred(
-        "@deref assignment",
-        "tier D",
-        deref.pos,
-      ),
+      // @deref assignment: `(expr)(value)` for =, `(expr)(expr() <op> value)`
+      // for compound, where <op> is the assignment operator's first char.
+      ObjjDeref(deref) => {
+        let target = self.expression(deref.left.argument.*, ind)
+        let mut out = JsPrinted { 
+          text: "(" + target.text + ")(",
+          diags: target.diags,
+        }
+        if let AssignmentOp.Assign = deref.operator {
+          emit(&out, self.expression(deref.right.*, ind))
+        } else {
+          emit(&out, self.expression(deref.left.argument.*, ind))
+          out.text += "() " + assignment_op_char(deref.operator) + " "
+          emit(&out, self.expression(deref.right.*, ind))
+        }
+        out.text += ")"
+        out
+      },
     }
   }
 
@@ -1377,46 +1469,33 @@ impl JsPrint {
       },
       Call(call) => self.call(call, ind),
       NativeArray(array) => self.array_literal(array, ind),
-      ObjjDictionary(dictionary) => self.deferred(
-        "@{...} dictionary literal",
-        "tier D",
-        dictionary.pos,
+      ObjjDictionary(dictionary) => self.objj_dictionary(dictionary, ind),
+      ObjjArray(array_literal) => self.objj_array(array_literal, ind),
+      // @"…" is the raw string literal with the @ dropped (tier A law).
+      ObjjString(literal) => text_of(literal.value.text),
+      ObjjSelector(selector) => text_of(
+        "sel_getUid(\"" + selector.name.selector_string() + "\")",
       ),
-      ObjjArray(array_literal) => self.deferred(
-        "@[...] array literal",
-        "tier D",
-        array_literal.pos,
+      ObjjProtocol(protocol) => text_of(
+        "objj_getProtocol(\"" + protocol.protocol.text + "\")",
       ),
-      ObjjString(literal) => self.deferred(
-        "@\"...\" string literal",
-        "tier D",
-        literal.pos,
-      ),
-      ObjjSelector(selector) => self.deferred(
-        "@selector expression",
-        "tier D",
-        selector.pos,
-      ),
-      ObjjProtocol(protocol) => self.deferred(
-        "@protocol expression",
-        "tier D",
-        protocol.pos,
-      ),
-      ObjjMessage(message) => self.deferred(
-        "message send",
-        "tier C",
-        message.pos,
-      ),
-      ObjjRef(reference) => self.deferred(
-        "@ref expression",
-        "tier D",
-        reference.pos,
-      ),
-      ObjjDeref(dereference) => self.deferred(
-        "@deref expression",
-        "tier D",
-        dereference.pos,
-      ),
+      ObjjMessage(message) => self.objj_message(message, ind),
+      ObjjRef(reference) => {
+        let element = self.expression(reference.argument.*, ind)
+        JsPrinted { 
+          text: "function(__input) { if (arguments.length) return " +
+          element.text +
+          " = __input; return " +
+          element.text +
+          "; }",
+          diags: element.diags,
+        }
+      },
+      ObjjDeref(dereference) => {
+        let mut out = self.expression(dereference.argument.*, ind)
+        out.text += "()"
+        out
+      },
     }
   }
 
@@ -1516,7 +1595,19 @@ impl JsPrint {
     out.text += "("
     emit(&out, self.formal_parameters(method.parameters, ind))
     out.text += ")\n"
-    emit(&out, self.block(method.body, ind + indent_step(), false, false))
+    let mut inner = self
+    let mut dispatch_state = ReceiverState { .. }
+    inner.receivers = Some(&dispatch_state)
+    inner.locals = function_scope_locals(
+      self.locals,
+      None,
+      method.parameters,
+      method.body,
+    )
+    emit(
+      &out,
+      inner.block(method.body, ind + indent_step(), false, false, true),
+    )
     out
   }
 
@@ -1578,6 +1669,8 @@ impl JsPrint {
     }
     out.text += " => "
     let mut inner = self
+    let mut dispatch_state = ReceiverState { .. }
+    inner.receivers = Some(&dispatch_state)
     inner.locals = arrow_scope_locals(self.locals, arrow.parameters, arrow.body)
     match arrow.body {
       Expression(e) => {
@@ -1589,7 +1682,7 @@ impl JsPrint {
       },
       Block(block) => emit(
         &out,
-        inner.block(block, ind + indent_step(), true, false),
+        inner.block(block, ind + indent_step(), true, false, true),
       ),
     }
     out
@@ -1756,7 +1849,10 @@ impl JsPrint {
     let class_name = implementation.name.text
     let mut p = self
     p.current_class = Some(
-      ClassContext { ivars: self.class_ivar_universe(implementation) },
+      ClassContext { 
+        name: class_name,
+        ivars: self.class_ivar_universe(implementation),
+      },
     )
 
     let mut out = text_of("")
@@ -2077,10 +2173,13 @@ impl JsPrint {
       }
     }
     let mut inner = self
+    let mut dispatch_state = ReceiverState { .. }
+    inner.receivers = Some(&dispatch_state)
     inner.in_instance_method = match method.scope {
       Instance => true,
       Class => false,
     }
+    inner.self_assigned = body_assigns_self(method.body)
     inner.locals = scope_locals([], params, block_declared_names(method.body))
 
     let mut out = text_of("new objj_method(sel_getUid(\"" + selector + "\"), ")
@@ -2092,7 +2191,7 @@ impl JsPrint {
       out.text += ", " + param
     }
     out.text += ")\n"
-    emit(&out, inner.block(method.body, indent_step(), false, true))
+    emit(&out, inner.block(method.body, indent_step(), false, true, true))
     out.text += "\n,["
     out.text += quoted_type_list(types)
     out.text += "])"
@@ -2151,6 +2250,304 @@ impl JsPrint {
       "], true, false);\n"
     }
     out.text += "}"
+    out
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dispatch (tier C) — the inlined message-send ABI, transcribed from the
+  // legacy MessageSendExpression emitter (PHASE-8-BRIEF.md, "tiers C and
+  // D").  Super, simple (guarded/unguarded), and complex receiver forms;
+  // the debug dtable comma artifact; ___rN temporaries numbered by nesting
+  // depth, declared at end of function scope by block()'s hook.
+  // ---------------------------------------------------------------------------
+
+  fn objj_message(self, message: ObjjMessageExpression, ind: string) -> JsPrinted {
+    let selector = message.selector.selector_string()
+    let arguments = message_arguments(message.selector)
+
+    // Super send: no guard, no temporary.
+    if let Some(super_form) = self.super_receiver_text(message.receiver.*) {
+      let mut out = text_of(
+        "(" + super_form + ".method_dtable[\"" + selector +
+        "\"] || _objj_forward)(self, \"" +
+        selector +
+        "\"",
+      )
+      for argument in arguments {
+        out.text += ", "
+        emit(&out, self.expression(argument, ind))
+      }
+      out.text += ")"
+      return out
+    }
+
+    // The dtable comma artifact uses the re-printed receiver expression
+    // and is emitted only when the source receiver is a bare Identifier
+    // (self, ivar, parameter, local, class) — never for a message-send or
+    // other complex receiver.
+    let receiver_is_identifier = expression_identifier_name(message.receiver.*).is_some()
+
+    if self.receiver_is_simple(message.receiver.*) {
+      let receiver = self.expression(message.receiver.*, ind)
+      let guard = self.simple_receiver_guarded(message.receiver.*)
+      let r = receiver.text
+      let mut out = JsPrinted { diags: receiver.diags, .. }
+      if guard { out.text += "(" + r + " == null ? " + r + " : " }
+      out.text += "(" + r + ".isa.method_msgSend[\"" + selector +
+      "\"] || _objj_forward)(" +
+      r +
+      ", "
+      out.text += self.selector_argument(r, receiver_is_identifier, selector)
+      emit(&out, self.trailing_arguments(arguments, ind))
+      out.text += ")"
+      if guard { out.text += ")" }
+      return out
+    }
+
+    // Complex receiver: claim the temporary BEFORE printing the receiver,
+    // so a nested send within it nests at the next level (legacy order).
+    // The dtable artifact still uses the re-printed receiver, not the temp.
+    let n = self.receiver_enter()
+    let temp = f"___r{n}"
+    let receiver = self.expression(message.receiver.*, ind)
+    let mut out = JsPrinted { diags: receiver.diags, .. }
+    out.text += "((" + temp + " = " + receiver.text + "), " + temp +
+    " == null ? " +
+    temp +
+    " : "
+    out.text += "(" + temp + ".isa.method_msgSend[\"" + selector +
+    "\"] || _objj_forward)(" +
+    temp +
+    ", "
+    out.text += self.selector_argument(
+      receiver.text,
+      receiver_is_identifier,
+      selector,
+    )
+    emit(&out, self.trailing_arguments(arguments, ind))
+    out.text += "))"
+    self.receiver_exit()
+    out
+  }
+
+  // selector_argument is the dtable comma artifact or the bare selector
+  // string.  The artifact appears only in debug mode and only for an
+  // Identifier receiver; its dtable lookup, over the re-printed receiver,
+  // repeats once per named selector part.
+  fn selector_argument(
+    self,
+    receiver_text: string,
+    receiver_is_identifier: bool,
+    selector: string,
+  ) -> string {
+    if !self.debug_dispatch || !receiver_is_identifier {
+      return "\"" + selector + "\""
+    }
+    let parts = selector_part_count(selector)
+    let mut lookups = ""
+    for _ in 0..parts {
+      lookups += receiver_text + ".isa.method_dtable[\"" + selector + "\"], "
+    }
+    "(" + lookups + "\"" + selector + "\")"
+  }
+
+  fn trailing_arguments(self, arguments: Slice<Expression>, ind: string) -> JsPrinted {
+    let mut out = text_of("")
+    for argument in arguments {
+      out.text += ", "
+      emit(&out, self.expression(argument, ind))
+    }
+    out
+  }
+
+  // super_receiver_text returns the super-class lookup expression when the
+  // receiver is `super`, else None.  Class methods walk the meta-class.
+  fn super_receiver_text(self, receiver: Expression) -> Option<string> {
+    let is_super = match receiver {
+      Primary(primary) => match primary {
+        Super(_) => true,
+        _ => false,
+      },
+      _ => false,
+    }
+    if !is_super { return None }
+    let Some(context) = self.current_class else {
+      return Some("Nil.super_class")
+    }
+    if self.in_instance_method {
+      Some("objj_getClass(\"" + context.name + "\").super_class")
+    } else {
+      Some("objj_getMetaClass(\"" + context.name + "\").super_class")
+    }
+  }
+
+  // receiver_is_simple: an Identifier receiver that will not be
+  // ivar-rewritten prints inline without a temporary.
+  fn receiver_is_simple(self, receiver: Expression) -> bool {
+    let Some(name) = expression_identifier_name(receiver) else {
+      return false
+    }
+    if self.in_instance_method && !reserved_identifier(name) &&
+    !self.is_local(name) {
+      if let Some(context) = self.current_class {
+        if context.ivars[name] { return false }
+      }
+    }
+    true
+  }
+
+  // simple_receiver_guarded: `self` is guarded only when the method
+  // assigns self; other identifiers are guarded when locally bound or not
+  // a known class (the legacy rule, project-world limitation recorded).
+  fn simple_receiver_guarded(self, receiver: Expression) -> bool {
+    let Some(name) = expression_identifier_name(receiver) else {
+      return true
+    }
+    if name == "self" { return self.self_assigned }
+    self.is_local(name) || !self.known_classes[name]
+  }
+
+  fn receiver_enter(self) -> int {
+    let Some(state) = self.receivers else {
+      return 1
+    }
+    state.level += 1
+    if state.level > state.max { state.max = state.level }
+    state.level
+  }
+
+  fn receiver_exit(self) {
+    if let Some(state) = self.receivers { state.level -= 1 }
+  }
+
+  // ---------------------------------------------------------------------------
+  // ObjJ collection literals (tier D) — @[…] and @{…} desugar to alloc +
+  // initWith… sends through the same ___rN machinery.
+  // ---------------------------------------------------------------------------
+
+  fn objj_array(self, literal: ObjjArrayLiteral, ind: string) -> JsPrinted {
+    let elements = literal.array.elements
+    let n = self.receiver_enter()
+    let temp = f"___r{n}"
+    let mut out = self.alloc_head(temp, "CPArray")
+    if elements.is_empty() {
+      out.text += self.init_send(temp, "init", "")
+    } else {
+      let mut items = text_of("")
+      let mut first = true
+      for element in elements {
+        if !first { items.text += ", " }
+        match element {
+          Expression(e) => emit(&items, self.expression(e.*, ind)),
+          Spread(spread) => {
+            items.text += "..."
+            emit(&items, self.expression(spread.argument.*, ind))
+          },
+        }
+        first = false
+      }
+      out.text += self.init_send(
+        temp,
+        "initWithObjects:count:",
+        "[" + items.text + "], " + f"{elements.length()}",
+      )
+      out.diags = merge_diags(out.diags, items.diags)
+    }
+    out.text += ")"
+    self.receiver_exit()
+    out
+  }
+
+  fn objj_dictionary(self, literal: ObjjDictionaryLiteral, ind: string) -> JsPrinted {
+    let n = self.receiver_enter()
+    let temp = f"___r{n}"
+    let mut out = self.alloc_head(temp, "CPDictionary")
+    if literal.pairs.is_empty() {
+      out.text += self.init_send(temp, "init", "")
+    } else {
+      let mut values = text_of("")
+      let mut keys = text_of("")
+      let mut first = true
+      for pair in literal.pairs {
+        if !first {
+          values.text += ", "
+          keys.text += ", "
+        }
+        emit(&values, self.expression(pair.value.*, ind))
+        emit(&keys, self.expression(pair.key.*, ind))
+        first = false
+      }
+      out.text += self.init_send(
+        temp,
+        "initWithObjects:forKeys:",
+        "[" + values.text + "], [" + keys.text + "]",
+      )
+      out.diags = merge_diags(out.diags, merge_diags(values.diags, keys.diags))
+    }
+    out.text += ")"
+    self.receiver_exit()
+    out
+  }
+
+  // alloc_head opens the literal desugaring: `(___rN = (Class.isa.
+  // method_msgSend["alloc"] || _objj_forward)(Class, "alloc"), ___rN ==
+  // null ? ___rN : `.  Single leading paren — unlike a send's double.
+  // Collection literals carry NO dtable comma artifact in debug mode
+  // (corpus-confirmed): the selectors are always bare.
+  fn alloc_head(self, temp: string, class_name: string) -> JsPrinted {
+    text_of(
+      "(" + temp + " = (" + class_name +
+      ".isa.method_msgSend[\"alloc\"] || _objj_forward)(" +
+      class_name +
+      ", \"alloc\"), " +
+      temp +
+      " == null ? " +
+      temp +
+      " : ",
+    )
+  }
+
+  // init_send is the second send of a literal desugaring, onto ___rN —
+  // bare selector, no artifact.
+  fn init_send(self, temp: string, selector: string, args: string) -> string {
+    let mut out = "(" + temp + ".isa.method_msgSend[\"" + selector +
+    "\"] || _objj_forward)(" +
+    temp +
+    ", \"" +
+    selector +
+    "\""
+    if !args.is_empty() { out += ", " + args }
+    out
+  }
+
+  // deref_update rewrites ++/-- on an @deref target through the setter.
+  fn deref_update(
+    self,
+    deref: ObjjDerefExpression,
+    operator: UpdateOp,
+    is_prefix: bool,
+    ind: string,
+  ) -> JsPrinted {
+    let target = self.expression(deref.argument.*, ind)
+    let op = match operator {
+      Increment => "+",
+      Decrement => "-",
+    }
+    let core_open = if is_prefix { "(" } else { "((" }
+    let mut out = JsPrinted { 
+      text: core_open + "(" + target.text + ")(",
+      diags: target.diags,
+    }
+    emit(&out, self.expression(deref.argument.*, ind))
+    out.text += "() " + op + " 1)"
+    if !is_prefix {
+      // Postfix returns the prior value: subtract back what was added.
+      let undo = match operator {
+        Increment => " - 1)",
+        Decrement => " + 1)",
+      }
+      out.text += undo
+    }
     out
   }
 }
@@ -2297,6 +2694,179 @@ fn codegen_param_type(parameter_type: Option<ObjjMethodType>) -> string {
 // spaces, double quotes (type names never contain quote characters).
 fn quoted_type_list(types: Slice<string>) -> string {
   "\"" + strings.Join(types, "\",\"") + "\""
+}
+
+// assignment_op_char is the operator character embedded in an @deref
+// compound assignment's setter form (`x() + v`); Assign is handled by the
+// caller and never reaches here.
+fn assignment_op_char(op: AssignmentOp) -> string {
+  match op {
+    Assign => "=",
+    Add => "+",
+    Sub => "-",
+    Mul => "*",
+    Div => "/",
+    Mod => "%",
+    BitAnd => "&",
+    BitOr => "|",
+    BitXor => "^",
+    ShiftLeft => "<<",
+    ShiftRight => ">>",
+    UnsignedShiftRight => ">>>",
+  }
+}
+
+// message_arguments flattens a message selector's argument expressions in
+// selector order (unary selectors carry none).
+fn message_arguments(selector: ObjjMessageSelector) -> Slice<Expression> {
+  let mut out: Slice<Expression> = []
+  if let ObjjMessageSelector.Keyword(keywords) = selector {
+    for keyword in keywords {
+      for argument in keyword.arguments {
+        out = out.append(argument)
+      }
+    }
+  }
+  out
+}
+
+// selector_part_count is the number of colon-separated keyword parts (the
+// dtable-lookup repetition count); a unary selector counts as one.
+fn selector_part_count(selector: string) -> int {
+  let count = strings.Count(selector, ":")
+  if count == 0 { 1 } else { count }
+}
+
+// expression_identifier_name returns the receiver's name when it is a bare
+// identifier (the simple-receiver test), else None.
+fn expression_identifier_name(e: Expression) -> Option<string> {
+  if let Expression.Primary(primary) = e {
+    if let PrimaryExpression.Identifier(identifier) = primary {
+      return Some(identifier.text)
+    }
+  }
+  None
+}
+
+// expression_as_deref unwraps an @deref primary for the update-target test.
+fn expression_as_deref(e: Expression) -> Option<ObjjDerefExpression> {
+  if let Expression.Primary(primary) = e {
+    if let PrimaryExpression.ObjjDeref(deref) = primary { return Some(deref) }
+  }
+  None
+}
+
+// body_assigns_self pre-scans a method body for any assignment to `self`,
+// nested functions included — the legacy assignmentToSelf flag that
+// decides whether a `self` receiver is null-guarded.
+fn body_assigns_self(body: StatementBlock) -> bool {
+  for st in body.body {
+    if statement_assigns_self(st) { return true }
+  }
+  false
+}
+
+fn statement_assigns_self(st: Statement) -> bool {
+  match st {
+    Expression(es) => expressions_assign_self(es.expression.*),
+    Return(return_st) => return_st.value.map_or(false, expressions_assign_self),
+    Declaration(declaration) => match declaration {
+      Variable(variable) => declarators_assign_self(variable.declarators),
+      Lexical(lexical) => declarators_assign_self(lexical.declarators),
+      _ => false,
+    },
+    BlockScope(inner) => block_assigns_self(inner),
+    If(if_st) => {
+      if expressions_assign_self(if_st.condition.expression.*) { return true }
+      if statement_assigns_self(if_st.consequence.*) { return true }
+      if_st.alternative.map_or(
+        false,
+        |alternative| statement_assigns_self(alternative.body.*),
+      )
+    },
+    For(for_st) => statement_assigns_self(for_st.body.*),
+    ForIn(for_in) => statement_assigns_self(for_in.body.*),
+    While(while_st) => statement_assigns_self(while_st.body.*),
+    Do(do_st) => statement_assigns_self(do_st.body.*),
+    With(with_st) => statement_assigns_self(with_st.body.*),
+    Labeled(labeled) => statement_assigns_self(labeled.body.*),
+    Switch(switch_st) => {
+      for entry in switch_st.body.entries {
+        let body = match entry {
+          Case(case) => case.body,
+          Default(default) => default.body,
+        }
+        for body_st in body {
+          if statement_assigns_self(body_st) { return true }
+        }
+      }
+      false
+    },
+    Try(try_st) => {
+      if block_assigns_self(try_st.body) { return true }
+      if let Some(handler) = try_st.handler {
+        if block_assigns_self(handler.body) { return true }
+      }
+      try_st.finalizer.map_or(
+        false,
+        |finalizer| block_assigns_self(finalizer.body),
+      )
+    },
+    Throw(throw_st) => expressions_assign_self(throw_st.value.*),
+    _ => false,
+  }
+}
+
+fn block_assigns_self(block: StatementBlock) -> bool {
+  for st in block.body {
+    if statement_assigns_self(st) { return true }
+  }
+  false
+}
+
+fn declarators_assign_self(declarators: Slice<VariableDeclarator>) -> bool {
+  for declarator in declarators {
+    if let Some(initializer) = declarator.initializer {
+      if expression_assigns_self(initializer.value.*) { return true }
+    }
+  }
+  false
+}
+
+fn expressions_assign_self(exprs: Expressions) -> bool {
+  match exprs {
+    Single(e) => expression_assigns_self(e),
+    Sequence(sequence) => {
+      for item in sequence.items {
+        if expression_assigns_self(item) { return true }
+      }
+      false
+    },
+  }
+}
+
+// expression_assigns_self detects `self = …` at this expression node; it
+// does not recurse into every operand (the legacy flag is set by the
+// assignment visitor, which fires only on an actual assignment whose left
+// is the self identifier).  Assignment right-hand sides are scanned so a
+// nested `x = (self = y)` is caught.
+fn expression_assigns_self(e: Expression) -> bool {
+  match e {
+    Assignment(assignment) => match assignment {
+      Standard(standard) => {
+        let left_is_self = match standard.left {
+          Lhs(lhs) => match lhs.* {
+            Identifier(identifier) => identifier.text == "self",
+            _ => false,
+          },
+          Parenthesized(_) => false,
+        }
+        left_is_self || expression_assigns_self(standard.right.*)
+      },
+      ObjjDeref(deref) => expression_assigns_self(deref.right.*),
+    },
+    _ => false,
+  }
 }
 
 // objj_method_description is the bodiless protocol form: Nil in place of
