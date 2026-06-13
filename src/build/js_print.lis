@@ -77,16 +77,14 @@ pub fn print_js_program(program: Program, file: string) -> JsPrinted {
 // Accumulation helpers
 // ---------------------------------------------------------------------------
 
-struct JsPrint {
-  file: string,
-}
+struct JsPrint { file: string }
 
 fn text_of(text: string) -> JsPrinted {
   JsPrinted { text, .. }
 }
 
 fn emit(acc: Ref<JsPrinted>, piece: JsPrinted) {
-  acc.text = acc.text + piece.text
+  acc.text += piece.text
   acc.diags = merge_diags(acc.diags, piece.diags)
 }
 
@@ -124,12 +122,8 @@ fn expr_prec(e: Expression) -> int {
 
 fn primary_prec(primary: PrimaryExpression) -> int {
   match primary {
-    Subscript(_) |
-    Member(_) |
-    Call(_) => 1,
-    Function(_) |
-    Generator(_) |
-    Arrow(_) => 3,
+    Subscript(_) | Member(_) | Call(_) => 1,
+    Function(_) | Generator(_) | Arrow(_) => 3,
     _ => -1,
   }
 }
@@ -337,17 +331,11 @@ impl JsPrint {
       Try(try_st) => self.try_statement(try_st, ind),
       With(with_st) => self.with_statement(with_st, ind),
       Break(break_st) => {
-        let label = match break_st.label {
-          Some(identifier) => f" {identifier.text}",
-          None => "",
-        }
+        let label = break_st.label.map_or("", |identifier| f" {identifier.text}")
         text_of(f"{ind}break{label};\n")
       },
       Continue(continue_st) => {
-        let label = match continue_st.label {
-          Some(identifier) => f" {identifier.text}",
-          None => "",
-        }
+        let label = continue_st.label.map_or("", |identifier| f" {identifier.text}")
         text_of(f"{ind}continue{label};\n")
       },
       Return(return_st) => {
@@ -376,16 +364,27 @@ impl JsPrint {
       Import(import_st) => self.es_import(import_st),
       Export(export_st) => self.es_export(export_st, ind),
       ObjjImport(import_directive) => self.objj_import(import_directive),
-      ObjjGlobal(global) =>
-        self.deferred("@global declaration", "tier B", global.pos),
-      ObjjClassForward(forward) =>
-        self.deferred("@class forward declaration", "tier B", forward.pos),
-      ObjjTypedef(typedef) =>
-        self.deferred("@typedef", "tier B", typedef.pos),
-      ObjjProtocol(protocol) =>
-        self.deferred("@protocol declaration", "tier B", protocol.pos),
-      ObjjClassImpl(implementation) =>
-        self.deferred("@implementation", "tier B", implementation.pos),
+      ObjjGlobal(global) => self.deferred(
+        "@global declaration",
+        "tier B",
+        global.pos,
+      ),
+      ObjjClassForward(forward) => self.deferred(
+        "@class forward declaration",
+        "tier B",
+        forward.pos,
+      ),
+      ObjjTypedef(typedef) => self.deferred("@typedef", "tier B", typedef.pos),
+      ObjjProtocol(protocol) => self.deferred(
+        "@protocol declaration",
+        "tier B",
+        protocol.pos,
+      ),
+      ObjjClassImpl(implementation) => self.deferred(
+        "@implementation",
+        "tier B",
+        implementation.pos,
+      ),
       PreprocIf(preproc) => self.deferred(
         "#if block",
         "build-feature environment (PHASE-8-BRIEF.md decision 4)",
@@ -402,14 +401,16 @@ impl JsPrint {
   // deferred is the named catch-all: no text, one warning saying exactly
   // which construct is awaiting which tier.
   fn deferred(self, what: string, pending: string, pos: Position) -> JsPrinted {
-    JsPrinted {
-      diags: [diag_warn_at(
-        BuildPhase.Compile,
-        f"codegen: {what} deferred pending {pending}",
-        self.file,
-        pos.row,
-        pos.col,
-      )],
+    JsPrinted { 
+      diags: [
+        diag_warn_at(
+          BuildPhase.Compile,
+          f"codegen: {what} deferred pending {pending}",
+          self.file,
+          pos.row,
+          pos.col,
+        ),
+      ],
       ..,
     }
   }
@@ -456,8 +457,10 @@ impl JsPrint {
       match st {
         // A bare block nested directly in a block indents one extra step
         // (legacy BlockStatement special case).
-        BlockScope(inner) =>
-          emit(&out, self.block(inner, content_ind + indent_step(), false, true)),
+        BlockScope(inner) => emit(
+          &out,
+          self.block(inner, content_ind + indent_step(), false, true),
+        ),
         _ => emit(&out, self.statement(st, content_ind, i < prologue)),
       }
     }
@@ -488,7 +491,10 @@ impl JsPrint {
         Empty(_) => out.text += ind + "else;\n",
         _ => {
           out.text += ind + "else\n"
-          emit(&out, self.statement(alternative.body.*, ind + indent_step(), false))
+          emit(
+            &out,
+            self.statement(alternative.body.*, ind + indent_step(), false),
+          )
         },
       }
     }
@@ -529,17 +535,22 @@ impl JsPrint {
     match st.initializer {
       Lexical(lexical) => emit(
         &out,
-        self.declarators_inline(lexical_kind_text(lexical.kind), lexical.declarators, ind),
+        self.declarators_inline(
+          lexical_kind_text(lexical.kind),
+          lexical.declarators,
+          ind,
+        ),
       ),
-      Variable(variable) =>
-        emit(&out, self.declarators_inline("var", variable.declarators, ind)),
+      Variable(variable) => emit(
+        &out,
+        self.declarators_inline("var", variable.declarators, ind),
+      ),
       Expression(exprs) => emit(&out, self.for_init_expression(exprs.*, ind)),
-      Empty(_) => {},
+      Empty(_) => (),
     }
     out.text += "; "
-    match st.condition {
-      Expression(exprs) => emit(&out, self.expressions(exprs.*, ind)),
-      Empty(_) => {},
+    if let ForCondition.Expression(exprs) = st.condition {
+      emit(&out, self.expressions(exprs.*, ind))
     }
     out.text += "; "
     if let Some(increment) = st.increment {
@@ -696,15 +707,23 @@ impl JsPrint {
         generator.body,
         true,
       ),
-      Class(class) =>
-        self.class_like(Some(class.name), class.heritage, class.body, ind, false),
+      Class(class) => self.class_like(
+        Some(class.name),
+        class.heritage,
+        class.body,
+        ind,
+        false,
+      ),
       Lexical(lexical) => self.variable_declaration(
         lexical_kind_text(lexical.kind),
         lexical.declarators,
         ind,
       ),
-      Variable(variable) =>
-        self.variable_declaration("var", variable.declarators, ind),
+      Variable(variable) => self.variable_declaration(
+        "var",
+        variable.declarators,
+        ind,
+      ),
       Using(using) => {
         // No legacy emitter exists for using declarations; mechanical
         // variable-declaration shape (recorded decision).
@@ -779,9 +798,7 @@ impl JsPrint {
     is_declaration: bool,
   ) -> JsPrinted {
     let mut out = text_of(ind)
-    if let Some(identifier) = name {
-      out.text += identifier.text + " = "
-    }
+    if let Some(identifier) = name { out.text += identifier.text + " = " }
     let mut keywords: Slice<string> = []
     if is_async { keywords = keywords.append("async") }
     keywords = keywords.append("function")
@@ -801,7 +818,10 @@ impl JsPrint {
       if !first { out.text += ", " }
       match parameter {
         Pattern(pattern) => emit(&out, self.pattern(pattern, ind)),
-        Assignment(assignment) => emit(&out, self.assignment_pattern(assignment, ind)),
+        Assignment(assignment) => emit(
+          &out,
+          self.assignment_pattern(assignment, ind),
+        ),
       }
       first = false
     }
@@ -841,7 +861,10 @@ impl JsPrint {
       match member {
         Method(method) => emit(&out, self.class_method(method, ind)),
         Field(field) => emit(&out, self.field_definition(field, ind)),
-        StaticBlock(static_block) => emit(&out, self.static_block(static_block, ind)),
+        StaticBlock(static_block) => emit(
+          &out,
+          self.static_block(static_block, ind),
+        ),
       }
       out.text += "\n"
     }
@@ -924,13 +947,15 @@ impl JsPrint {
     if let Some(attribute) = st.attribute {
       out.diags = merge_diags(
         out.diags,
-        [diag_warn_at(
-          BuildPhase.Compile,
-          "codegen: import attribute deferred — no legacy emitter",
-          self.file,
-          attribute.pos.row,
-          attribute.pos.col,
-        )],
+        [
+          diag_warn_at(
+            BuildPhase.Compile,
+            "codegen: import attribute deferred — no legacy emitter",
+            self.file,
+            attribute.pos.row,
+            attribute.pos.col,
+          ),
+        ],
       )
     }
     out
@@ -942,9 +967,7 @@ impl JsPrint {
     for specifier in named.specifiers {
       if !first { out.text += ", " }
       out.text += module_export_name_text(specifier.name)
-      if let Some(alias) = specifier.alias {
-        out.text += f" as {alias.text}"
-      }
+      if let Some(alias) = specifier.alias { out.text += f" as {alias.text}" }
       first = false
     }
     out.text += "}"
@@ -1008,7 +1031,11 @@ impl JsPrint {
       System(lib) => {
         // SystemLibString text is the raw token: <Foundation/Foundation.j>
         let length = lib.text.length()
-        let inner = if length > 2 { lib.text.substring(1..length - 1) } else { "" }
+        let inner = if length > 2 {
+          lib.text.substring(1..length - 1)
+        } else {
+          ""
+        }
         text_of("objj_executeFile(\"" + inner + "\", NO);")
       },
       Local(literal) => {
@@ -1046,7 +1073,10 @@ impl JsPrint {
     match e {
       Primary(primary) => self.primary(primary, ind),
       Assignment(assignment) => self.assignment(assignment, ind),
-      AugmentedAssignment(augmented) => self.augmented_assignment(augmented, ind),
+      AugmentedAssignment(augmented) => self.augmented_assignment(
+        augmented,
+        ind,
+      ),
       Await(await_expr) => {
         // Legacy AwaitExpression always parenthesizes its argument.
         let mut out = text_of("await (")
@@ -1103,7 +1133,13 @@ impl JsPrint {
     is_right: bool,
     ind: string,
   ) -> JsPrinted {
-    if operand_needs_parens(parent_prec, parent_t, parent_is_operator, e, is_right) {
+    if operand_needs_parens(
+      parent_prec,
+      parent_t,
+      parent_is_operator,
+      e,
+      is_right,
+    ) {
       self.wrapped(e, ind)
     } else {
       self.expression(e, ind)
@@ -1142,7 +1178,10 @@ impl JsPrint {
         if nullish || exponent || left_is_arrow {
           emit(&out, self.wrapped(left.*, ind))
         } else {
-          emit(&out, self.operand(parent_prec, parent_t, true, left.*, false, ind))
+          emit(
+            &out,
+            self.operand(parent_prec, parent_t, true, left.*, false, ind),
+          )
         }
       },
     }
@@ -1150,7 +1189,10 @@ impl JsPrint {
     if nullish {
       emit(&out, self.wrapped(binary.right.*, ind))
     } else {
-      emit(&out, self.operand(parent_prec, parent_t, true, binary.right.*, true, ind))
+      emit(
+        &out,
+        self.operand(parent_prec, parent_t, true, binary.right.*, true, ind),
+      )
     }
     out
   }
@@ -1163,8 +1205,11 @@ impl JsPrint {
         emit(&out, self.operand(8, 0, false, standard.right.*, true, ind))
         out
       },
-      ObjjDeref(deref) =>
-        self.deferred("@deref assignment", "tier D", deref.pos),
+      ObjjDeref(deref) => self.deferred(
+        "@deref assignment",
+        "tier D",
+        deref.pos,
+      ),
     }
   }
 
@@ -1227,10 +1272,7 @@ impl JsPrint {
       String(literal) => text_of(literal.text),
       Template(template) => self.template(template, ind),
       Regex(regex) => {
-        let flags = match regex.flags {
-          Some(regex_flags) => regex_flags.text,
-          None => "",
-        }
+        let flags = regex.flags.map_or("", |regex_flags| regex_flags.text)
         text_of(f"/{regex.pattern.text}/{flags}")
       },
       True(_) => text_of("true"),
@@ -1256,30 +1298,59 @@ impl JsPrint {
         generator.body,
         false,
       ),
-      Class(class) =>
-        self.class_like(class.name, class.heritage, class.body, ind, true),
+      Class(class) => self.class_like(
+        class.name,
+        class.heritage,
+        class.body,
+        ind,
+        true,
+      ),
       MetaProperty(meta) => match meta {
         NewTarget(_) => text_of("new.target"),
         ImportMeta(_) => text_of("import.meta"),
       },
       Call(call) => self.call(call, ind),
       NativeArray(array) => self.array_literal(array, ind),
-      ObjjDictionary(dictionary) =>
-        self.deferred("@{...} dictionary literal", "tier D", dictionary.pos),
-      ObjjArray(array_literal) =>
-        self.deferred("@[...] array literal", "tier D", array_literal.pos),
-      ObjjString(literal) =>
-        self.deferred("@\"...\" string literal", "tier D", literal.pos),
-      ObjjSelector(selector) =>
-        self.deferred("@selector expression", "tier D", selector.pos),
-      ObjjProtocol(protocol) =>
-        self.deferred("@protocol expression", "tier D", protocol.pos),
-      ObjjMessage(message) =>
-        self.deferred("message send", "tier C", message.pos),
-      ObjjRef(reference) =>
-        self.deferred("@ref expression", "tier D", reference.pos),
-      ObjjDeref(dereference) =>
-        self.deferred("@deref expression", "tier D", dereference.pos),
+      ObjjDictionary(dictionary) => self.deferred(
+        "@{...} dictionary literal",
+        "tier D",
+        dictionary.pos,
+      ),
+      ObjjArray(array_literal) => self.deferred(
+        "@[...] array literal",
+        "tier D",
+        array_literal.pos,
+      ),
+      ObjjString(literal) => self.deferred(
+        "@\"...\" string literal",
+        "tier D",
+        literal.pos,
+      ),
+      ObjjSelector(selector) => self.deferred(
+        "@selector expression",
+        "tier D",
+        selector.pos,
+      ),
+      ObjjProtocol(protocol) => self.deferred(
+        "@protocol expression",
+        "tier D",
+        protocol.pos,
+      ),
+      ObjjMessage(message) => self.deferred(
+        "message send",
+        "tier C",
+        message.pos,
+      ),
+      ObjjRef(reference) => self.deferred(
+        "@ref expression",
+        "tier D",
+        reference.pos,
+      ),
+      ObjjDeref(dereference) => self.deferred(
+        "@deref expression",
+        "tier D",
+        dereference.pos,
+      ),
     }
   }
 
@@ -1395,8 +1466,11 @@ impl JsPrint {
         out.text += "]"
         out
       },
-      ObjjString(literal) =>
-        self.deferred("@\"...\" property name", "tier D", literal.pos),
+      ObjjString(literal) => self.deferred(
+        "@\"...\" property name",
+        "tier D",
+        literal.pos,
+      ),
     }
   }
 
@@ -1425,8 +1499,8 @@ impl JsPrint {
       Single(identifier) => out.text += identifier.text,
       List(parameters) => {
         // Legacy rule: parentheses unless exactly one plain identifier.
-        let bare = parameters.parameters.length() == 1
-          && formal_parameter_is_plain_identifier(parameters.parameters[0])
+        let bare = parameters.parameters.length() == 1 &&
+        formal_parameter_is_plain_identifier(parameters.parameters[0])
         if bare {
           emit(&out, self.formal_parameters(parameters, ind))
         } else {
@@ -1445,7 +1519,10 @@ impl JsPrint {
           emit(&out, self.expression(e.*, ind))
         }
       },
-      Block(block) => emit(&out, self.block(block, ind + indent_step(), true, false)),
+      Block(block) => emit(
+        &out,
+        self.block(block, ind + indent_step(), true, false),
+      ),
     }
     out
   }
@@ -1554,7 +1631,10 @@ impl JsPrint {
           out.text += ": "
           match pair.value {
             Pattern(value) => emit(&out, self.pattern(value.*, ind)),
-            Assignment(value) => emit(&out, self.assignment_pattern(value.*, ind)),
+            Assignment(value) => emit(
+              &out,
+              self.assignment_pattern(value.*, ind),
+            ),
           }
         },
         Rest(rest) => {
@@ -1564,7 +1644,10 @@ impl JsPrint {
         Assignment(assignment) => {
           match assignment.left {
             Shorthand(identifier) => out.text += identifier.text,
-            Destructuring(nested) => emit(&out, self.destructuring(nested.*, ind)),
+            Destructuring(nested) => emit(
+              &out,
+              self.destructuring(nested.*, ind),
+            ),
           }
           out.text += " = "
           emit(&out, self.expression(assignment.right.*, ind))
@@ -1603,9 +1686,7 @@ impl JsPrint {
 fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
   match e {
     Primary(primary) => match primary {
-      Object(_) |
-      Function(_) |
-      Generator(_) => true,
+      Object(_) | Function(_) | Generator(_) => true,
       String(literal) => !is_directive && is_use_strict(literal),
       _ => false,
     },
@@ -1616,8 +1697,7 @@ fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
     Binary(binary) => match binary.left {
       Expression(left) => match left.* {
         Primary(primary) => match primary {
-          Function(_) |
-          Generator(_) => true,
+          Function(_) | Generator(_) => true,
           _ => false,
         },
         _ => false,
@@ -1632,9 +1712,7 @@ fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
 fn arrow_body_needs_parens(e: Expression) -> bool {
   match e {
     Primary(primary) => match primary {
-      Object(_) |
-      Function(_) |
-      Generator(_) => true,
+      Object(_) | Function(_) | Generator(_) => true,
       _ => false,
     },
     Assignment(assignment) => match assignment {

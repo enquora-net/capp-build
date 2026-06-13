@@ -254,6 +254,21 @@ typedefs/module/runtime agreement.
 - • `redundant_pattern_matching` lint: a match reducible to an Option
   predicate must use it — `Option.is_none()` / `is_some()` exist.
 - Multiple `impl` blocks per type: still unverified — merged proactively.
+- • Unqualified variant patterns resolve in match arms (scrutinee-typed)
+  but NOT in `if let`: `if let Clean = mode` silently binds a catch-all
+  (and then trips `redundant_if_let`); `if let BuildMode.Clean = mode`
+  is required.
+- • Go `(n int, err error)` returns surface as `Partial` with three
+  variants — Ok, Err, Both; `?` is incompatible, explicit match
+  required. Go funcs returning only `error` remain `?`-compatible.
+- • `empty_match_arm` lint: an intentional no-op arm must be `()`,
+  not `{}`.
+- • `manual_map_or` / `manual_unwrap_or` lints: value-producing
+  Option/Result matches must be `.map_or(default, |x| …)` /
+  `.unwrap_or_else(|_| …)`.
+- • `manual_compound_assignment` lint: `+=` is demanded on struct
+  fields, including through a `Ref<T>` receiver — so field-level
+  compound assignment is fully supported.
 
 ## Settled architectural decisions
 

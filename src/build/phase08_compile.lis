@@ -66,7 +66,7 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   fmt.Println("  compile")
   let mut diags: Slice<Diagnostic> = []
 
-  if let Clean = ctx.config.mode {
+  if let BuildMode.Clean = ctx.config.mode {
     diags = diags.append(diag_info(
       phase,
       "clean mode: artefact-directory removal deferred",
@@ -125,7 +125,9 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
     }
     record += f"t;{record_length(payload)};{payload}"
 
-    records = records.append(CompiledRecord { name: record_name(ctx, path), record })
+    records = records.append(
+      CompiledRecord { name: record_name(ctx, path), record },
+    )
   }
 
   write_records(ctx, records)?
@@ -141,10 +143,7 @@ fn record_length(content: string) -> int {
 // record_name is the source-relative filename used for the bundle `p`
 // record and the on-disk output path.
 fn record_name(ctx: Ref<BuildContext>, path: string) -> string {
-  match filepath.Rel(ctx.root.path, path) {
-    Ok(relative) => relative,
-    Err(_) => filepath.Base(path),
-  }
+  filepath.Rel(ctx.root.path, path).unwrap_or_else(|_| filepath.Base(path))
 }
 
 // write_records materialises the per-file records under
@@ -156,14 +155,31 @@ fn write_records(ctx: Ref<BuildContext>, records: Slice<CompiledRecord>) -> Resu
     Release => "Release",
     Clean => "Clean",
   }
-  let out_dir = filepath.Join(ctx.root.path, "Build", "capp-build.build", mode_dir, "Sources")
+  let out_dir = filepath.Join(
+    ctx.root.path,
+    "Build",
+    "capp-build.build",
+    mode_dir,
+    "Sources",
+  )
   for compiled in records {
-    let out_path = filepath.Join(out_dir, compiled.name)
-    os.MkdirAll(filepath.Dir(out_path), os.ModePerm)?
-    let file = os.Create(out_path)?
-    file.WriteString(compiled.record)?
-    file.Close()?
+    write_record_file(filepath.Join(out_dir, compiled.name), compiled.record)?
   }
   fmt.Println(f"✓  compile: {records.length()} per-file records → {out_dir}")
   Ok(())
+}
+
+// write_record_file writes one per-file record.  WriteString returns a
+// partial result (bytes written and error); a short write is an error,
+// and a write error takes precedence over a close error.
+fn write_record_file(out_path: string, record: string) -> Result<(), error> {
+  os.MkdirAll(filepath.Dir(out_path), os.ModePerm)?
+  let file = os.Create(out_path)?
+  let written = file.WriteString(record)
+  let closed = file.Close()
+  match written {
+    Ok(_) => closed,
+    Err(e) => Err(e),
+    Both(_, e) => Err(e),
+  }
 }
