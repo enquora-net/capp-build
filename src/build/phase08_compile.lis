@@ -107,7 +107,7 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
       continue
     }
 
-    let printed = print_js_program(unit.program, path)
+    let printed = print_js_program(unit.program, path, ctx.symbols)
     diags = merge_diags(diags, printed.diags)
     let payload = prologue + printed.text
 

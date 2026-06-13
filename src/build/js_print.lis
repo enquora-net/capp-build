@@ -25,6 +25,14 @@
 // top level or nested — prints as `name = function(...)`.  This printer
 // applies the same rewrite unconditionally.
 //
+// Tier B (same day) adds the ObjJ structure scaffolds — class
+// implementations and categories, method wrappers with type arrays,
+// ivars, synthesized accessor bodies, protocols, typedefs, conformance —
+// transcribed from the legacy ClassDeclarationStatement /
+// MethodDeclarationStatement / ProtocolDeclarationStatement emitters
+// (PHASE-8-BRIEF.md, "The emitter law, tier B"), plus the ivar →
+// self.ivar rewrite with its scope machinery.
+//
 // Recorded deviations from the legacy mechanics (all corpus-invisible):
 //   — Object-literal and class methods print with the rewrite OFF.  The
 //     legacy emitter with the transform enabled would produce `name = (...)`
@@ -32,13 +40,20 @@
 //     form; the valid-JS reading is taken.  (PROGRESS-SNAPSHOT.md.)
 //   — `using` / `await using` declarations have no legacy emitter; they
 //     print mechanically in variable-declaration shape.
+//   — Scope pre-scan: locals are collected once per function scope (all
+//     block depths), where the legacy registers in visit order and
+//     retroactively unprefixes hoisted vars by buffer surgery.  Output
+//     differs only for an ivar-shadowing local declared in a different
+//     block of the same function — none exist in any corpus, and the
+//     legacy warns on the pattern anyway.
 //
 // Deferred constructs route through named catch-all diagnostics, per the
-// house pattern: ObjJ statements (tier B), message sends (tier C), ObjJ
-// expression literals (tier D), and #if blocks (pending the build-feature
-// environment, PHASE-8-BRIEF.md decision 4).  Each deferral emits no text,
-// so payloads for files containing them are incomplete by construction;
-// the diagnostics say exactly what is missing.
+// house pattern: message sends and the @accessors(copy) setter (tier C),
+// ObjJ expression literals — @"…", @[…], @{…}, @selector, @protocol
+// expressions, @ref/@deref (tier D), and #if blocks (pending the
+// build-feature environment, PHASE-8-BRIEF.md decision 4).  Each deferral
+// emits no text, so payloads for files containing them are incomplete by
+// construction; the diagnostics say exactly what is missing.
 //
 // Everything here is pure: typed values in, JsPrinted out.  Indentation
 // is an explicit parameter (4-space unit); a block prints its braces one
@@ -59,8 +74,12 @@ pub struct JsPrinted {
 // The debug-mode "\n\n" prologue is NOT emitted here — it belongs to
 // per-file record composition (phase 8 proper), since it is a property of
 // the build mode, not of the program.
-pub fn print_js_program(program: Program, file: string) -> JsPrinted {
-  let p = JsPrint { file }
+pub fn print_js_program(
+  program: Program,
+  file: string,
+  symbols: Option<SymbolTable>,
+) -> JsPrinted {
+  let p = JsPrint { file, symbols, .. }
   let mut out = text_of("")
   if let Some(hash_bang) = program.hash_bang {
     out.text += hash_bang.text
@@ -77,7 +96,24 @@ pub fn print_js_program(program: Program, file: string) -> JsPrinted {
 // Accumulation helpers
 // ---------------------------------------------------------------------------
 
-struct JsPrint { file: string }
+// JsPrint carries the printing context.  file and symbols are fixed for
+// the whole program; current_class, in_instance_method, and locals are
+// scope state — the printer is a value, so entering a class, method, or
+// function scope copies it with the new state, and the recursion carries
+// the copy (no mutation, no restore).
+struct JsPrint {
+  file: string,
+  symbols: Option<SymbolTable>,
+  current_class: Option<ClassContext>,
+  in_instance_method: bool,
+  locals: Slice<string>,
+}
+
+// ClassContext is the current @implementation's ivar universe (own +
+// inherited project-known), the domain of the ivar → self.ivar rewrite.
+// Method function naming takes the class name by parameter; no other
+// state is needed.
+struct ClassContext { ivars: Map<string, bool> }
 
 fn text_of(text: string) -> JsPrinted {
   JsPrinted { text, .. }
@@ -370,26 +406,14 @@ impl JsPrint {
       Import(import_st) => self.es_import(import_st),
       Export(export_st) => self.es_export(export_st, ind),
       ObjjImport(import_directive) => self.objj_import(import_directive),
-      ObjjGlobal(global) => self.deferred(
-        "@global declaration",
-        "tier B",
-        global.pos,
-      ),
-      ObjjClassForward(forward) => self.deferred(
-        "@class forward declaration",
-        "tier B",
-        forward.pos,
-      ),
-      ObjjTypedef(typedef) => self.deferred("@typedef", "tier B", typedef.pos),
-      ObjjProtocol(protocol) => self.deferred(
-        "@protocol declaration",
-        "tier B",
-        protocol.pos,
-      ),
-      ObjjClassImpl(implementation) => self.deferred(
-        "@implementation",
-        "tier B",
-        implementation.pos,
+      // @global and @class are compile-time bookkeeping in the legacy
+      // generator (scope vars, class-def table): they emit nothing.
+      ObjjGlobal(_) => text_of(""),
+      ObjjClassForward(_) => text_of(""),
+      ObjjTypedef(typedef) => objj_typedef_text(typedef.name.text),
+      ObjjProtocol(protocol) => self.objj_protocol(protocol),
+      ObjjClassImpl(implementation) => self.objj_class_implementation(
+        implementation,
       ),
       PreprocIf(preproc) => self.deferred(
         "#if block",
@@ -617,7 +641,7 @@ impl JsPrint {
   fn for_binding(self, binding: ForBinding, ind: string) -> JsPrinted {
     match binding {
       Plain(plain) => match plain.left {
-        Lhs(lhs) => self.lhs_expression(lhs, ind),
+        Lhs(lhs) => self.lhs_expression_value(lhs, ind),
         Parenthesized(parenthesized) => self.parenthesized(parenthesized, ind),
       },
       Declared(declared) => {
@@ -813,7 +837,9 @@ impl JsPrint {
     out.text += "("
     emit(&out, self.formal_parameters(parameters, ind))
     out.text += ")\n"
-    emit(&out, self.block(body, ind + indent_step(), false, is_declaration))
+    let mut inner = self
+    inner.locals = function_scope_locals(self.locals, name, parameters, body)
+    emit(&out, inner.block(body, ind + indent_step(), false, is_declaration))
     out
   }
 
@@ -1222,8 +1248,42 @@ impl JsPrint {
   fn assignment_target(self, target: AssignmentTarget, ind: string) -> JsPrinted {
     match target {
       Parenthesized(parenthesized) => self.parenthesized(parenthesized.*, ind),
-      Lhs(lhs) => self.lhs_expression(lhs.*, ind),
+      Lhs(lhs) => self.lhs_expression_value(lhs.*, ind),
     }
+  }
+
+  // lhs_expression_value is the expression-position reading of an LHS:
+  // a bare identifier is subject to the ivar rewrite (`theWindow = x`
+  // becomes `self.theWindow = x`).  Pattern positions — parameters,
+  // declarations, destructuring — use lhs_expression, which never
+  // rewrites.
+  fn lhs_expression_value(self, lhs: LhsExpression, ind: string) -> JsPrinted {
+    match lhs {
+      Identifier(identifier) => self.identifier(identifier),
+      _ => self.lhs_expression(lhs, ind),
+    }
+  }
+
+  // identifier applies the legacy ivar rule: inside an instance method,
+  // an identifier that is not locally bound, not one of the reserved
+  // names, and names an ivar of the current class prints as self.name.
+  fn identifier(self, identifier: Identifier) -> JsPrinted {
+    if self.in_instance_method && !reserved_identifier(identifier.text) &&
+    !self.is_local(identifier.text) {
+      if let Some(context) = self.current_class {
+        if context.ivars[identifier.text] {
+          return text_of(f"self.{identifier.text}")
+        }
+      }
+    }
+    text_of(identifier.text)
+  }
+
+  fn is_local(self, name: string) -> bool {
+    for local in self.locals {
+      if local == name { return true }
+    }
+    false
   }
 
   fn augmented_assignment(
@@ -1234,7 +1294,7 @@ impl JsPrint {
     let mut out = match augmented.left {
       Member(member) => self.member(member.*, ind),
       Subscript(subscript) => self.subscript(subscript.*, ind),
-      Identifier(identifier) => text_of(identifier.text),
+      Identifier(identifier) => self.identifier(identifier),
       Parenthesized(parenthesized) => self.parenthesized(parenthesized.*, ind),
     }
     out.text += f" {augmented_op_text(augmented.operator)} "
@@ -1270,7 +1330,7 @@ impl JsPrint {
       Subscript(subscript) => self.subscript(subscript, ind),
       Member(member) => self.member(member, ind),
       Parenthesized(parenthesized) => self.parenthesized(parenthesized, ind),
-      Identifier(identifier) => text_of(identifier.text),
+      Identifier(identifier) => self.identifier(identifier),
       Undefined(_) => text_of("undefined"),
       This(_) => text_of("this"),
       Super(_) => text_of("super"),
@@ -1517,17 +1577,19 @@ impl JsPrint {
       },
     }
     out.text += " => "
+    let mut inner = self
+    inner.locals = arrow_scope_locals(self.locals, arrow.parameters, arrow.body)
     match arrow.body {
       Expression(e) => {
         if arrow_body_needs_parens(e.*) {
-          emit(&out, self.wrapped(e.*, ind))
+          emit(&out, inner.wrapped(e.*, ind))
         } else {
-          emit(&out, self.expression(e.*, ind))
+          emit(&out, inner.expression(e.*, ind))
         }
       },
       Block(block) => emit(
         &out,
-        self.block(block, ind + indent_step(), true, false),
+        inner.block(block, ind + indent_step(), true, false),
       ),
     }
     out
@@ -1680,6 +1742,417 @@ impl JsPrint {
     out.text += "]"
     out
   }
+
+  // ---------------------------------------------------------------------------
+  // ObjJ structure scaffolds (tier B) — transcribed from the legacy
+  // ClassDeclarationStatement / MethodDeclarationStatement /
+  // ProtocolDeclarationStatement emitters; templates and quirks in
+  // PHASE-8-BRIEF.md, "The emitter law, tier B".  Message sends remain
+  // tier C deferrals, so method bodies containing sends are incomplete
+  // by construction and say so.
+  // ---------------------------------------------------------------------------
+
+  fn objj_class_implementation(self, implementation: ObjjClassImplementation) -> JsPrinted {
+    let class_name = implementation.name.text
+    let mut p = self
+    p.current_class = Some(
+      ClassContext { ivars: self.class_ivar_universe(implementation) },
+    )
+
+    let mut out = text_of("")
+
+    // Opener — three exact forms (note the superclass form's leading
+    // newline and the category form's missing semicolon).
+    match implementation.category {
+      Some(_) => {
+        out.text += "{\nvar the_class = objj_getClass(\"" + class_name + "\")\n"
+        out.text += "if(!the_class) throw new SyntaxError(\"*** Could not find definition for class \\\"" +
+        class_name +
+        "\\\"\");\n"
+        out.text += "var meta_class = the_class.isa;"
+      },
+      None => match implementation.superclass {
+        Some(superclass) => {
+          out.text += "\n{var the_class = objj_allocateClassPair(" +
+          superclass.text +
+          ", \"" +
+          class_name +
+          "\"),\nmeta_class = the_class.isa;"
+        },
+        None => {
+          out.text += "{var the_class = objj_allocateClassPair(Nil, \"" +
+          class_name +
+          "\"),\nmeta_class = the_class.isa;"
+        },
+      },
+    }
+
+    // Conformance, one stanza per declared protocol.
+    if let Some(list) = implementation.protocols {
+      for protocol in list.protocols {
+        out.text += "\nvar aProtocol = objj_getProtocol(\"" + protocol.text +
+        "\");"
+        out.text += "\nif (!aProtocol) throw new SyntaxError(\"*** Could not find definition for protocol \\\"" +
+        protocol.text +
+        "\\\"\");"
+        out.text += "\nclass_addProtocol(the_class, aProtocol);"
+      }
+    }
+
+    // Explicit instance-method occupancy: a hand-written method
+    // suppresses accessor synthesis for the same selector (phase 6 rule).
+    let mut occupied = Map.new<string, bool>()
+    for member in implementation.members {
+      if let ObjjImplementationMember.Method(method) = member {
+        if let ObjjMethodScope.Instance = method.scope {
+          occupied[method.selector.selector_string()] = true
+        }
+      }
+    }
+
+    // Ivars, and synthesized accessor entries (which precede explicit
+    // methods in the instance buffer, as the legacy sub-compilation does).
+    let mut im = text_of("")
+    let mut im_any = false
+    let mut cm = text_of("")
+    let mut cm_any = false
+    let mut first_ivar = true
+    if let Some(instance_variables) = implementation.ivars {
+      for member in instance_variables.members {
+        match member {
+          Variable(variable) => {
+            if let ObjjInstanceVariable.Field(field) = variable {
+              if first_ivar {
+                out.text += "class_addIvars(the_class, ["
+              } else {
+                out.text += ", "
+              }
+              first_ivar = false
+              let type_name = codegen_type(field.field_type)
+              out.text += "new objj_ivar(\"" + field.name.text + "\", \"" +
+              type_name +
+              "\")"
+              let synthesized = p.synthesized_accessor_entries(
+                field,
+                class_name,
+                type_name,
+                occupied,
+                im_any,
+              )
+              if !synthesized.text.is_empty() { im_any = true }
+              emit(&im, synthesized)
+            }
+          },
+          PreprocIf(preproc) => emit(
+            &out,
+            self.deferred(
+              "#if block among ivars",
+              "build-feature environment (PHASE-8-BRIEF.md decision 4)",
+              preproc.pos,
+            ),
+          ),
+        }
+      }
+    }
+    if !first_ivar { out.text += "]);" }
+
+    // Body members: methods divert to the instance/class buffers; plain
+    // declarations print into the class block (between the ivar list and
+    // registration, as the legacy body loop does).
+    for member in implementation.members {
+      match member {
+        Method(method) => {
+          let entry = p.objj_method_entry(method, class_name)
+          match method.scope {
+            Instance => {
+              if im_any { im.text += ", " }
+              emit(&im, entry)
+              im_any = true
+            },
+            Class => {
+              if cm_any { cm.text += ", " }
+              emit(&cm, entry)
+              cm_any = true
+            },
+          }
+        },
+        Global(_) => (),
+        Empty(_) => out.text += ";\n",
+        Variable(variable) => emit(
+          &out,
+          p.variable_declaration("var", variable.declarators, ""),
+        ),
+        Function(function) => emit(
+          &out,
+          p.function_like(
+            "",
+            Some(function.name),
+            function.is_async,
+            false,
+            function.parameters,
+            function.body,
+            true,
+          ),
+        ),
+        GeneratorFunction(generator) => emit(
+          &out,
+          p.function_like(
+            "",
+            Some(generator.name),
+            generator.is_async,
+            true,
+            generator.parameters,
+            generator.body,
+            true,
+          ),
+        ),
+        PreprocDirective(directive) => emit(
+          &out,
+          self.deferred(
+            "#preproc directive in implementation",
+            "build-feature environment (PHASE-8-BRIEF.md decision 4)",
+            directive.pos,
+          ),
+        ),
+      }
+    }
+
+    // Registration and method installation; categories skip registration.
+    if implementation.category.is_none() {
+      out.text += "objj_registerClassPair(the_class);\n"
+    }
+    if im_any {
+      out.text += "class_addMethods(the_class, ["
+      emit(&out, im)
+      out.text += "]);\n"
+    }
+    if cm_any {
+      out.text += "class_addMethods(meta_class, ["
+      emit(&out, cm)
+      out.text += "]);\n"
+    }
+    out.text += "}\n"
+    out
+  }
+
+  // class_ivar_universe is the ivar → self.ivar rewrite domain: the
+  // class's own ivars plus inherited ivars of project-known superclasses
+  // (walked through ctx.symbols; external ancestors are invisible — the
+  // recorded frontier limitation).
+  fn class_ivar_universe(self, implementation: ObjjClassImplementation) -> Map<string, bool> {
+    let mut ivars = Map.new<string, bool>()
+    if let Some(instance_variables) = implementation.ivars {
+      for member in instance_variables.members {
+        if let ObjjIvarMember.Variable(variable) = member {
+          if let ObjjInstanceVariable.Field(field) = variable {
+            ivars[field.name.text] = true
+          }
+        }
+      }
+    }
+    let Some(table) = self.symbols else {
+      return ivars
+    }
+    let mut current = implementation.superclass.map_or(
+      "",
+      |identifier| identifier.text,
+    )
+    for _ in 0..64 {
+      if current.is_empty() { break }
+      let mut found = false
+      let mut next = ""
+      for class_symbol in table.classes {
+        if class_symbol.name != current { continue }
+        if class_symbol.category.is_some() { continue }
+        found = true
+        for ivar in class_symbol.ivars {
+          ivars[ivar.name] = true
+        }
+        next = class_symbol.superclass.unwrap_or("")
+        break
+      }
+      if !found { break }
+      current = next
+    }
+    ivars
+  }
+
+  // synthesized_accessor_entries emits the getter (and setter unless
+  // readonly) objj_method entries for one @accessors directive, joined
+  // onto the instance buffer.  Naming reuses phase 6's rules; an
+  // explicit method with the same selector wins silently.  The copy
+  // setter variant embeds a message send and is deferred with tier C.
+  fn synthesized_accessor_entries(
+    self,
+    field: ObjjFieldDefinition,
+    class_name: string,
+    type_name: string,
+    mut occupied: Map<string, bool>,
+    mut any: bool,
+  ) -> JsPrinted {
+    let Some(directive) = field.accessors else {
+      return text_of("")
+    }
+    let mut property = field.name.text
+    let mut getter = ""
+    let mut setter = ""
+    let mut readonly = false
+    let mut copy = false
+    for attribute in directive.attributes {
+      match attribute {
+        KeyValue(pair) => {
+          let value = accessor_name_string(pair.value)
+          if pair.key.text == "property" { property = value }
+          if pair.key.text == "getter" { getter = value }
+          if pair.key.text == "setter" { setter = value }
+        },
+        Flag(flag) => {
+          if flag.text == "readonly" { readonly = true }
+          if flag.text == "copy" { copy = true }
+        },
+      }
+    }
+    if getter.is_empty() { getter = property }
+    if setter.is_empty() { setter = default_setter_selector(property) }
+
+    let mut out = text_of("")
+    if !occupied[getter] {
+      occupied[getter] = true
+      if any { out.text += ", " }
+      any = true
+      out.text += "new objj_method(sel_getUid(\"" + getter + "\"), function $" +
+      class_name +
+      "__" +
+      getter +
+      "(self, _cmd)\n"
+      out.text += "{\n    return self." + field.name.text + ";\n}\n\n"
+      out.text += ",[\"" + type_name + "\"])"
+    }
+    if readonly { return out }
+    if occupied[setter] { return out }
+    occupied[setter] = true
+    if copy {
+      // The copy setter body is `if (ivar !== newValue) ivar = [newValue
+      // copy];` — a message send, tier C.  No corpus instance exists.
+      return JsPrinted { 
+        text: out.text,
+        diags: merge_diags(
+          out.diags,
+          [
+            diag_warn_at(
+              BuildPhase.Compile,
+              "codegen: @accessors(copy) setter deferred pending tier C dispatch",
+              self.file,
+              field.pos.row,
+              field.pos.col,
+            ),
+          ],
+        ),
+      }
+    }
+    if any { out.text += ", " }
+    let mangled = strings.ReplaceAll(setter, ":", "_")
+    out.text += "new objj_method(sel_getUid(\"" + setter + "\"), function $" +
+    class_name +
+    "__" +
+    mangled +
+    "(self, _cmd, newValue)\n"
+    out.text += "{\n    self." + field.name.text + " = newValue;\n}\n\n"
+    out.text += ",[\"void\",\"" + type_name + "\"])"
+    out
+  }
+
+  // objj_method_entry is one `new objj_method(...)` element of a
+  // class_addMethods list: selector, the $Class__selector function with
+  // self and _cmd prepended to the declared parameters, the body printed
+  // by the tier A block law, and the JSON type array.
+  fn objj_method_entry(self, method: ObjjMethodDefinition, class_name: string) -> JsPrinted {
+    let selector = method.selector.selector_string()
+    let mut types: Slice<string> = [codegen_return_type(method.return_type)]
+    let mut params: Slice<string> = []
+    if let ObjjMethodSelector.Keyword(parts) = method.selector {
+      for part in parts {
+        types = types.append(codegen_param_type(part.parameter_type))
+        params = params.append(part.parameter_name.text)
+      }
+    }
+    let mut inner = self
+    inner.in_instance_method = match method.scope {
+      Instance => true,
+      Class => false,
+    }
+    inner.locals = scope_locals([], params, block_declared_names(method.body))
+
+    let mut out = text_of("new objj_method(sel_getUid(\"" + selector + "\"), ")
+    if method.return_type.is_async { out.text += "async " }
+    out.text += "function $" + class_name + "__" +
+    strings.ReplaceAll(selector, ":", "_")
+    out.text += "(self, _cmd"
+    for param in params {
+      out.text += ", " + param
+    }
+    out.text += ")\n"
+    emit(&out, inner.block(method.body, indent_step(), false, true))
+    out.text += "\n,["
+    out.text += quoted_type_list(types)
+    out.text += "])"
+    out
+  }
+
+  fn objj_protocol(self, declaration: ObjjProtocolDeclaration) -> JsPrinted {
+    let protocol_name = declaration.name.text
+    let mut out = text_of(
+      "{var the_protocol = objj_allocateProtocol(\"" + protocol_name + "\");",
+    )
+    if let Some(list) = declaration.protocols {
+      for inherited in list.protocols {
+        out.text += "\nvar aProtocol = objj_getProtocol(\"" + inherited.text +
+        "\");"
+        // Verbatim legacy quirk: the throw names the declaring protocol,
+        // not the missing one.
+        out.text += "\nif (!aProtocol) throw new SyntaxError(\"*** Could not find definition for protocol \\\"" +
+        protocol_name +
+        "\\\"\");"
+        out.text += "\nprotocol_addProtocol(the_protocol, aProtocol);"
+      }
+    }
+    // Only required methods produce descriptions; @optional methods emit
+    // nothing (corpus-confirmed, CPCacheDelegate).
+    let mut im = ""
+    let mut cm = ""
+    let mut required = true
+    for member in declaration.members {
+      match member {
+        Optional(_) => required = false,
+        Required(_) => required = true,
+        Method(method) => {
+          if !required { continue }
+          let description = objj_method_description(method)
+          match method.scope {
+            Instance => {
+              if !im.is_empty() { im += ", " }
+              im += description
+            },
+            Class => {
+              if !cm.is_empty() { cm += ", " }
+              cm += description
+            },
+          }
+        },
+      }
+    }
+    out.text += "\nobjj_registerProtocol(the_protocol);\n"
+    if !im.is_empty() {
+      out.text += "protocol_addMethodDescriptions(the_protocol, [" + im +
+      "], true, true);\n"
+    }
+    if !cm.is_empty() {
+      out.text += "protocol_addMethodDescriptions(the_protocol, [" + cm +
+      "], true, false);\n"
+    }
+    out.text += "}"
+    out
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1774,4 +2247,326 @@ fn string_literal_inner(literal: StringLiteral) -> string {
     }
   }
   out
+}
+
+// ---------------------------------------------------------------------------
+// Tier B free helpers
+// ---------------------------------------------------------------------------
+
+// The legacy reserved set: identifiers never rewritten to self.ivar.
+fn reserved_identifier(name: string) -> bool {
+  name == "self" || name == "_cmd" || name == "__filename" ||
+  name == "undefined" ||
+  name == "localStorage" ||
+  name == "arguments"
+}
+
+fn objj_typedef_text(name: string) -> JsPrinted {
+  text_of(
+    "{var the_typedef = objj_allocateTypeDef(\"" + name +
+    "\");\nobjj_registerTypeDef(the_typedef);\n}",
+  )
+}
+
+// codegen_type is the bare-name type spelling used in objj_ivar strings
+// and method type arrays: protocol qualifiers drop (corpus-proven — no
+// `<` appears in any Foundation type string).  cst_ops's render() is the
+// diagnostic spelling and keeps them.
+fn codegen_type(objj_type: ObjjType) -> string {
+  match objj_type {
+    Protocol(protocol_type) => protocol_type.name.text,
+    MultiWord(multi_word) => multi_word.render(),
+    Id(_) => "id",
+    Named(identifier) => identifier.text,
+  }
+}
+
+fn codegen_return_type(method_type: ObjjMethodType) -> string {
+  match method_type.return_kind {
+    Action(_) => "void",
+    Void(_) => "void",
+    Type(objj_type) => codegen_type(objj_type),
+  }
+}
+
+fn codegen_param_type(parameter_type: Option<ObjjMethodType>) -> string {
+  parameter_type.map_or("id", codegen_return_type)
+}
+
+// quoted_type_list renders JSON.stringify of a type-name array: no
+// spaces, double quotes (type names never contain quote characters).
+fn quoted_type_list(types: Slice<string>) -> string {
+  "\"" + strings.Join(types, "\",\"") + "\""
+}
+
+// objj_method_description is the bodiless protocol form: Nil in place of
+// the implementation function.
+fn objj_method_description(method: ObjjMethodDeclaration) -> string {
+  let selector = method.selector.selector_string()
+  let mut types: Slice<string> = [codegen_return_type(method.return_type)]
+  if let ObjjMethodSelector.Keyword(parts) = method.selector {
+    for part in parts {
+      types = types.append(codegen_param_type(part.parameter_type))
+    }
+  }
+  "new objj_method(sel_getUid(\"" + selector + "\"), Nil\n,[" +
+  quoted_type_list(types) +
+  "])"
+}
+
+// ---------------------------------------------------------------------------
+// Scope collection — the pre-scan equivalent of the legacy's visit-order
+// registration plus retroactive hoisting correction (PHASE-8-BRIEF.md,
+// tier B law).  One scan per function scope collects every declared name
+// at any block depth; the recorded simplification is that block-scoped
+// let/const suppress ivar capture function-wide rather than block-wide.
+// ---------------------------------------------------------------------------
+
+// scope_locals builds a fresh locals list — base copied element by
+// element so sibling scopes can never alias one another's backing array.
+fn scope_locals(
+  base: Slice<string>,
+  names: Slice<string>,
+  hoisted: Slice<string>,
+) -> Slice<string> {
+  let mut out: Slice<string> = []
+  for name in base {
+    out = out.append(name)
+  }
+  for name in names {
+    out = out.append(name)
+  }
+  for name in hoisted {
+    out = out.append(name)
+  }
+  out
+}
+
+fn function_scope_locals(
+  base: Slice<string>,
+  name: Option<Identifier>,
+  parameters: FormalParameters,
+  body: StatementBlock,
+) -> Slice<string> {
+  let mut names = collect_parameter_names(parameters)
+  if let Some(identifier) = name { names = names.append(identifier.text) }
+  scope_locals(base, names, block_declared_names(body))
+}
+
+fn arrow_scope_locals(
+  base: Slice<string>,
+  parameters: ArrowParameters,
+  body: ArrowBody,
+) -> Slice<string> {
+  let names = match parameters {
+    Single(identifier) => [identifier.text],
+    List(list) => collect_parameter_names(list),
+  }
+  let hoisted = match body {
+    Block(block) => block_declared_names(block),
+    Expression(_) => [],
+  }
+  scope_locals(base, names, hoisted)
+}
+
+fn collect_parameter_names(parameters: FormalParameters) -> Slice<string> {
+  let mut names: Slice<string> = []
+  for parameter in parameters.parameters {
+    match parameter {
+      Pattern(pattern) => names = pattern_declared_names(pattern, names),
+      Assignment(assignment) => names = pattern_declared_names(
+        assignment.left.*,
+        names,
+      ),
+    }
+  }
+  names
+}
+
+fn block_declared_names(block: StatementBlock) -> Slice<string> {
+  let mut names: Slice<string> = []
+  for st in block.body {
+    names = statement_declared_names(st, names)
+  }
+  names
+}
+
+// statement_declared_names accumulates every name declared beneath a
+// statement without descending into nested function bodies (those open
+// their own scopes).
+fn statement_declared_names(st: Statement, mut names: Slice<string>) -> Slice<string> {
+  match st {
+    Declaration(declaration) => match declaration {
+      Function(function) => names.append(function.name.text),
+      GeneratorFunction(generator) => names.append(generator.name.text),
+      Class(class) => names.append(class.name.text),
+      Lexical(lexical) => declarator_names(lexical.declarators, names),
+      Variable(variable) => declarator_names(variable.declarators, names),
+      Using(using) => declarator_names(using.declarators, names),
+    },
+    BlockScope(inner) => {
+      for nested in inner.body {
+        names = statement_declared_names(nested, names)
+      }
+      names
+    },
+    If(if_st) => {
+      names = statement_declared_names(if_st.consequence.*, names)
+      if let Some(alternative) = if_st.alternative {
+        names = statement_declared_names(alternative.body.*, names)
+      }
+      names
+    },
+    Switch(switch_st) => {
+      for entry in switch_st.body.entries {
+        match entry {
+          Case(case) => {
+            for nested in case.body {
+              names = statement_declared_names(nested, names)
+            }
+          },
+          Default(default) => {
+            for nested in default.body {
+              names = statement_declared_names(nested, names)
+            }
+          },
+        }
+      }
+      names
+    },
+    For(for_st) => {
+      match for_st.initializer {
+        Lexical(lexical) => names = declarator_names(lexical.declarators, names),
+        Variable(variable) => names = declarator_names(
+          variable.declarators,
+          names,
+        ),
+        Expression(_) => (),
+        Empty(_) => (),
+      }
+      statement_declared_names(for_st.body.*, names)
+    },
+    ForIn(for_in) => {
+      if let ForBinding.Declared(declared) = for_in.header.binding {
+        match declared.left {
+          Identifier(identifier) => names = names.append(identifier.text),
+          Destructuring(pattern) => names = destructuring_declared_names(
+            pattern,
+            names,
+          ),
+        }
+      }
+      statement_declared_names(for_in.body.*, names)
+    },
+    While(while_st) => statement_declared_names(while_st.body.*, names),
+    Do(do_st) => statement_declared_names(do_st.body.*, names),
+    With(with_st) => statement_declared_names(with_st.body.*, names),
+    Labeled(labeled) => statement_declared_names(labeled.body.*, names),
+    Try(try_st) => {
+      for nested in try_st.body.body {
+        names = statement_declared_names(nested, names)
+      }
+      if let Some(handler) = try_st.handler {
+        if let Some(parameter) = handler.parameter {
+          match parameter {
+            Identifier(identifier) => names = names.append(identifier.text),
+            Destructuring(pattern) => names = destructuring_declared_names(
+              pattern,
+              names,
+            ),
+          }
+        }
+        for nested in handler.body.body {
+          names = statement_declared_names(nested, names)
+        }
+      }
+      if let Some(finalizer) = try_st.finalizer {
+        for nested in finalizer.body.body {
+          names = statement_declared_names(nested, names)
+        }
+      }
+      names
+    },
+    _ => names,
+  }
+}
+
+fn declarator_names(
+  declarators: Slice<VariableDeclarator>,
+  mut names: Slice<string>,
+) -> Slice<string> {
+  for declarator in declarators {
+    match declarator.name {
+      Identifier(identifier) => names = names.append(identifier.text),
+      Destructuring(pattern) => names = destructuring_declared_names(
+        pattern,
+        names,
+      ),
+    }
+  }
+  names
+}
+
+fn pattern_declared_names(pattern: Pattern, mut names: Slice<string>) -> Slice<string> {
+  match pattern {
+    Lhs(lhs) => match lhs {
+      Identifier(identifier) => names.append(identifier.text),
+      Destructuring(nested) => destructuring_declared_names(nested.*, names),
+      Member(_) => names,
+      Subscript(_) => names,
+      Undefined(_) => names,
+    },
+    Rest(rest) => match rest.argument.* {
+      Identifier(identifier) => names.append(identifier.text),
+      Destructuring(nested) => destructuring_declared_names(nested.*, names),
+      _ => names,
+    },
+  }
+}
+
+fn destructuring_declared_names(
+  pattern: DestructuringPattern,
+  mut names: Slice<string>,
+) -> Slice<string> {
+  match pattern {
+    Object(object) => {
+      for member in object.members {
+        match member {
+          Pair(pair) => match pair.value {
+            Pattern(value) => names = pattern_declared_names(value.*, names),
+            Assignment(value) => names = pattern_declared_names(
+              value.left.*,
+              names,
+            ),
+          },
+          Rest(rest) => {
+            if let LhsExpression.Identifier(identifier) = rest.argument.* {
+              names = names.append(identifier.text)
+            }
+          },
+          Assignment(assignment) => match assignment.left {
+            Shorthand(identifier) => names = names.append(identifier.text),
+            Destructuring(nested) => names = destructuring_declared_names(
+              nested.*,
+              names,
+            ),
+          },
+          Shorthand(identifier) => names = names.append(identifier.text),
+        }
+      }
+      names
+    },
+    Array(array) => {
+      for element in array.elements {
+        match element {
+          Pattern(value) => names = pattern_declared_names(value.*, names),
+          Assignment(value) => names = pattern_declared_names(
+            value.left.*,
+            names,
+          ),
+        }
+      }
+      names
+    },
+  }
 }

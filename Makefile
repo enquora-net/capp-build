@@ -50,6 +50,17 @@ gate:
 		"$(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources/main.j" \
 		"$(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources/main.j"
 
+# Tier B progress check: AppController.j against the legacy oracle.
+# EXPECTED TO DIVERGE until tier C lands — the divergence must sit exactly
+# at the awakeFromCib message send (legacy shows `((___r1 = self.theWindow)`,
+# ours the deferred send's bare `;`).  Anything earlier is a tier B defect.
+# --t-only: the record's t-length field necessarily differs while the
+# payload is incomplete, so compare the payloads themselves.
+gate-b:
+	-python3 payload_oracle.py diff --t-only \
+		"$(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources/AppController.j" \
+		"$(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources/AppController.j"
+
 clean:
 	rm -rf $(TARGET)/vendor
 	rm -f $(TARGET)/go.sum
