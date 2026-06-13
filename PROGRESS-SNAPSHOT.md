@@ -108,12 +108,13 @@ global-escape rewrite. `phase08_compile.lis` composes per-file records
 (imports from `unit.imports`, payload behind the debug `\n\n` prologue,
 no S record) and writes them to `Build/capp-build.build/<Mode>/Sources/`
 — a deliberately distinct directory so the legacy
-`Build/<project>.build` oracle is never clobbered. **Gate status: the
-printer's hand-traced main.j payload and full record are byte-exact
-against the legacy record (208 and 294 bytes, verified via
-payload_oracle.py); `lis check` and the binary run remain to be executed
-on the host** — the build sandbox has no Lisette toolchain, per the
-established working method.
+`Build/<project>.build` oracle is never clobbered. **Tier A gate
+PASSED June 12: `make gate` (lis build → compile toolchain_test in
+debug mode → payload_oracle.py diff) reports the main.j per-file
+record BYTE-EXACT against the legacy record, 294 bytes, S stripped.**
+AppController.j's record is written but intentionally incomplete
+(@implementation is a tier B deferral); it becomes the tier B/C
+oracle.
 
 The emitter law was *recovered, not inferred*: the legacy generator
 itself ships inside `toolchain_test/Frameworks/Objective-J/Objective-J.js`
@@ -331,18 +332,12 @@ PHASE-6-BRIEF.md):
 
 ## Next concrete work
 
-**Close the tier A gate on the host** (the sandbox session cannot run
-Lisette): `lis check`, fix any lint findings, then
-`capp-build build --mode debug` against toolchain_test and
-
-    python3 payload_oracle.py diff \
-      ~/Desktop/toolchain_test/Build/toolchain_test.build/Debug/Browser.environment/Sources/main.j \
-      ~/Desktop/toolchain_test/Build/capp-build.build/Debug/Sources/main.j
-
-(byte-exact in hand-trace simulation; the remaining risk is Lisette
-mechanics, flagged candidates: compound `+=` on struct fields, `.*`
-deref placement, `if let Clean =` on a non-prelude variant). Then tier B
-(ObjJ scaffolds, AppController.j oracle). Before or alongside it:
+**Tier A gate passed (June 12, `make gate` — the committed one-command
+gate).** Next: tier B (ObjJ structure scaffolds — implementations,
+method wrappers + type arrays, ivars, accessor bodies from the phase 6
+synthesized symbols, protocols, typedefs, conformance), oracle'd against
+AppController.j byte-exact except the message send, which is tier C.
+Before or alongside it:
 richer phase 6/7 corpus exercise, gated on phase 5 — Fieldwork after its
 2-cycle is resolved (in hand), AppKit/Foundation (30 and 7 project-local
 protocols) after source-level cycle-breaking.
