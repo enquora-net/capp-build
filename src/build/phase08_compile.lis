@@ -63,7 +63,6 @@ pub struct CompiledRecord {
 
 pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   let phase = BuildPhase.Compile
-  fmt.Println("  compile")
   let mut diags: Slice<Diagnostic> = []
 
   if let BuildMode.Clean = ctx.config.mode {
@@ -71,6 +70,8 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
       phase,
       "clean mode: artefact-directory removal deferred",
     ))
+    fmt.Println("✓  compile: clean mode, artefact-directory removal deferred")
+    print_compile_diags(diags)
     return Ok(CompileOutput { records: [], diags })
   }
 
@@ -141,7 +142,25 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   }
 
   write_records(ctx, records)?
+  print_compile_diags(diags)
   Ok(CompileOutput { records, diags })
+}
+
+// print_compile_diags surfaces each compile diagnostic in the build output,
+// mirroring phase 3's print_lowering_diag: phases print their own
+// diagnostics directly rather than relying on the orchestrator, which
+// discards them.  Positioned deferral warnings (tiers B–D) print with
+// file:line:col; positionless diagnostics print the message alone.
+fn print_compile_diags(diags: Slice<Diagnostic>) {
+  for d in diags {
+    if let Some(file) = d.file {
+      let line = d.line.unwrap_or(0)
+      let col = d.col.unwrap_or(0)
+      fmt.Println(f"   {d.message}  {file}:{line}:{col}")
+    } else {
+      fmt.Println(f"   {d.message}")
+    }
+  }
 }
 
 // record_length is the record-framing length: UTF-16 code units, counted
