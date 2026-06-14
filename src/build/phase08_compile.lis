@@ -10,35 +10,27 @@
 // Transforms each dependency-ordered Objective-J source file into a
 // per-file static record: the @STATIC;1.0; format consumed by phase 9.
 // Each record encodes the file's import declarations followed by its
-// compiled JavaScript payload.
+// compiled JavaScript payload, produced by the printer in js_print.lis.
 //
-// Tier A (June 12): the JavaScript printer (js_print.lis) is wired in.
-// The payload is the printed program behind the debug-mode prologue;
-// ObjJ constructs route through js_print's named deferral diagnostics
-// (tiers B–D), so JS-only files — main.j among them — are byte-exact
-// against the legacy oracle, and files containing ObjJ constructs are
-// explicitly incomplete.  Per PHASE-8-BRIEF.md decision 2 the records
-// carry no S (source map) record.
+// Build mode shapes the payload.  Debug prepends the legacy compiler's
+// "\n\n" prologue (the source-maps-enabled artefact) and emits the debug
+// dispatch form; release drops both.  Records carry no S (source map)
+// record in either mode (PHASE-8-BRIEF.md decision 2).
 //
-// Record framing: lengths are UTF-16 code units, not bytes (June 12
-// correction in STATIC-BLOB-FORMAT.md).  record_length counts code
-// points, which equals code units for every character in the BMP;
-// supplementary-plane characters would each need one more unit.  None
-// exist in any observed corpus, and payload_oracle.py check would
-// expose one immediately.  (Recorded decision.)
+// Record framing: lengths are UTF-16 code units, not bytes
+// (STATIC-BLOB-FORMAT.md).  record_length counts code points, which
+// equals code units for every character in the BMP; a supplementary-plane
+// character would need one more unit.  None exist in any observed corpus,
+// and payload_oracle.py check exposes the case if one appears.
 //
-// Output: each record is also written under
-// Build/capp-build.build/<Mode>/Sources/ inside the project, mirroring
-// the legacy layout under a distinct directory name so the legacy
-// Build/<project>.build oracle is never overwritten.  The tier gate is:
+// Output: each record is written under
+// Build/capp-build.build/<Mode>/Sources/ inside the project, a directory
+// name distinct from the legacy Build/<project>.build so the legacy oracle
+// is never overwritten.  The debug gate compares the two:
 //
 //   payload_oracle.py diff \
 //     <project>/Build/<project>.build/Debug/Browser.environment/Sources/main.j \
 //     <project>/Build/capp-build.build/Debug/Sources/main.j
-//
-// Deferred within phase 8 (unchanged): source maps (S records), release
-// optimisations, HTTP/2 delivery, #if evaluation, Clean-mode artefact
-// removal.
 //
 // **
 import "go:errors"
