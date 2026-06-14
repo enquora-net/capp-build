@@ -22,8 +22,29 @@
 // In both cases the output is self-contained and ready for consumption:
 // by another framework's build (Framework) or by a browser (Application).
 //
+// Delivery context (tier E).  DeliveryContext is a property of the target
+// environment, orthogonal to BuildMode, and it is consumed here — not in
+// phase 8, which composes per-file records identically for every delivery
+// form and writes them to disk:
+//
+//   HTTP1: the per-file records are concatenated into a single bundle
+//          (the @STATIC;1.0; <p;t>… e; framing below), the form a plain
+//          server delivers in one response.
+//   HTTP2: the per-file records phase 8 already wrote ARE the deliverable;
+//          multiplexing serves them individually, so no concatenation
+//          occurs.  Phase 9's remaining work in this mode is layout and
+//          the build manifest, both stubbed below.
+//
+// Bundle assembly is the tier-E-scoped fragment (PHASE-8-BRIEF.md decision
+// 5E: "phase 9 bundle assembly (trivial per STATIC-BLOB-FORMAT.md)").  The
+// framework-vs-application branching, resource copying, index.html, and
+// incremental-rebuild manifest remain stubs beyond tier E's scope.
+//
 // **
 import "go:fmt"
+import "go:os"
+import "go:path/filepath"
+import "go:unicode/utf8"
 
 pub struct ArchiveResult {
   pub output: string,
@@ -32,56 +53,144 @@ pub struct ArchiveResult {
 
 pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
   let phase = BuildPhase.Archive
-  fmt.Println("  archive")
   let mut diags: Slice<Diagnostic> = []
 
-  // TODO: determine project type from ctx and branch to the appropriate
-  //       archive strategy (Framework or Application)
+  if let BuildMode.Clean = ctx.config.mode {
+    diags = diags.append(diag_info(phase, "clean mode: nothing to archive"))
+    fmt.Println("✓  archive: clean mode, nothing to archive")
+    print_archive_diags(diags)
+    return Ok(ArchiveResult { output: ctx.root.path, diags })
+  }
+
+  let compiled = match ctx.compiled {
+    Some(c) => c,
+    None => {
+      diags = diags.append(diag_info(
+        phase,
+        "no compiled output; nothing to archive",
+      ))
+      fmt.Println("✓  archive: no compiled output, nothing to archive")
+      print_archive_diags(diags)
+      return Ok(ArchiveResult { output: ctx.root.path, diags })
+    },
+  }
+
+  let summary = match ctx.config.delivery {
+    HTTP1 => {
+      let bundle = assemble_bundle(compiled.records)
+      let out_path = bundle_output_path(ctx)
+      write_bundle(out_path, bundle)?
+      diags = diags.append(diag_info(
+        phase,
+        f"http1: {compiled.records.length()} records → {out_path}",
+      ))
+      f"http1 bundle, {compiled.records.length()} records → {out_path}"
+    },
+    HTTP2 => {
+      // The per-file records phase 8 wrote under
+      // Build/capp-build.build/<Mode>/Sources/ are the deliverable; no
+      // concatenation.  Layout and manifest remain below.
+      diags = diags.append(diag_info(
+        phase,
+        f"http2: {compiled.records.length()} per-file records are the deliverable (written by phase 8)",
+      ))
+      f"http2 per-file delivery, {compiled.records.length()} records (written by phase 8)"
+    },
+  }
+
+  // Beyond tier E (existing stubs, unchanged in intent):
+  //
+  // TODO: determine project type from ctx.project.details and branch to the
+  //       framework (.sj into <Name>/ObjJ.environment/) or application
+  //       (assembled deliverable directory) archive strategy.
   diags = diags.append(diag_info(
     phase,
-    "TODO: determine project type and select archive strategy",
+    "TODO: branch archive strategy on project type (framework vs application)",
   ))
-
-  // Framework path:
-  // TODO: create the environment output directory
-  //       (e.g. build/Foundation/ObjJ.environment/)
+  // TODO: application path — write framework .sj bundles in load order, copy
+  //       resources, write index.html.
   diags = diags.append(diag_info(
     phase,
-    "TODO: create environment output directory for framework",
+    "TODO: application deliverable assembly (frameworks, resources, index.html)",
   ))
-
-  // TODO: write @STATIC;1.0; bundle header
-  diags = diags.append(diag_info(phase, "TODO: write bundle header"))
-
-  // TODO: for each CompiledRecord in ctx.compiled.records, write a
-  //       p/<name_len>/<name> record followed by a t/<record_len>/<record>
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: write p/t record pairs for each compiled file",
-  ))
-
-  // TODO: write e; bundle terminator
-  diags = diags.append(diag_info(phase, "TODO: write bundle terminator"))
-
-  // Application path:
-  // TODO: write framework .sj bundles to output in dependency order
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: write framework bundles in load order",
-  ))
-
-  // TODO: copy application resources and write index.html
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: copy resources and write index.html",
-  ))
-
   // TODO: write build manifest recording input hashes for incremental
-  //       rebuild support by make
+  //       rebuild support by make.
   diags = diags.append(diag_info(
     phase,
-    "TODO: write build manifest for make incremental rebuilds",
+    "TODO: write build manifest for incremental rebuilds",
   ))
 
+  fmt.Println(f"✓  archive: {summary}")
+  print_archive_diags(diags)
   Ok(ArchiveResult { output: ctx.root.path, diags })
+}
+
+// print_archive_diags surfaces each archive diagnostic in the build output,
+// mirroring phase 3's print_lowering_diag: phases print their own
+// diagnostics directly rather than relying on the orchestrator, which
+// discards them.  Info diagnostics carry no position; message only.
+fn print_archive_diags(diags: Slice<Diagnostic>) {
+  for d in diags {
+    fmt.Println(f"   {d.message}")
+  }
+}
+
+// assemble_bundle concatenates per-file records into a single @STATIC;1.0;
+// bundle stream: a p (path) record then a t (text) record per compiled
+// file, in delivered order, terminated by e;.  The framing is the bundle
+// level of STATIC-BLOB-FORMAT.md; the t content is the complete per-file
+// record string phase 8 produced (itself @STATIC;1.0;-framed).
+fn assemble_bundle(records: Slice<CompiledRecord>) -> string {
+  let mut out = "@STATIC;1.0;"
+  for compiled in records {
+    out += f"p;{bundle_length(compiled.name)};{compiled.name}"
+    out += f"t;{bundle_length(compiled.record)};{compiled.record}"
+  }
+  out += "e;"
+  out
+}
+
+// bundle_length is the record-framing length: UTF-16 code units, counted as
+// code points (exact across the BMP; supplementary-plane characters would
+// each need one more unit, none exist in any observed corpus, and
+// payload_oracle.py check exposes the case).  Mirrors phase 8's
+// record_length so the two framing levels agree.
+fn bundle_length(content: string) -> int {
+  utf8.RuneCountInString(content)
+}
+
+// bundle_output_path is the destination .sj for the assembled bundle.  The
+// framework-environment layout (<Name>/ObjJ.environment/<Name>.sj) is the
+// stubbed project-type concern above; tier E writes the bundle to the build
+// directory under the mode subtree, the surface payload_oracle.py check can
+// round-trip.
+fn bundle_output_path(ctx: Ref<BuildContext>) -> string {
+  let mode_dir = match ctx.config.mode {
+    Debug => "Debug",
+    Release => "Release",
+    Clean => "Clean",
+  }
+  let name = ctx.project.map_or("bundle", |project| project.meta.name)
+  filepath.Join(
+    ctx.root.path,
+    "Build",
+    "capp-build.build",
+    mode_dir,
+    f"{name}.sj",
+  )
+}
+
+// write_bundle materialises the assembled bundle.  WriteString returns a
+// partial result; a short write is an error, and a write error takes
+// precedence over a close error (the phase 8 write_record_file convention).
+fn write_bundle(out_path: string, bundle: string) -> Result<(), error> {
+  os.MkdirAll(filepath.Dir(out_path), os.ModePerm)?
+  let file = os.Create(out_path)?
+  let written = file.WriteString(bundle)
+  let closed = file.Close()
+  match written {
+    Ok(_) => closed,
+    Err(e) => Err(e),
+    Both(_, e) => Err(e),
+  }
 }
