@@ -33,10 +33,9 @@
 //     declarations (union across #if branches — the lenient reading;
 //     a guard-aware consumer can do better once conditions evaluate).
 //
-// Deferred until the world closes (recorded June 12, see
-// PROGRESS-SNAPSHOT.md): message-send resolution, selector signature
-// verification at call sites, and variable scope/usage analysis.  All
-// three require the full framework symbol surface to avoid systematic
+// Deferred until the world closes: message-send resolution, selector
+// signature verification at call sites, and variable scope/usage analysis.
+// All three require the full framework symbol surface to avoid systematic
 // false positives, and the last requires AST dataflow that belongs with
 // phase 8 design.
 //

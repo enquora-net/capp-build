@@ -35,24 +35,17 @@
 // child; the corresponding helpers dispatch on that child.  This is grammar
 // fact, confirmed against node-types.json, not convention.
 //
-// STATUS: arms cover the toolchain_test corpus plus the full statement tier —
-//   statements:   objj_import, function_declaration, objj_class_implementation,
-//                 expression_statement, empty, debugger, return, if, for,
-//                 for-in/of, while, do, switch, try/catch/finally, throw,
-//                 with, break, continue, labeled, nested blocks, and
-//                 var/let/const declarations (identifier declarators)
-//   expressions:  identifier, literals, string, call (plain), member,
-//                 parenthesized, objj_message_expression
-//   objj:         method definitions (unary + keyword selectors), ivars with
-//                 modifiers, types (named / id / protocol-qualified /
-//                 multi-word)
-// Everything else routes through the unhandled catch-alls.  The breadth-first
-// loop is: build a corpus, read the unhandled diagnostics, add the named arms,
-// repeat — driving the diagnostic count to zero per corpus before widening.
+// Coverage: the full JavaScript statement and expression surface, the
+// Objective-J declarations (@import, @class, @global, @typedef, @protocol,
+// class implementations and categories, methods, ivars with @accessors),
+// the Objective-J expression literals (@"", @[], @{}, @selector, @ref,
+// @deref) and message sends, and the preprocessor #if grammar.  Every
+// dispatch that meets a node kind it does not implement records a named
+// unhandled diagnostic rather than dropping it.
 //
-// Deferred with visible diagnostics: template and optional-chain calls,
-// accessors directives, preprocessor blocks, and destructuring everywhere it
-// appears (parameters, declarators, for-in bindings, catch parameters).
+// Deferred behind visible diagnostics: the destructuring tier (object and
+// array patterns in declarators, parameters, for-in bindings, and catch
+// parameters), and template / optional-chain calls.
 //
 // **
 import "go:github.com/enquora-net/capp-parse"

@@ -25,7 +25,7 @@
 //   — Statement.ObjjClassForward / ObjjTypedef / ObjjGlobal: name only
 //   — ObjjImplementationMember.Global: member-level @global declarations
 //
-// Settled decisions (recorded in PROGRESS-SNAPSHOT.md, June 12 2026):
+// Settled decisions:
 //
 //   Frontier units — transitively discovered units contribute edges only
 //   (phase 4) and therefore no symbols.  AppKit, Foundation, and the other
