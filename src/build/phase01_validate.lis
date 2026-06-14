@@ -35,6 +35,7 @@
 // Info.plist is mandatory for all supported project types.
 //
 // **
+import "go:errors"
 import "go:fmt"
 import "go:os"
 import "go:path/filepath"
@@ -87,13 +88,19 @@ fn parse_plist_meta(content: string) -> Result<PlistMeta, Slice<string>> {
     (pt_opt, nm_opt, id_opt) => {
       let mut errs: Slice<string> = []
       if let None = pt_opt {
-        errs = errs.append("missing required key: CPBundlePackageType")
+        errs = errs.append(
+          "Info.plist: missing required key CPBundlePackageType — add <key>CPBundlePackageType</key><string>APPL</string> (APPL=application, FMWK=framework, THME=theme)",
+        )
       }
       if let None = nm_opt {
-        errs = errs.append("missing required key: CPBundleName")
+        errs = errs.append(
+          "Info.plist: missing required key CPBundleName — add <key>CPBundleName</key><string>YourProjectName</string>",
+        )
       }
       if let None = id_opt {
-        errs = errs.append("missing required key: CPBundleIdentifier")
+        errs = errs.append(
+          "Info.plist: missing required key CPBundleIdentifier — add <key>CPBundleIdentifier</key><string>com.yourcompany.yourproject</string>",
+        )
       }
       Err(errs)
     },
@@ -186,14 +193,14 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
       phase,
       "Info.plist not found — required for all Cappuccino projects",
     ))
-    return Ok(ValidationResult { diags })
+    return finish_validation(root, diags)
   }
 
   let content = match os.ReadFile(plist_path) {
     Ok(data) => data as string,
     Err(e) => {
       diags = diags.append(diag_error(phase, f"Info.plist unreadable: {e}"))
-      return Ok(ValidationResult { diags })
+      return finish_validation(root, diags)
     },
   }
 
@@ -204,7 +211,7 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
       for e in errs {
         diags = diags.append(diag_error(phase, e))
       }
-      return Ok(ValidationResult { diags })
+      return finish_validation(root, diags)
     },
   }
 
@@ -242,6 +249,30 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
     ctx.project = Some(ValidatedProject { meta, details: d })
   }
 
-  fmt.Println(f"✓  validate: {root}")
+  finish_validation(root, diags)
+}
+
+// finish_validation prints every accumulated diagnostic, then a success line
+// only when no Error diagnostic is present.  Phases surface their own
+// diagnostics (the orchestrator gates on them but does not print them); a
+// validation Error here halts the pipeline via build()'s diagnostic gate.
+fn finish_validation(root: string, diags: Slice<Diagnostic>) -> Result<ValidationResult, error> {
+  let mut errors = 0
+  for d in diags {
+    print_validation_diag(d)
+    if let DiagLevel.Error = d.level { errors += 1 }
+  }
+  if errors == 0 {
+    fmt.Println(f"✓  validate: {root}")
+  } else {
+    fmt.Println(f"✗  validate: {errors} error(s) — project structure invalid")
+  }
   Ok(ValidationResult { diags })
+}
+
+// print_validation_diag surfaces one validation diagnostic.  Validation
+// diagnostics are project-level and carry no source position; the message
+// is self-contained and includes corrective guidance.
+fn print_validation_diag(d: Diagnostic) {
+  fmt.Println(f"   {d.message}")
 }

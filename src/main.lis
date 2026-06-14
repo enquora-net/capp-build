@@ -21,6 +21,7 @@
 // **
 import "go:fmt"
 import "go:github.com/spf13/cobra"
+import "go:os"
 
 import "build"
 import "smoke"
@@ -165,8 +166,17 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   let cfg = build.BuildConfig { mode, delivery, source_root, grammar: "" }
 
   match build.build(cfg) {
-    Ok(result) => cmd.Println(result.message),
-    Err(e) => cmd.Println(f"build error: {e}"),
+    Ok(result) => {
+      cmd.Println(result.message)
+      // A halted build (Error diagnostics gated the pipeline) is a failed
+      // build: exit non-zero so CI and scripts observe the failure
+      // (REVIEW.md finding 4).
+      if !result.ok { os.Exit(1) }
+    },
+    Err(e) => {
+      cmd.Println(f"build error: {e}")
+      os.Exit(1)
+    },
   }
 }
 

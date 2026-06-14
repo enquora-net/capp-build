@@ -132,6 +132,42 @@ pub struct BuildResult {
   pub diags: Slice<Diagnostic>,
 }
 
+// phase_diags returns the diagnostics produced by a phase, read from the
+// ctx field that phase populates.  Exhaustive over BuildPhase: adding a
+// phase without an arm here is a compile error, the same binding the
+// architecture relies on for run().  A None field means the phase did not
+// run (an earlier phase halted), yielding no diagnostics.
+fn phase_diags(phase: BuildPhase, ctx: Ref<BuildContext>) -> Slice<Diagnostic> {
+  match phase {
+    ValidateProjectStructure => ctx.validation.map_or([], |r| r.diags),
+    WalkSourceTree => ctx.tree.map_or([], |r| r.diags),
+    ParseSources => ctx.parsed.map_or([], |r| r.diags),
+    ResolveImports => ctx.imports.map_or([], |r| r.diags),
+    TopologicalSort => ctx.sorted.map_or([], |r| r.diags),
+    BuildSymbolTable => ctx.symbols.map_or([], |r| r.diags),
+    TypeCheck => ctx.type_info.map_or([], |r| r.diags),
+    Compile => ctx.compiled.map_or([], |r| r.diags),
+    Archive => ctx.archived.map_or([], |r| r.diags),
+  }
+}
+
+// has_error returns true when any diagnostic in the slice is Error-level.
+fn has_error(diags: Slice<Diagnostic>) -> bool {
+  for d in diags {
+    if let DiagLevel.Error = d.level { return true }
+  }
+  false
+}
+
+// error_count counts Error-level diagnostics in the slice.
+fn error_count(diags: Slice<Diagnostic>) -> int {
+  let mut n = 0
+  for d in diags {
+    if let DiagLevel.Error = d.level { n += 1 }
+  }
+  n
+}
+
 // ---------------------------------------------------------------------------
 // Build pipeline
 // ---------------------------------------------------------------------------
@@ -146,6 +182,21 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
 
   for phase in BuildPhase.all() {
     phase.run(&ctx)?
+    // Gate on diagnostics: a phase that reports an Error has found the
+    // project unbuildable from this point.  Halt before dependent phases
+    // run on its incomplete result (REVIEW.md finding 1).  The phase has
+    // already printed its own diagnostics; here we stop and report.
+    let diags = phase_diags(phase, &ctx)
+    if has_error(diags) {
+      let n = error_count(diags)
+      return Ok(
+        BuildResult { 
+          ok: false,
+          message: f"build halted: {n} error(s) in {phase_name(phase)}",
+          diags,
+        },
+      )
+    }
   }
 
   let file_count = ctx.tree.map_or(0, |t| t.files.length())
@@ -159,4 +210,19 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   )
 
   Ok(BuildResult { ok: true, message: f"build complete: {ctx.root.path}", .. })
+}
+
+// phase_name renders a phase for halt messages.
+fn phase_name(phase: BuildPhase) -> string {
+  match phase {
+    ValidateProjectStructure => "validate project structure",
+    WalkSourceTree => "walk source tree",
+    ParseSources => "parse sources",
+    ResolveImports => "resolve imports",
+    TopologicalSort => "topological sort",
+    BuildSymbolTable => "build symbol table",
+    TypeCheck => "type check",
+    Compile => "compile",
+    Archive => "archive",
+  }
 }
