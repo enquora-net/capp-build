@@ -1110,9 +1110,8 @@ impl Lowering {
 
   // variable_declarator: the initializer arrives in the `value` field; the
   // grammar has no initializer node, so Initializer.pos anchors at the value
-  // expression (decided 2026-06-10).  An unhandled initializer expression
-  // records its diagnostic and leaves the declarator bare rather than
-  // discarding it.
+  // expression.  An unhandled initializer expression records its diagnostic
+  // and leaves the declarator bare rather than discarding it.
   fn variable_declarator(self, node: capp.CSTNode) -> (Option<VariableDeclarator>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []

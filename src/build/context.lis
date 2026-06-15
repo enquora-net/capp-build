@@ -101,15 +101,41 @@ pub struct PlistMeta {
 }
 
 // ---------------------------------------------------------------------------
-// ProjectKind — convenience enum
+// ProjectKind — typed kind and string boundary
 // ---------------------------------------------------------------------------
 
-// ProjectKind is a convenience enum for contexts that need only the kind
-// without the payload, derivable from any ProjectDetails variant.
+// ProjectKind is the typed project kind: the discriminant of ProjectDetails
+// without its payload, for the boundary where a kind is read or written
+// without structural evidence in hand.
 pub enum ProjectKind {
   Application,
   Framework,
   Theme,
+}
+
+// parse_package_type converts the on-disk CPBundlePackageType string to the
+// typed ProjectKind.  This is the single boundary where the stringly value
+// becomes typed; everything inward of it matches over ProjectKind.  An
+// unrecognised string is None, which the caller surfaces as a validation
+// error rather than a silent fall-through.
+pub fn parse_package_type(s: string) -> Option<ProjectKind> {
+  match s {
+    "APPL" => Some(ProjectKind.Application),
+    "FMWK" => Some(ProjectKind.Framework),
+    "THME" => Some(ProjectKind.Theme),
+    _ => None,
+  }
+}
+
+// package_type_string is the inverse: the CPBundlePackageType string written
+// to Info.plist for a given kind.  Exhaustive over ProjectKind, so a new
+// variant is a compile error here until its serialised form is given.
+pub fn package_type_string(kind: ProjectKind) -> string {
+  match kind {
+    Application => "APPL",
+    Framework => "FMWK",
+    Theme => "THME",
+  }
 }
 
 // ---------------------------------------------------------------------------

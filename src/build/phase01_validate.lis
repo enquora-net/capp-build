@@ -14,10 +14,19 @@
 // guarantees that the project is structurally valid.  It unifies project
 // identity (PlistMeta) with kind-specific structural evidence (ProjectDetails).
 //
-// Three typed constructors enforce the structural contracts:
+// Identity keys are completed before validation proceeds:
 //
-//   parse_plist_meta         — constructs PlistMeta only when all required
-//                              Info.plist keys are present
+//   ensure_plist_meta        — resolves CPBundlePackageType to a typed
+//                              ProjectKind (declared, inferred, or
+//                              unrecognised) and reads CPBundleName and
+//                              CPBundleIdentifier, deriving any the plist omits
+//                              (name from the project directory, identifier
+//                              from a placeholder organisation).  The derived
+//                              keys are written back into Info.plist so the
+//                              descriptor is complete on disk; the plist stays
+//                              ground truth wherever it declares a value.
+//
+// Two typed constructors enforce the kind-specific structural contracts:
 //
 //   validate_framework_roots — constructs FrameworkRoots only when both
 //                              Frameworks/Foundation and Frameworks/AppKit
@@ -28,8 +37,8 @@
 //                              its existence proves an Application project
 //                              is ready for compilation
 //
-// Each constructor returns Result<T, Slice<string>>, accumulating all
-// defects before returning so the developer sees the full picture.
+// The structural constructors return Result<T, Slice<string>>, accumulating
+// all defects before returning so the developer sees the full picture.
 // No mutable references are threaded through helper functions.
 //
 // Info.plist is mandatory for all supported project types.
@@ -43,6 +52,66 @@ import "go:strings"
 
 pub struct ValidationResult {
   pub diags: Slice<Diagnostic>,
+}
+
+// infer_package_type determines the project kind when the Info.plist does not
+// declare it.  Application is the only kind with a definite structural
+// signature today, and the dominant case, so it is the result; framework and
+// theme inference is deferred to iterative tightening, which will reintroduce
+// the structural parameters it needs.  The plist remains ground truth when it
+// declares a type — this is consulted only to fill an absent
+// CPBundlePackageType.
+fn infer_package_type() -> ProjectKind {
+  ProjectKind.Application
+}
+
+// derived_name is the default CPBundleName: the project directory basename.
+fn derived_name(root: string) -> string {
+  filepath.Base(root)
+}
+
+// derived_identifier is the default CPBundleIdentifier: a reverse-DNS string
+// from a placeholder organisation and the project name.  Metadata only;
+// nothing downstream parses it.  Subject to iterative improvement.
+fn derived_identifier(root: string) -> string {
+  f"com.yourorganization.{filepath.Base(root)}"
+}
+
+// PlistPair is one derived key/value written into Info.plist.
+struct PlistPair { key: string, value: string }
+
+// plist_insert_keys inserts the given key/value pairs into the plist's root
+// <dict>, immediately after its opening tag, and returns the new content.
+// The hand scanner matches plist_string's level of sophistication; a real
+// plist library replaces both when plist editing becomes broadly
+// load-bearing.  Pairs whose value is empty are skipped.
+fn plist_insert_keys(content: string, pairs: Slice<PlistPair>) -> string {
+  let Some(dict_idx) = strings.Index(content, "<dict>") else {
+    return content
+  }
+  let insert_at = dict_idx + "<dict>".length()
+  let mut block = ""
+  for pair in pairs {
+    if pair.value.is_empty() { continue }
+    block += f"\n\t<key>{pair.key}</key>\n\t<string>{pair.value}</string>"
+  }
+  if block.is_empty() { return content }
+  content.substring(..insert_at) + block + content.substring(insert_at..)
+}
+
+// write_plist overwrites Info.plist with the completed content.  It mirrors
+// phase 8's write_record_file: WriteString returns a Partial (bytes written
+// and error), so a short write is an error and a write error takes precedence
+// over a close error.
+fn write_plist(plist_path: string, content: string) -> Result<(), error> {
+  let file = os.Create(plist_path)?
+  let written = file.WriteString(content)
+  let closed = file.Close()
+  match written {
+    Ok(_) => closed,
+    Err(e) => Err(e),
+    Both(_, e) => Err(e),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -72,39 +141,75 @@ fn plist_string(content: string, key: string) -> Option<string> {
 // Typed constructors
 // ---------------------------------------------------------------------------
 
-// parse_plist_meta constructs PlistMeta from plist content.
-// All three required keys are checked before construction occurs.
-// PlistMeta can only be constructed in the branch where all are present.
-// Returns Err with all missing-key messages when any are absent.
-fn parse_plist_meta(content: string) -> Result<PlistMeta, Slice<string>> {
-  let pt = plist_string(content, "CPBundlePackageType")
-  let nm = plist_string(content, "CPBundleName")
-  let id = plist_string(content, "CPBundleIdentifier")
+// PlistFixup carries the outcome of completing the plist's identity keys:
+// the resolved kind, the name and identifier, and the pairs derived to fill
+// absent keys.  kind is a PackageTypeResolution because a declared but
+// unrecognised CPBundlePackageType is a distinct outcome from a valid or an
+// inferred one, and the caller matches all three exhaustively.
+struct PlistFixup {
+  kind: PackageTypeResolution,
+  name: string,
+  identifier: string,
+  filled: Slice<PlistPair>,
+}
 
-  match (pt, nm, id) {
-    (Some(package_type), Some(name), Some(identifier)) => Ok(
-      PlistMeta { package_type, name, identifier },
-    ),
-    (pt_opt, nm_opt, id_opt) => {
-      let mut errs: Slice<string> = []
-      if let None = pt_opt {
-        errs = errs.append(
-          "Info.plist: missing required key CPBundlePackageType — add <key>CPBundlePackageType</key><string>APPL</string> (APPL=application, FMWK=framework, THME=theme)",
-        )
+// PackageTypeResolution is the outcome of resolving CPBundlePackageType.
+//   Declared  — the plist named a recognised kind.
+//   Inferred  — the plist omitted the key; the kind was inferred and filled.
+//   Unknown   — the plist named a string that is not a recognised kind; the
+//               raw value is carried for the diagnostic.
+enum PackageTypeResolution {
+  Declared(ProjectKind),
+  Inferred(ProjectKind),
+  Unknown(string),
+}
+
+// resolve_package_type reads CPBundlePackageType and classifies it: a
+// recognised declaration is Declared, an absent key is inferred and recorded
+// for fill, an unrecognised declaration is Unknown.  The plist stays ground
+// truth wherever it declares a recognised kind — inference fills only an
+// absent key, never overrides a declaration.
+fn resolve_package_type(content: string) -> (PackageTypeResolution, Slice<PlistPair>) {
+  plist_string(content, "CPBundlePackageType").map_or_else(
+    || {
+      let kind = infer_package_type()
+      let pair = PlistPair { 
+        key: "CPBundlePackageType",
+        value: package_type_string(kind),
       }
-      if let None = nm_opt {
-        errs = errs.append(
-          "Info.plist: missing required key CPBundleName — add <key>CPBundleName</key><string>YourProjectName</string>",
-        )
-      }
-      if let None = id_opt {
-        errs = errs.append(
-          "Info.plist: missing required key CPBundleIdentifier — add <key>CPBundleIdentifier</key><string>com.yourcompany.yourproject</string>",
-        )
-      }
-      Err(errs)
+      (PackageTypeResolution.Inferred(kind), [pair])
     },
-  }
+    |declared| parse_package_type(declared).map_or_else(
+      || (PackageTypeResolution.Unknown(declared), []),
+      |kind| (PackageTypeResolution.Declared(kind), []),
+    ),
+  )
+}
+
+// ensure_plist_meta resolves the three identity keys, deriving a value for any
+// the plist omits: CPBundlePackageType by resolve_package_type, CPBundleName
+// from the project directory, CPBundleIdentifier from a placeholder
+// organisation and the project name.  It returns the resolved kind, the name
+// and identifier, and the pairs to write back; the caller writes them and
+// records what it filled.
+fn ensure_plist_meta(content: string, root: string) -> PlistFixup {
+  let (kind, kind_filled) = resolve_package_type(content)
+  let mut filled = kind_filled
+
+  let name = plist_string(content, "CPBundleName").unwrap_or_else(|| {
+    let derived = derived_name(root)
+    filled = filled.append(PlistPair { key: "CPBundleName", value: derived })
+    derived
+  })
+  let identifier = plist_string(content, "CPBundleIdentifier").unwrap_or_else(|| {
+    let derived = derived_identifier(root)
+    filled = filled.append(
+      PlistPair { key: "CPBundleIdentifier", value: derived },
+    )
+    derived
+  })
+
+  PlistFixup { kind, name, identifier, filled }
 }
 
 // validate_framework_roots constructs FrameworkRoots for an Application project.
@@ -204,22 +309,61 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
     },
   }
 
-  // Construct PlistMeta — all required keys must be present
-  let meta = match parse_plist_meta(content) {
-    Ok(m) => m,
-    Err(errs) => {
-      for e in errs {
-        diags = diags.append(diag_error(phase, e))
-      }
+  // Resolve identity keys, deriving and filling any the plist omits.  A plist
+  // that already declares all three is read unchanged and nothing is written.
+  let fixup = ensure_plist_meta(content, root)
+
+  // Resolve the package type to a typed ProjectKind.  A recognised
+  // declaration and an inferred kind both yield a kind; an unrecognised
+  // declaration is the one error path — the plist named a string that is not
+  // a kind, which inference must not silently override.
+  let kind = match fixup.kind {
+    Declared(k) => k,
+    Inferred(k) => k,
+    Unknown(raw) => {
+      diags = diags.append(diag_error(
+        phase,
+        f"Info.plist: unrecognised CPBundlePackageType \"{raw}\" — expected APPL, FMWK, or THME",
+      ))
       return finish_validation(root, diags)
     },
   }
 
-  // Match on CPBundlePackageType to select the appropriate ProjectDetails
-  // constructor.  The variant IS the kind; construction only succeeds when
-  // all structural evidence for that kind is present.
-  let details = match meta.package_type {
-    "APPL" => match validate_application(root) {
+  let meta = PlistMeta { 
+    package_type: package_type_string(kind),
+    name: fixup.name,
+    identifier: fixup.identifier,
+  }
+
+  // Write derived keys back into Info.plist so the descriptor is complete on
+  // disk, then record each fill.  A write failure is non-fatal: validation
+  // proceeds on the in-memory meta, with the failure surfaced as a warning.
+  if !fixup.filled.is_empty() {
+    let updated = plist_insert_keys(content, fixup.filled)
+    match write_plist(plist_path, updated) {
+      Ok(_) => {
+        for pair in fixup.filled {
+          diags = diags.append(diag_info(
+            phase,
+            f"Info.plist: filled absent {pair.key} with derived value \"{pair.value}\"",
+          ))
+        }
+      },
+      Err(e) => {
+        diags = diags.append(diag_warn(
+          phase,
+          f"Info.plist: could not write derived keys ({e}); proceeding with in-memory values",
+        ))
+      },
+    }
+  }
+
+  // Select the ProjectDetails constructor for the kind.  The match is
+  // exhaustive over ProjectKind with no catch-all: a new kind is a compile
+  // error here until its structural contract is given.  Construction succeeds
+  // only when the evidence for that kind is present.
+  let details = match kind {
+    Application => match validate_application(root) {
       Ok(app) => Some(ProjectDetails.Application(app)),
       Err(errs) => {
         for e in errs {
@@ -228,18 +372,8 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
         None
       },
     },
-
-    "FMWK" => Some(ProjectDetails.Framework),
-
-    "THME" => Some(ProjectDetails.Theme),
-
-    _ => {
-      diags = diags.append(diag_error(
-        phase,
-        f"Info.plist: unrecognised CPBundlePackageType \"{meta.package_type}\"",
-      ))
-      None
-    },
+    Framework => Some(ProjectDetails.Framework),
+    Theme => Some(ProjectDetails.Theme),
   }
 
   // Construct ValidatedProject only when both meta and details are present.
