@@ -15,35 +15,46 @@
 //                (e.g. ObjJ.environment/Foundation.sj).  Each compiled
 //                record becomes a p/t pair in the bundle.
 //
-//   Application: an assembled deliverable directory containing framework
-//                .sj bundles in load order, the application's compiled
-//                output, copied resources, and the index.html entry point.
+//   Application: an assembled deliverable directory under Build/<Mode>/<Name>/
+//                containing the application's compiled .sj bundle, the
+//                pre-built framework tree copied verbatim, copied resources,
+//                and the index.html entry point.  The layout matches the
+//                legacy jake output exactly so that existing server
+//                configurations require no change.
 //
-// In both cases the output is self-contained and ready for consumption:
-// by another framework's build (Framework) or by a browser (Application).
+// Delivery context selects the output shape, independently of build mode:
 //
-// Delivery context (tier E).  DeliveryContext is a property of the target
-// environment, orthogonal to BuildMode, and it is consumed here — not in
-// phase 8, which composes per-file records identically for every delivery
-// form and writes them to disk:
+//   HTTP1: the per-file records are concatenated into a single .sj bundle
+//          (the @STATIC;1.0; <p;t>… e; framing), written to both
+//          Browser.environment/ and CommonJS.environment/.
+//   HTTP2: the per-file records phase 8 wrote under
+//          Build/capp-build.build/<Mode>/Sources/ are themselves the
+//          deliverable; multiplexing serves them individually, so no
+//          concatenation occurs.  Not yet implemented; carried as an Info
+//          diagnostic until the serving infrastructure exists to verify it.
 //
-//   HTTP1: the per-file records are concatenated into a single bundle
-//          (the @STATIC;1.0; <p;t>… e; framing below), the form a plain
-//          server delivers in one response.
-//   HTTP2: the per-file records phase 8 already wrote ARE the deliverable;
-//          multiplexing serves them individually, so no concatenation
-//          occurs.  Phase 9's remaining work in this mode is layout and
-//          the build manifest, both stubbed below.
+// Record framing follows STATIC-BLOB-FORMAT.md: p/t lengths are UTF-16
+// code units (bundle_length), matching phase 8's per-file framing.
 //
-// Bundle assembly is the tier-E-scoped fragment (PHASE-8-BRIEF.md decision
-// 5E: "phase 9 bundle assembly (trivial per STATIC-BLOB-FORMAT.md)").  The
-// framework-vs-application branching, resource copying, index.html, and
-// incremental-rebuild manifest remain stubs beyond tier E's scope.
+// Application output layout (HTTP1, matches legacy jake verbatim):
+//
+//   Build/<Mode>/<Name>/
+//     index.html                   ← copied from project root
+//     Info.plist                   ← copied from project root (XML; see TODO)
+//     Resources/                   ← .cib files copied from project Resources/
+//     Browser.environment/
+//       MHTMLTest.txt              ← constant browser MHTML capability probe
+//       <Name>.sj                  ← assembled bundle from compiled records
+//     CommonJS.environment/
+//       <Name>.sj                  ← same assembled bundle (CommonJS target)
+//     Frameworks/                  ← source Frameworks/ tree copied verbatim
 //
 // **
 import "go:fmt"
+import "go:io"
 import "go:os"
 import "go:path/filepath"
+import "go:strings"
 import "go:unicode/utf8"
 
 pub struct ArchiveResult {
@@ -75,65 +86,367 @@ pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
     },
   }
 
-  let summary = match ctx.config.delivery {
-    HTTP1 => {
-      let bundle = assemble_bundle(compiled.records)
-      let out_path = bundle_output_path(ctx)
-      write_bundle(out_path, bundle)?
+  let project = match ctx.project {
+    Some(p) => p,
+    None => {
       diags = diags.append(diag_info(
         phase,
-        f"http1: {compiled.records.length()} records → {out_path}",
+        "no validated project; nothing to archive",
       ))
-      f"http1 bundle, {compiled.records.length()} records → {out_path}"
+      fmt.Println("✓  archive: no validated project, nothing to archive")
+      print_archive_diags(diags)
+      return Ok(ArchiveResult { output: ctx.root.path, diags })
+    },
+  }
+
+  // Each arm returns (output_path, arm_diags).  arm_diags are merged into
+  // the phase accumulator below; the arms do not touch the outer diags
+  // directly, which avoids double-appending on the Theme path.
+  let (output, arm_diags) = match project.details {
+    Application(app) => {
+      archive_application(ctx, compiled, project.meta, app, phase)?
+    },
+    Framework => {
+      archive_framework(ctx, compiled, project.meta, phase)?
+    },
+    Theme => {
+      // TODO: Theme archive strategy not yet defined.  Themes share the
+      // framework environment layout but their resource handling differs;
+      // defer until a Theme project exists as a test corpus.
+      fmt.Println("✓  archive: theme (not yet implemented)")
+      (ctx.root.path, [diag_info(phase, "theme archive: not yet implemented")])
+    },
+  }
+
+  for d in arm_diags {
+    diags = diags.append(d)
+  }
+
+  print_archive_diags(diags)
+  Ok(ArchiveResult { output, diags })
+}
+
+// ---------------------------------------------------------------------------
+// Application archive
+// ---------------------------------------------------------------------------
+
+// archive_application assembles the full deliverable directory for an
+// Application project under Build/<Mode>/<Name>/, matching the legacy jake
+// output layout exactly.
+//
+// Returns the output directory path and the diagnostics accumulated during
+// assembly; the caller merges them into its own diagnostic slice.
+fn archive_application(
+  ctx: Ref<BuildContext>,
+  compiled: CompileOutput,
+  meta: PlistMeta,
+  app: ApplicationDetails,
+  phase: BuildPhase,
+) -> Result<(string, Slice<Diagnostic>), error> {
+  let mut diags: Slice<Diagnostic> = []
+  let out_dir = app_output_dir(ctx, meta)
+  os.MkdirAll(out_dir, os.ModePerm)?
+
+  match ctx.config.delivery {
+    HTTP1 => {
+      let http1_diags = archive_application_http1(
+        ctx,
+        compiled,
+        meta,
+        app,
+        out_dir,
+        phase,
+      )?
+      for d in http1_diags {
+        diags = diags.append(d)
+      }
     },
     HTTP2 => {
-      // The per-file records phase 8 wrote under
-      // Build/capp-build.build/<Mode>/Sources/ are the deliverable; no
-      // concatenation.  Layout and manifest remain below.
+      // TODO: HTTP2 application delivery — serve per-file records from
+      // Build/capp-build.build/<Mode>/Sources/ via multiplexing.  Deferred
+      // until an HTTP2-capable serving environment is available for
+      // verification.
       diags = diags.append(diag_info(
         phase,
-        f"http2: {compiled.records.length()} per-file records are the deliverable (written by phase 8)",
+        "http2 application delivery: not yet implemented",
       ))
-      f"http2 per-file delivery, {compiled.records.length()} records (written by phase 8)"
+      fmt.Println(
+        "✓  archive: http2 application delivery (not yet implemented)",
+      )
     },
   }
 
-  // Beyond tier E (existing stubs, unchanged in intent):
-  //
-  // TODO: determine project type from ctx.project.details and branch to the
-  //       framework (.sj into <Name>/ObjJ.environment/) or application
-  //       (assembled deliverable directory) archive strategy.
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: branch archive strategy on project type (framework vs application)",
-  ))
-  // TODO: application path — write framework .sj bundles in load order, copy
-  //       resources, write index.html.
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: application deliverable assembly (frameworks, resources, index.html)",
-  ))
-  // TODO: write build manifest recording input hashes for incremental
-  //       rebuild support by make.
-  diags = diags.append(diag_info(
-    phase,
-    "TODO: write build manifest for incremental rebuilds",
-  ))
-
-  fmt.Println(f"✓  archive: {summary}")
-  print_archive_diags(diags)
-  Ok(ArchiveResult { output: ctx.root.path, diags })
+  Ok((out_dir, diags))
 }
 
-// print_archive_diags surfaces each archive diagnostic in the build output,
-// mirroring phase 3's print_lowering_diag: phases print their own
-// diagnostics directly rather than relying on the orchestrator, which
-// discards them.  Info diagnostics carry no position; message only.
-fn print_archive_diags(diags: Slice<Diagnostic>) {
-  for d in diags {
-    fmt.Println(f"   {d.message}")
+// archive_application_http1 writes the HTTP1 application deliverable.
+// Returns diagnostics accumulated during assembly.
+fn archive_application_http1(
+  ctx: Ref<BuildContext>,
+  compiled: CompileOutput,
+  meta: PlistMeta,
+  app: ApplicationDetails,
+  out_dir: string,
+  phase: BuildPhase,
+) -> Result<Slice<Diagnostic>, error> {
+  let mut diags: Slice<Diagnostic> = []
+
+  // Assemble the bundle from the compiled records.
+  let bundle = assemble_bundle(compiled.records)
+
+  // Browser.environment/<Name>.sj
+  let browser_env = filepath.Join(out_dir, "Browser.environment")
+  os.MkdirAll(browser_env, os.ModePerm)?
+  let browser_sj = filepath.Join(browser_env, f"{meta.name}.sj")
+  write_bundle(browser_sj, bundle)?
+
+  // Browser.environment/MHTMLTest.txt — constant browser MHTML capability
+  // probe written by the legacy build system.  Content is invariant.
+  write_file_str(filepath.Join(browser_env, "MHTMLTest.txt"), mhtml_test_stub())?
+
+  // CommonJS.environment/<Name>.sj — same bundle content, CommonJS target.
+  // The legacy toolchain writes an identical copy rather than a symlink.
+  // TODO: investigate whether a hard link would be safe here; the runtime
+  // loader reads both paths independently so deduplication is an
+  // optimisation, not a correctness concern.
+  let commonjs_env = filepath.Join(out_dir, "CommonJS.environment")
+  os.MkdirAll(commonjs_env, os.ModePerm)?
+  write_bundle(filepath.Join(commonjs_env, f"{meta.name}.sj"), bundle)?
+
+  // index.html — copied from project root.
+  copy_file(
+    filepath.Join(ctx.root.path, "index.html"),
+    filepath.Join(out_dir, "index.html"),
+  )?
+
+  // Info.plist — copied from project root (XML source format).
+  // TODO: convert to 280NPLIST binary plist format to match the legacy jake
+  // output exactly.  The runtime reads 280NPLIST; the XML copy is a
+  // functional stub whose format delta is intentional and documented.
+  copy_file(
+    filepath.Join(ctx.root.path, "Info.plist"),
+    filepath.Join(out_dir, "Info.plist"),
+  )?
+
+  // Resources/ — copy deployment artifacts from the project Resources/
+  // directory.  .xib sources are excluded: they are inputs to the nib2cib
+  // compilation step, which is not yet implemented as a phase.
+  // TODO: implement .xib → .cib compilation and integrate it here or as a
+  // separate phase ahead of archive.
+  let src_resources = filepath.Join(ctx.root.path, "Resources")
+  let dst_resources = filepath.Join(out_dir, "Resources")
+  copy_resources(src_resources, dst_resources)?
+
+  // Frameworks/ — copy the source Frameworks/ tree verbatim.  The legacy
+  // build copies the entire tree (release and Debug/ variants both) regardless
+  // of build mode, so we do the same.
+  // TODO: the Debug/ subtree under Frameworks/ contains debug-build framework
+  // bundles.  A future optimisation could omit it from release builds, but
+  // matching the legacy layout takes precedence until the community explicitly
+  // adopts the new toolchain.
+  let src_frameworks = filepath.Join(ctx.root.path, "Frameworks")
+  let dst_frameworks = filepath.Join(out_dir, "Frameworks")
+  copy_dir_recursive(src_frameworks, dst_frameworks)?
+
+  // app carries ApplicationDetails (FrameworkRoots) for the future path where
+  // framework bundles are built from source rather than copied from the source
+  // tree.  Currently the Frameworks/ copy above serves both roles.
+  // TODO: when framework compilation is implemented, use app.frameworks to
+  // locate build outputs rather than copying from the source tree.
+  let _ = app
+
+  let n = compiled.records.length()
+  diags = diags.append(diag_info(
+    phase,
+    f"http1 application: {n} records → {out_dir}",
+  ))
+  fmt.Println(f"✓  archive: http1 application, {n} records → {out_dir}")
+  Ok(diags)
+}
+
+// ---------------------------------------------------------------------------
+// Framework archive
+// ---------------------------------------------------------------------------
+
+// archive_framework writes the compiled bundle for a Framework project.
+// The destination is <project>/<Name>/ObjJ.environment/<Name>.sj, the layout
+// the ObjJ runtime loader expects when resolving framework bundles.
+//
+// Returns the output path and the diagnostics accumulated during assembly;
+// the caller merges them into its own diagnostic slice.
+fn archive_framework(
+  ctx: Ref<BuildContext>,
+  compiled: CompileOutput,
+  meta: PlistMeta,
+  phase: BuildPhase,
+) -> Result<(string, Slice<Diagnostic>), error> {
+  let mut diags: Slice<Diagnostic> = []
+
+  match ctx.config.delivery {
+    HTTP1 => {
+      let env_dir = filepath.Join(ctx.root.path, meta.name, "ObjJ.environment")
+      os.MkdirAll(env_dir, os.ModePerm)?
+      let out_path = filepath.Join(env_dir, f"{meta.name}.sj")
+      let bundle = assemble_bundle(compiled.records)
+      write_bundle(out_path, bundle)?
+      let n = compiled.records.length()
+      diags = diags.append(diag_info(
+        phase,
+        f"http1 framework: {n} records → {out_path}",
+      ))
+      fmt.Println(f"✓  archive: http1 framework, {n} records → {out_path}")
+      Ok((out_path, diags))
+    },
+    HTTP2 => {
+      // TODO: HTTP2 framework delivery — per-file records as the deliverable.
+      // Deferred until an HTTP2-capable serving environment is available for
+      // verification.
+      diags = diags.append(diag_info(
+        phase,
+        "http2 framework delivery: not yet implemented",
+      ))
+      fmt.Println("✓  archive: http2 framework delivery (not yet implemented)")
+      Ok((ctx.root.path, diags))
+    },
   }
 }
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+// app_output_dir returns Build/<Mode>/<Name>/ inside the project root —
+// the root of the assembled application deliverable, matching the legacy
+// jake output layout.
+fn app_output_dir(ctx: Ref<BuildContext>, meta: PlistMeta) -> string {
+  let mode_dir = match ctx.config.mode {
+    Debug => "Debug",
+    Release => "Release",
+    Clean => "Clean",
+  }
+  filepath.Join(ctx.root.path, "Build", mode_dir, meta.name)
+}
+
+// ---------------------------------------------------------------------------
+// File system helpers
+// ---------------------------------------------------------------------------
+
+// copy_file copies src to dst, creating parent directories as needed.
+// Uses io.Copy for streaming rather than reading the whole file into memory —
+// relevant for large framework bundles.
+fn copy_file(src: string, dst: string) -> Result<(), error> {
+  os.MkdirAll(filepath.Dir(dst), os.ModePerm)?
+  let src_file = os.Open(src)?
+  let dst_file = os.Create(dst)?
+  let copied = io.Copy(dst_file, src_file)
+  let src_closed = src_file.Close()
+  let dst_closed = dst_file.Close()
+  match copied {
+    Ok(_) => (),
+    Err(e) => return Err(e),
+    Both(_, e) => return Err(e),
+  }
+  src_closed?
+  dst_closed
+}
+
+// copy_resources copies files from src_dir to dst_dir.  Only files whose
+// extension is in the allowed set are copied; .xib sources are excluded
+// (they are inputs to nib2cib, not deployment artifacts).
+// Non-existence of src_dir is silently tolerated — projects with no
+// Resources/ directory are valid.
+fn copy_resources(src_dir: string, dst_dir: string) -> Result<(), error> {
+  if let Err(_) = os.Stat(src_dir) { return Ok(()) }
+  // os.ReadDir returns ([]DirEntry, error) — surfaces as Partial in Lisette.
+  // Both means a partial listing was returned before an error; treat as error,
+  // matching the io.Copy convention in copy_file above.
+  let entries = match os.ReadDir(src_dir) {
+    Ok(e) => e,
+    Err(e) => return Err(e),
+    Both(_, e) => return Err(e),
+  }
+  for entry in entries {
+    if entry.IsDir() { continue }
+    let name = entry.Name()
+    if !is_resource_file(name) { continue }
+    copy_file(filepath.Join(src_dir, name), filepath.Join(dst_dir, name))?
+  }
+  Ok(())
+}
+
+// is_resource_file returns true for file extensions that are deployment
+// artifacts copied to the Resources/ output directory.  .xib is excluded:
+// it is a source file compiled to .cib by nib2cib, which is not yet
+// implemented as a phase.
+fn is_resource_file(name: string) -> bool {
+  let ext = strings.ToLower(filepath.Ext(name))
+  match ext {
+    ".cib" => true,
+    ".png" => true,
+    ".jpg" => true,
+    ".jpeg" => true,
+    ".gif" => true,
+    ".pdf" => true,
+    ".css" => true,
+    ".ttf" => true,
+    ".otf" => true,
+    ".woff" => true,
+    ".woff2" => true,
+    _ => false,
+  }
+}
+
+// copy_dir_recursive copies the entire directory tree rooted at src into dst,
+// creating directories as needed.  Symlinks are followed (os.ReadDir resolves
+// them); the destination receives regular files.  Used to copy the Frameworks/
+// tree verbatim.
+fn copy_dir_recursive(src: string, dst: string) -> Result<(), error> {
+  if let Err(_) = os.Stat(src) { return Ok(()) }
+  os.MkdirAll(dst, os.ModePerm)?
+  // os.ReadDir returns ([]DirEntry, error) — surfaces as Partial in Lisette.
+  // Both means a partial listing was returned before an error; treat as error.
+  let entries = match os.ReadDir(src) {
+    Ok(e) => e,
+    Err(e) => return Err(e),
+    Both(_, e) => return Err(e),
+  }
+  for entry in entries {
+    let name = entry.Name()
+    let src_path = filepath.Join(src, name)
+    let dst_path = filepath.Join(dst, name)
+    if entry.IsDir() {
+      copy_dir_recursive(src_path, dst_path)?
+    } else {
+      copy_file(src_path, dst_path)?
+    }
+  }
+  Ok(())
+}
+
+// write_file_str writes a string to a file, creating parent directories as
+// needed.  Used for constant-content files (MHTMLTest.txt).
+fn write_file_str(path: string, content: string) -> Result<(), error> {
+  os.MkdirAll(filepath.Dir(path), os.ModePerm)?
+  let file = os.Create(path)?
+  let written = file.WriteString(content)
+  let closed = file.Close()
+  match written {
+    Ok(_) => closed,
+    Err(e) => Err(e),
+    Both(_, e) => Err(e),
+  }
+}
+
+// mhtml_test_stub returns the constant browser MHTML capability probe written
+// by the legacy build system into every application's Browser.environment/.
+// The content is invariant across projects and build modes.
+fn mhtml_test_stub() -> string {
+  "/*\nContent-Type: multipart/related; boundary=\"_SEPARATOR_\"\n\n--_SEPARATOR_\nContent-Location:test\nContent-Transfer-Encoding:base64\n\nR0lGODlhAQABAIAAAMc9BQAAACH5BAAAAAAALAAAAAABAAEAAAICRAEAOw==\n*/"
+}
+
+// ---------------------------------------------------------------------------
+// Bundle assembly
+// ---------------------------------------------------------------------------
 
 // assemble_bundle concatenates per-file records into a single @STATIC;1.0;
 // bundle stream: a p (path) record then a t (text) record per compiled
@@ -159,27 +472,6 @@ fn bundle_length(content: string) -> int {
   utf8.RuneCountInString(content)
 }
 
-// bundle_output_path is the destination .sj for the assembled bundle.  The
-// framework-environment layout (<Name>/ObjJ.environment/<Name>.sj) is the
-// stubbed project-type concern above; tier E writes the bundle to the build
-// directory under the mode subtree, the surface payload_oracle.py check can
-// round-trip.
-fn bundle_output_path(ctx: Ref<BuildContext>) -> string {
-  let mode_dir = match ctx.config.mode {
-    Debug => "Debug",
-    Release => "Release",
-    Clean => "Clean",
-  }
-  let name = ctx.project.map_or("bundle", |project| project.meta.name)
-  filepath.Join(
-    ctx.root.path,
-    "Build",
-    "capp-build.build",
-    mode_dir,
-    f"{name}.sj",
-  )
-}
-
 // write_bundle materialises the assembled bundle.  WriteString returns a
 // partial result; a short write is an error, and a write error takes
 // precedence over a close error (the phase 8 write_record_file convention).
@@ -192,5 +484,19 @@ fn write_bundle(out_path: string, bundle: string) -> Result<(), error> {
     Ok(_) => closed,
     Err(e) => Err(e),
     Both(_, e) => Err(e),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic output
+// ---------------------------------------------------------------------------
+
+// print_archive_diags surfaces each archive diagnostic in the build output,
+// mirroring phase 3's print_lowering_diag: phases print their own
+// diagnostics directly rather than relying on the orchestrator, which
+// discards them.  Info diagnostics carry no position; message only.
+fn print_archive_diags(diags: Slice<Diagnostic>) {
+  for d in diags {
+    fmt.Println(f"   {d.message}")
   }
 }

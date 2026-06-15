@@ -33,8 +33,9 @@ PARSE_DIR    := $(HOME)/Desktop/capp-parse
 PARSE_MODULE := github.com/enquora-net/capp-parse
 
 TOOLCHAIN_TEST := $(HOME)/Desktop/toolchain_test
+TOOLCHAIN_REF  := $(HOME)/Desktop/toolchain_reference
 
-.PHONY: all run clean bump-parse gate gate-release
+.PHONY: all run clean bump-parse gate gate-release gate-archive
 
 all: run
 
@@ -68,6 +69,30 @@ gate-release:
 	"$(TARGET)/$(BINARY)" build --mode release "$(TOOLCHAIN_TEST)"
 	python3 payload_oracle.py diff "$(LEGACY_RELEASE)/main.j" "$(OURS_RELEASE)/main.j"
 	python3 payload_oracle.py diff "$(LEGACY_RELEASE)/AppController.j" "$(OURS_RELEASE)/AppController.j"
+
+# Phase 9 archive gate: build, assemble the full application deliverable for
+# toolchain_test in both debug and release modes, and byte-compare the
+# assembled bundles against the reference oracle (toolchain_reference).
+# toolchain_reference is a separate copy of toolchain_test built once with
+# the legacy jake toolchain and left untouched; toolchain_test is the live
+# test subject rebuilt by capp-build on each run.
+#
+# The assembled .sj bundles are compared; file-copied assets (Frameworks/,
+# Resources/, index.html) are not byte-compared here — structural presence
+# is verified by inspection.  Info.plist is intentionally excluded: the
+# legacy oracle contains 280NPLIST format; capp-build writes XML until the
+# conversion is implemented (see TODO in archive_application_http1).
+REF_DEBUG_BUNDLE   := $(TOOLCHAIN_REF)/Build/Debug/toolchain_reference/Browser.environment/toolchain_reference.sj
+REF_RELEASE_BUNDLE := $(TOOLCHAIN_REF)/Build/Release/toolchain_reference/Browser.environment/toolchain_reference.sj
+OURS_DEBUG_BUNDLE   := $(TOOLCHAIN_TEST)/Build/Debug/toolchain_test/Browser.environment/toolchain_test.sj
+OURS_RELEASE_BUNDLE := $(TOOLCHAIN_TEST)/Build/Release/toolchain_test/Browser.environment/toolchain_test.sj
+
+gate-archive:
+	lis build
+	"$(TARGET)/$(BINARY)" build --mode debug "$(TOOLCHAIN_TEST)"
+	python3 payload_oracle.py diff "$(REF_DEBUG_BUNDLE)" "$(OURS_DEBUG_BUNDLE)"
+	"$(TARGET)/$(BINARY)" build --mode release "$(TOOLCHAIN_TEST)"
+	python3 payload_oracle.py diff "$(REF_RELEASE_BUNDLE)" "$(OURS_RELEASE_BUNDLE)"
 
 clean:
 	rm -rf $(TARGET)/vendor
