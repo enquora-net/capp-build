@@ -34,7 +34,7 @@ PARSE_MODULE := github.com/enquora-net/capp-parse
 
 TOOLCHAIN_TEST := $(HOME)/Desktop/toolchain_test
 
-.PHONY: all run clean bump-parse gate
+.PHONY: all run clean bump-parse gate gate-release
 
 all: run
 
@@ -47,12 +47,27 @@ run:
 # round-trips.
 LEGACY := $(TOOLCHAIN_TEST)/Build/toolchain_test.build/Debug/Browser.environment/Sources
 OURS   := $(TOOLCHAIN_TEST)/Build/capp-build.build/Debug/Sources
+LEGACY_RELEASE := $(TOOLCHAIN_TEST)/Build/toolchain_test.build/Release/Browser.environment/Sources
+OURS_RELEASE   := $(TOOLCHAIN_TEST)/Build/capp-build.build/Release/Sources
 
 gate:
 	lis build
 	"$(TARGET)/$(BINARY)" build --mode debug "$(TOOLCHAIN_TEST)"
 	python3 payload_oracle.py diff "$(LEGACY)/main.j" "$(OURS)/main.j"
 	python3 payload_oracle.py diff "$(LEGACY)/AppController.j" "$(OURS)/AppController.j"
+
+# Tier E release gate: compile toolchain_test in release mode and byte-compare
+# both per-file records against the legacy release oracle.  Prerequisite: the
+# legacy release build must exist at $(LEGACY_RELEASE); produce it with
+# the legacy jake toolchain: `cd $(TOOLCHAIN_TEST) && jake release`.
+# The release form differs from debug in exactly two ways: no leading \n\n
+# prologue in the t payload, and bare selector strings (no dtable comma
+# artifact) in dispatch expressions.
+gate-release:
+	lis build
+	"$(TARGET)/$(BINARY)" build --mode release "$(TOOLCHAIN_TEST)"
+	python3 payload_oracle.py diff "$(LEGACY_RELEASE)/main.j" "$(OURS_RELEASE)/main.j"
+	python3 payload_oracle.py diff "$(LEGACY_RELEASE)/AppController.j" "$(OURS_RELEASE)/AppController.j"
 
 clean:
 	rm -rf $(TARGET)/vendor
