@@ -40,7 +40,7 @@
 //
 //   Build/<Mode>/<Name>/
 //     index.html                   ← copied from project root
-//     Info.plist                   ← copied from project root (XML; see TODO)
+//     Info.plist                   ← 280NPLIST generated from source plist
 //     Resources/                   ← .cib files copied from project Resources/
 //     Browser.environment/
 //       MHTMLTest.txt              ← constant browser MHTML capability probe
@@ -200,6 +200,16 @@ fn archive_application_http1(
   let browser_sj = filepath.Join(browser_env, f"{meta.name}.sj")
   write_bundle(browser_sj, bundle)?
 
+  // Measure the written bundle size for CPApplicationSize.  The runtime uses
+  // this to drive the loading progress bar; it is measured in bytes.
+  // TODO: CPApplicationSize.executable in the legacy build reflects the total
+  // bytes of all loaded executables (application .sj + all framework .sj
+  // files).  capp-build currently reports only the application bundle size.
+  // The progress bar will reach 100% later than with the legacy value; this
+  // will be corrected when framework compilation produces bundles whose sizes
+  // are known at archive time.
+  let sj_size = file_byte_size(browser_sj)
+
   // Browser.environment/MHTMLTest.txt — constant browser MHTML capability
   // probe written by the legacy build system.  Content is invariant.
   write_file_str(filepath.Join(browser_env, "MHTMLTest.txt"), mhtml_test_stub())?
@@ -219,14 +229,13 @@ fn archive_application_http1(
     filepath.Join(out_dir, "index.html"),
   )?
 
-  // Info.plist — copied from project root (XML source format).
-  // TODO: convert to 280NPLIST binary plist format to match the legacy jake
-  // output exactly.  The runtime reads 280NPLIST; the XML copy is a
-  // functional stub whose format delta is intentional and documented.
-  copy_file(
-    filepath.Join(ctx.root.path, "Info.plist"),
-    filepath.Join(out_dir, "Info.plist"),
-  )?
+  // Info.plist — generated in 280NPLIST format from the source XML plist.
+  // The Cappuccino runtime sniffs the magic number "280NPLIST" and dispatches
+  // to its 280North deserialiser; it does not require a DOM parser and works
+  // in all load contexts including file://.
+  let src_plist_path = filepath.Join(ctx.root.path, "Info.plist")
+  let dst_plist_path = filepath.Join(out_dir, "Info.plist")
+  write_app_info_plist(src_plist_path, dst_plist_path, meta, sj_size)?
 
   // Resources/ — copy deployment artifacts from the project Resources/
   // directory.  .xib sources are excluded: they are inputs to the nib2cib
@@ -262,6 +271,164 @@ fn archive_application_http1(
   ))
   fmt.Println(f"✓  archive: http1 application, {n} records → {out_dir}")
   Ok(diags)
+}
+
+// ---------------------------------------------------------------------------
+// Info.plist generation
+// ---------------------------------------------------------------------------
+
+// write_app_info_plist generates the application Info.plist in 280NPLIST
+// format and writes it to dst_path.
+//
+// The generated plist carries the keys the Cappuccino runtime requires to
+// locate and load the application bundle:
+//
+//   CPBundlePackageType        from PlistMeta (always "APPL" for Application)
+//   CPBundleIdentifier         from PlistMeta
+//   CPBundleName               from PlistMeta
+//   CPBundleVersion            from source plist, or "1.0" if absent
+//   CPHumanReadableCopyright   from source plist, or "" if absent
+//   Main cib file base name    from source plist, or "" if absent
+//   CPBundleInfoDictionaryVersion  6  (fixed; the runtime expects this)
+//   CPBundleEnvironments       ["Browser", "CommonJS"]
+//   CPBundleExecutable         "<Name>.sj"
+//   CPBundleEnvironmentsWithImageSprites  []  (no sprites in app bundle)
+//   CPApplicationSize          { executable: <sj_byte_size>, data: 0, mhtml: 0 }
+//
+// sj_byte_size is the byte length of the assembled .sj file, used by the
+// runtime's loading progress bar.
+fn write_app_info_plist(
+  src_path: string,
+  dst_path: string,
+  meta: PlistMeta,
+  sj_byte_size: int,
+) -> Result<(), error> {
+  // Read the source XML plist to extract passthrough keys.  Failure to read
+  // is non-fatal: the generated plist proceeds with fallback values and the
+  // runtime's required keys are always present.
+  let xml_content = os.ReadFile(src_path).map_or("", |b| b as string)
+
+  let version = plist_xml_string(xml_content, "CPBundleVersion").unwrap_or_else(|| "1.0")
+  let copyright = plist_xml_string(xml_content, "CPHumanReadableCopyright").unwrap_or_else(|| "")
+  let cib_name = plist_xml_string(xml_content, "Main cib file base name").unwrap_or_else(|| "")
+
+  let executable = f"{meta.name}.sj"
+
+  let mut pairs: Slice<Plist280NPair> = []
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundlePackageType",
+      value: Plist280NValue.PString(meta.package_type),
+    },
+  )
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleIdentifier",
+      value: Plist280NValue.PString(meta.identifier),
+    },
+  )
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleName",
+      value: Plist280NValue.PString(meta.name),
+    },
+  )
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleVersion",
+      value: Plist280NValue.PString(version),
+    },
+  )
+  if !copyright.is_empty() {
+    pairs = pairs.append(
+      Plist280NPair { 
+        key: "CPHumanReadableCopyright",
+        value: Plist280NValue.PString(copyright),
+      },
+    )
+  }
+  if !cib_name.is_empty() {
+    pairs = pairs.append(
+      Plist280NPair { 
+        key: "Main cib file base name",
+        value: Plist280NValue.PString(cib_name),
+      },
+    )
+  }
+  // CPBundleInfoDictionaryVersion is always the integer 6; the runtime
+  // expects this key to be present.
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleInfoDictionaryVersion",
+      value: Plist280NValue.PInteger(6),
+    },
+  )
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleEnvironments",
+      value: Plist280NValue.PArray([
+        Plist280NValue.PString("Browser"),
+        Plist280NValue.PString("CommonJS"),
+      ]),
+    },
+  )
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleExecutable",
+      value: Plist280NValue.PString(executable),
+    },
+  )
+  // CPBundleEnvironmentsWithImageSprites: empty array — the application
+  // bundle itself has no sprites.  Framework sprite entries live in the
+  // respective framework Info.plists, which are copied verbatim.
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPBundleEnvironmentsWithImageSprites",
+      value: Plist280NValue.PArray([]),
+    },
+  )
+  // CPApplicationSize drives the loading progress bar.  The executable size
+  // is the assembled .sj byte count; data and mhtml are zero for this bundle
+  // (sprites belong to the frameworks, not the application bundle itself).
+  let size_pairs: Slice<Plist280NPair> = [
+    Plist280NPair { 
+      key: "executable",
+      value: Plist280NValue.PInteger(sj_byte_size),
+    },
+    Plist280NPair { key: "data", value: Plist280NValue.PInteger(0) },
+    Plist280NPair { key: "mhtml", value: Plist280NValue.PInteger(0) },
+  ]
+  pairs = pairs.append(
+    Plist280NPair { 
+      key: "CPApplicationSize",
+      value: Plist280NValue.PDict(size_pairs),
+    },
+  )
+
+  let content = encode_plist280n(Plist280NValue.PDict(pairs))
+  write_file_str(dst_path, content)
+}
+
+// plist_xml_string extracts a string value from an XML plist by key.
+// Duplicated from phase01_validate.lis; consolidate into a shared plist
+// utility module when the plist surface grows further.
+// TODO: consolidate plist_string / plist_xml_string into a shared module.
+fn plist_xml_string(content: string, key: string) -> Option<string> {
+  let key_tag = f"<key>{key}</key>"
+  let key_idx = strings.Index(content, key_tag)?
+  let after_key = content.substring((key_idx + key_tag.length())..)
+  let open_idx = strings.Index(after_key, "<string>")?
+  let after_open = after_key.substring((open_idx + 8)..)
+  let close_idx = strings.Index(after_open, "</string>")?
+  Some(strings.TrimSpace(after_open.substring(..close_idx)))
+}
+
+// file_byte_size returns the byte size of a file on disk, or 0 if the stat
+// fails.  Used to populate CPApplicationSize.executable.
+// os.Stat returns Result<FileInfo, error> in Lisette; map_or is the
+// demanded idiom for a two-arm value-producing match.
+fn file_byte_size(path: string) -> int {
+  os.Stat(path).map_or(0, |info| info.Size() as int)
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +591,7 @@ fn copy_dir_recursive(src: string, dst: string) -> Result<(), error> {
 }
 
 // write_file_str writes a string to a file, creating parent directories as
-// needed.  Used for constant-content files (MHTMLTest.txt).
+// needed.  Used for constant-content files (MHTMLTest.txt, Info.plist).
 fn write_file_str(path: string, content: string) -> Result<(), error> {
   os.MkdirAll(filepath.Dir(path), os.ModePerm)?
   let file = os.Create(path)?

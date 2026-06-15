@@ -1,0 +1,149 @@
+//**
+// build/plist280n.lis
+// capp-build
+//
+// Created by David Richardson on Monday, June 16, 2026.
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// 280NPLIST encoder — Cappuccino's compact property list format.
+//
+// The format is defined in CFPropertyList.js (Objective-J/CFPropertyList.js
+// in the CappuccinoSource tree) and is read by the Cappuccino runtime when
+// loading bundle Info.plist files.  The runtime sniffs the magic number
+// "280NPLIST" and dispatches to its 280North deserialiser; XML plists are
+// also supported but require a DOM parser not available in all load
+// contexts.  capp-build writes 280NPLIST so the runtime can load Info.plist
+// without a DOM dependency and without needing to compile Objective-J source
+// at load time.
+//
+// Format summary (from CFPropertyList.js serialiser table):
+//
+//   Header:     280NPLIST;1.0;
+//   String:     S;<utf16_length>;<value>
+//   Integer:    d;<decimal_length>;<decimal_string>
+//   Boolean:    T;  or  F;
+//   Key:        K;<utf16_length>;<key_string>
+//   Array:      A;<item>...<item>E;
+//   Dictionary: D;<K><value>...<K><value>E;
+//
+// Lengths are UTF-16 code unit counts (JS String.length).  All observed
+// Cappuccino plist keys and values are BMP characters, so UTF-16 length
+// equals Unicode code point count throughout.  utf16_len uses
+// utf8.RuneCountInString, which is exact for BMP content.
+// TODO: handle supplementary-plane characters (U+10000 and above) in
+// utf16_len — each would require two UTF-16 code units but counts as one
+// rune.  None appear in any observed Cappuccino plist corpus.
+//
+// Float values are not encoded: no Cappuccino plist in the observed corpus
+// uses floating-point values, and the runtime plist writer (CFPropertyList.js)
+// treats integers and floats as distinct types only to round-trip JS numbers
+// faithfully.  Add PReal if a float plist value is encountered in future.
+//
+// This file is shared infrastructure: phase 9 (Archive) uses it for
+// application and framework Info.plist generation; nib2cib will use it
+// for its own output plists.
+//
+// **
+import "go:fmt"
+import "go:unicode/utf8"
+
+// ---------------------------------------------------------------------------
+// Plist280NValue — the closed value type
+// ---------------------------------------------------------------------------
+
+// Plist280NValue is the sum of all types representable in a 280NPLIST.
+// It is closed: a new type is a compile error at every serialisation site
+// until handled.  This mirrors the CFPropertyList.js type dispatch.
+// PReal (float) is omitted: no Cappuccino plist in the corpus uses it.
+pub enum Plist280NValue {
+  PString(string),
+  PInteger(int),
+  PBool(bool),
+  PArray(Slice<Plist280NValue>),
+  PDict(Slice<Plist280NPair>),
+}
+
+// Plist280NPair is one key/value entry in a dictionary.  A slice of pairs
+// preserves insertion order, matching the CFDictionary._keys ordering that
+// the serialiser iterates.
+pub struct Plist280NPair {
+  pub key: string,
+  pub value: Plist280NValue,
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+// encode_plist280n serialises a Plist280NValue to the complete 280NPLIST
+// wire format, including the magic-number header.  The result is ready to
+// write directly to an Info.plist file.
+pub fn encode_plist280n(root: Plist280NValue) -> string {
+  "280NPLIST;1.0;" + write_value(root)
+}
+
+// ---------------------------------------------------------------------------
+// Private serialisation
+// ---------------------------------------------------------------------------
+
+// write_value dispatches to the appropriate serialiser for each variant.
+// Exhaustive over Plist280NValue with no catch-all.
+fn write_value(value: Plist280NValue) -> string {
+  match value {
+    PString(s) => write_pstring(s),
+    PInteger(n) => write_pinteger(n),
+    PBool(b) => write_pbool(b),
+    PArray(items) => write_parray(items),
+    PDict(pairs) => write_pdict(pairs),
+  }
+}
+
+// write_pstring writes S;<utf16_length>;<value>.
+fn write_pstring(s: string) -> string {
+  f"S;{utf16_len(s)};{s}"
+}
+
+// write_pinteger writes d;<decimal_length>;<decimal_string>.
+fn write_pinteger(n: int) -> string {
+  let s = fmt.Sprintf("%d", n)
+  f"d;{s.length()};{s}"
+}
+
+// write_pbool writes T; or F;.
+fn write_pbool(b: bool) -> string {
+  if b { "T;" } else { "F;" }
+}
+
+// write_parray writes A;<items>E;.  An empty array is A;E;.
+fn write_parray(items: Slice<Plist280NValue>) -> string {
+  let mut out = "A;"
+  for item in items {
+    out += write_value(item)
+  }
+  out + "E;"
+}
+
+// write_pdict writes D;<key-value pairs>E;.  Keys are written as
+// K;<utf16_length>;<key_string> immediately followed by the value.
+fn write_pdict(pairs: Slice<Plist280NPair>) -> string {
+  let mut out = "D;"
+  for pair in pairs {
+    out += f"K;{utf16_len(pair.key)};{pair.key}"
+    out += write_value(pair.value)
+  }
+  out + "E;"
+}
+
+// ---------------------------------------------------------------------------
+// Length helper
+// ---------------------------------------------------------------------------
+
+// utf16_len returns the UTF-16 code unit count of a string — JS
+// String.length semantics.  Uses utf8.RuneCountInString, which equals the
+// UTF-16 unit count for all BMP characters (U+0000 through U+FFFF).
+// Supplementary-plane characters (U+10000 and above) would each require
+// two UTF-16 units but count as one rune; none appear in any Cappuccino
+// plist corpus.  See file-level TODO.
+fn utf16_len(s: string) -> int {
+  utf8.RuneCountInString(s)
+}
