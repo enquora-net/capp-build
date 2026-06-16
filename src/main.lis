@@ -16,7 +16,10 @@
 //   capp-build smoke capp
 //   capp-build smoke boundary
 //   capp-build smoke all
+//   capp-build version
 //
+// VERSION is a generated constant in src/version_generated.lis, written by
+// `make emit` before lis emit runs.  Local builds report "dev".
 //
 // **
 import "go:fmt"
@@ -54,7 +57,6 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
   cobra.FParseErrWhitelist { UnknownFlags: false }
 }
 
-// make_command creates a leaf command that accepts no positional arguments.
 fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
   cobra.Command { 
     Use: use,
@@ -81,7 +83,6 @@ fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
   }
 }
 
-// make_command_with_args creates a leaf command that accepts optional positional arguments.
 fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Command {
   cobra.Command { 
     Use: use,
@@ -107,7 +108,6 @@ fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Comma
   }
 }
 
-// make_group creates a command group that receives subcommands.
 fn make_group(use: string, short: string) -> cobra.Command {
   cobra.Command { 
     Use: use,
@@ -140,9 +140,7 @@ fn make_group(use: string, short: string) -> cobra.Command {
 
 fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   let source_root = if !args.is_empty() { args[0] } else { "." }
-
   let mode_str = cmd.Flags().GetString("mode").unwrap_or("debug")
-
   let mode = match mode_str {
     "release" => build.BuildMode.Release,
     "clean" => build.BuildMode.Clean,
@@ -154,23 +152,16 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
       return
     },
   }
-
   let http2_flag = cmd.Flags().GetBool("http2").unwrap_or(false)
-
   let delivery = if http2_flag {
     build.DeliveryContext.HTTP2
   } else {
     build.DeliveryContext.HTTP1
   }
-
   let cfg = build.BuildConfig { mode, delivery, source_root, grammar: "" }
-
   match build.build(cfg) {
     Ok(result) => {
       cmd.Println(result.message)
-      // A halted build (Error diagnostics gated the pipeline) is a failed
-      // build: exit non-zero so CI and scripts observe the failure
-      // (REVIEW.md finding 4).
       if !result.ok { os.Exit(1) }
     },
     Err(e) => {
@@ -193,6 +184,18 @@ fn new_build_cmd() -> cobra.Command {
     .Flags()
     .Bool("http2", false, "target HTTP/2 delivery (default: HTTP/1.x)")
   cmd
+}
+
+// ---------------------------------------------------------------------------
+// version command
+// ---------------------------------------------------------------------------
+
+fn run_version(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  cmd.Println(f"capp-build {VERSION}")
+}
+
+fn new_version_cmd() -> cobra.Command {
+  make_command("version", "Print version information", run_version)
 }
 
 // ---------------------------------------------------------------------------
@@ -273,13 +276,11 @@ fn run_smoke_all(cmd: Ref<cobra.Command>, _args: Slice<string>) {
 
 fn new_smoke_cmd() -> cobra.Command {
   let mut smoke_cmd = make_group("smoke", "Run interop smoke tests")
-
   let cobra_cmd = make_command(
     "cobra",
     "Smoke-test cobra interop",
     run_smoke_cobra,
   )
-
   let mut capp_cmd = make_command(
     "capp",
     "Smoke-test capp-parse interop",
@@ -288,7 +289,6 @@ fn new_smoke_cmd() -> cobra.Command {
   let _ = capp_cmd
     .Flags()
     .String("grammar", "", "explicit path to grammar dylib")
-
   let mut boundary_cmd = make_command(
     "boundary",
     "Verify the capp-parse surface matches BoundaryVersion 2",
@@ -297,12 +297,10 @@ fn new_smoke_cmd() -> cobra.Command {
   let _ = boundary_cmd
     .Flags()
     .String("grammar", "", "explicit path to grammar dylib")
-
   let mut all_cmd = make_command("all", "Run all smoke tests", run_smoke_all)
   let _ = all_cmd
     .Flags()
     .String("grammar", "", "explicit path to grammar dylib")
-
   smoke_cmd.AddCommand(&cobra_cmd)
   smoke_cmd.AddCommand(&capp_cmd)
   smoke_cmd.AddCommand(&boundary_cmd)
@@ -316,14 +314,13 @@ fn new_smoke_cmd() -> cobra.Command {
 
 fn main() {
   let mut root = make_group("capp-build", "Cappuccino source compiler")
-
   let build_cmd = new_build_cmd()
+  let version_cmd = new_version_cmd()
   let verify_cmd = new_verify_cmd()
   let smoke_cmd = new_smoke_cmd()
-
   root.AddCommand(&build_cmd)
+  root.AddCommand(&version_cmd)
   root.AddCommand(&verify_cmd)
   root.AddCommand(&smoke_cmd)
-
   if let Err(e) = root.Execute() { fmt.Println(f"error: {e}") }
 }
