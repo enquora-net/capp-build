@@ -15,7 +15,16 @@ Lisette brings that guarantee to a Go runtime. The binary has no runtime depende
 Download the binary for your platform from the[ releases page](https://github.com/enquora-net/capp-build/releases), make it executable, and place it in your PATH.
 
 The Objective-J Tree-sitter dynamic library must be installed separately.
-Download the appropriate binary for your platform from the[ tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases) and install it to `/usr/local/lib`. The `cappuccino install` command will manage this automatically in a forthcoming release.
+Download the appropriate binary for your platform from the[ tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases) and place it in `/usr/local/lib`.
+
+On macOS, Gatekeeper quarantines downloaded files. Strip the attribute from both before first use:
+
+```sh
+xattr -d com.apple.quarantine capp-build
+xattr -d com.apple.quarantine /usr/local/lib/libtree-sitter-objj.dylib
+```
+
+> **Pre-release.** This software is in developer preview. It should only be used in environments where rollback or recovery is in place.
 
 ---
 
