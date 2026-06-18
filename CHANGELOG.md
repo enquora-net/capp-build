@@ -1,36 +1,73 @@
 # Changelog
 
-## 0.1.0-beta.1
+All notable changes to capp-build are documented here.
 
-First public beta of capp-build, the new Cappuccino Objective-J compiler and build tool.
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+---
+
+## 0.1.0-beta.1 — 2026-06-17
+
+First public beta of capp-build, the new Cappuccino Objective-J compiler and
+production archiver.
 
 ### What this is
 
-capp-build compiles Objective-J applications and produces browser-loadable build output in the same layout as the legacy jake toolchain. Existing server configurations, deployment scripts, and application code require no changes.
+capp-build compiles Objective-J applications and produces browser-loadable
+build output in the same layout as the legacy jake toolchain. Existing server
+configurations, deployment scripts, and application code require no changes.
 
-### What works
+### Added
 
-The full compilation pipeline is implemented and verified against the legacy toolchain:
-
-- Project validation and Info.plist generation
-- Source tree walking and Objective-J parsing
-- Import resolution and topological sort
-- Symbol table construction (classes, methods, protocols, ivars, accessors)
-- Protocol conformance checking
-- JavaScript code generation, byte-exact against the legacy compiler in both debug and release modes
-- Application deliverable assembly under `Build/Debug/<Name>/` and `Build/Release/<Name>/`, including framework copying, resource copying, and index.html
-
-Compiled applications load and run correctly in all modern browsers.
+- Full nine-phase compilation pipeline, implemented and verified against the
+  legacy toolchain
+- Project validation and Info.plist auto-completion (derives absent identity
+  keys from project structure; writes corrections back to disk)
+- Source tree walking and Objective-J parsing via `capp-parse`
+- Import resolution and topological sort with cycle detection and reporting
+- Symbol table construction: classes, methods, protocols, ivars, and
+  synthesised `@accessors` getters and setters
+- Protocol conformance checking across the resolved project graph
+- JavaScript code generation, byte-exact against the legacy compiler in both
+  debug and release modes
+- Application deliverable assembly under `Build/Debug/<Name>/` and
+  `Build/Release/<Name>/`: assembled `.sj` bundle, Info.plist in 280NPLIST
+  format, framework tree, resources, index.html, and MHTMLTest.txt
+- `--mode debug|release|clean` build mode selection
+- `--http2` flag (HTTP/2 per-file delivery; implementation pending)
+- `verify model` — CST model verification against the installed grammar
+- `smoke` — smoke tests against the installed grammar
+- Single binary distribution for macOS, Linux, and Windows on ARM64 and AMD64,
+  cross-compiled via Zig from a macOS host
+- SHA-256 checksum files for all release artifacts
 
 ### Known limitations
 
-**Grammar library must be installed manually.** capp-build requires the Objective-J tree-sitter grammar dynamic library to be present at `/usr/local/lib`. Download the appropriate library for your platform from the tree-sitter-objj releases page and install it there. Automatic installation will be handled by the Cappuccino omnibus CLI in a future release.
+**Grammar library must be installed manually.** capp-build requires the
+Objective-J tree-sitter grammar dynamic library at `/usr/local/lib`. Download
+the appropriate binary from the
+[tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases).
+Automatic installation will be handled by `cappuccino install` in a
+forthcoming release.
 
-**XIB compilation is not yet implemented.** The `.xib` → `.cib` compilation step (`nib2cib`) is not yet part of capp-build. Before building, compile your XIB files using the legacy toolchain (`nib2cib`) and commit the resulting `.cib` files to your project's `Resources/` directory. capp-build will copy them into the build output as-is.
+**XIB compilation is not part of this tool.** The `.xib` → `.cib`
+compilation step is performed by `capp-nib2cib`, which is under development
+as a separate component. Before building, compile your XIB files using the
+legacy `nib2cib` tool and commit the resulting `.cib` files to your project's
+`Resources/` directory. capp-build copies them into the build output as-is.
 
-**Info.plist size reporting is approximate.** The `CPApplicationSize` entry in the generated Info.plist reports only the application bundle size, not the total of all loaded framework bundles. The loading progress bar will reach 100% slightly later than with a legacy build. This will be corrected in a future release.
+**Info.plist size reporting is approximate.** `CPApplicationSize` reports
+the application bundle size only, not the total of all loaded framework
+bundles. The loading progress bar will reach 100% slightly later than with a
+legacy build. This will be corrected once framework compilation produces
+bundles whose sizes are known at archive time.
 
-**HTTP/2 delivery is not yet implemented.** capp-build currently targets HTTP/1.x delivery only. HTTP/2 support, which serves compiled records individually for multiplexed loading, will be added alongside the built-in development server in the Cappuccino omnibus CLI.
+**HTTP/2 delivery is not yet implemented.** capp-build currently targets
+HTTP/1.x delivery. HTTP/2 support will be added alongside the built-in
+development server in the Cappuccino omnibus CLI.
+
+**Windows** — cross-compiled binaries are provided but have not been formally
+tested end-to-end. Reports are welcome.
 
 ### Platforms
 

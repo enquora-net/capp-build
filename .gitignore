@@ -1,5 +1,7 @@
 target/
 /.idea
 __pycache__
-/build-artifacts
-/build-wrappers
+/build
+.DS_Store
+*.d.lis
+src/version_generated.lis

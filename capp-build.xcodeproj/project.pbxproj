@@ -1,0 +1,95 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXFileReference section */
+		411BA1C42FDC4B38000B86CC /* PHASE-6-BRIEF.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "PHASE-6-BRIEF.md"; sourceTree = "<group>"; };
+		411BA1C52FDC630C000B86CC /* REVIEW.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = REVIEW.md; sourceTree = "<group>"; };
+		411BA1C62FDC6FD1000B86CC /* REVIEW.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = REVIEW.md; sourceTree = "<group>"; };
+		41596F122FC6B01400084003 /* PROJECT-LAYOUT.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "PROJECT-LAYOUT.txt"; sourceTree = "<group>"; };
+		41816FB32FD8EFC900EFF9D5 /* PROGRESS-SNAPSHOT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "PROGRESS-SNAPSHOT.md"; sourceTree = "<group>"; };
+		41952D022FE36BA800A1615C /* VERSION.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = VERSION.txt; sourceTree = "<group>"; };
+		41A4A6372FDA4DFE009C5E91 /* UNHANDLED-EXPRESSIONS.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "UNHANDLED-EXPRESSIONS.txt"; sourceTree = "<group>"; };
+		41D4A1E42FC672550069A4FF /* LISETTE-CHANGELOG.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = "LISETTE-CHANGELOG.md"; sourceTree = "<group>"; };
+		REF_ARCHITECTURE_MD /* ARCHITECTURE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = ARCHITECTURE.md; sourceTree = "<group>"; };
+		REF_LISETTE_MD /* LISETTE.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = LISETTE.md; sourceTree = "<group>"; };
+		REF_LISETTE_TOML /* lisette.toml */ = {isa = PBXFileReference; lastKnownFileType = text; path = lisette.toml; sourceTree = "<group>"; };
+		REF_MAKEFILE /* Makefile */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.make; path = Makefile; sourceTree = "<group>"; };
+		REF_README_MD /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = README.md; sourceTree = "<group>"; };
+		REF_SRC /* src */ = {isa = PBXFileReference; lastKnownFileType = folder; path = src; sourceTree = "<group>"; };
+		REF_TARGET /* target */ = {isa = PBXFileReference; lastKnownFileType = folder; path = target; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		MAIN_GROUP = {
+			isa = PBXGroup;
+			children = (
+				41596F122FC6B01400084003 /* PROJECT-LAYOUT.txt */,
+				41816FB32FD8EFC900EFF9D5 /* PROGRESS-SNAPSHOT.md */,
+				41D4A1E42FC672550069A4FF /* LISETTE-CHANGELOG.md */,
+				REF_ARCHITECTURE_MD /* ARCHITECTURE.md */,
+				41A4A6372FDA4DFE009C5E91 /* UNHANDLED-EXPRESSIONS.txt */,
+				REF_LISETTE_MD /* LISETTE.md */,
+				411BA1C62FDC6FD1000B86CC /* REVIEW.md */,
+				REF_MAKEFILE /* Makefile */,
+				REF_README_MD /* README.md */,
+				REF_LISETTE_TOML /* lisette.toml */,
+				411BA1C42FDC4B38000B86CC /* PHASE-6-BRIEF.md */,
+				41952D022FE36BA800A1615C /* VERSION.txt */,
+				REF_SRC /* src */,
+				REF_TARGET /* target */,
+				411BA1C52FDC630C000B86CC /* REVIEW.md */,
+			);
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXProject section */
+		PROJ_ROOT /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1500;
+			};
+			buildConfigurationList = CONFIG_LIST /* Build configuration list for PBXProject "capp-build" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = MAIN_GROUP;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+			);
+		};
+/* End PBXProject section */
+
+/* Begin XCBuildConfiguration section */
+		DEBUG_CONF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				PRODUCT_NAME = "capp-build";
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CONFIG_LIST /* Build configuration list for PBXProject "capp-build" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DEBUG_CONF /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = PROJ_ROOT /* Project object */;
+}
