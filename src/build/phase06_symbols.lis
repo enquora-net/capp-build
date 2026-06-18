@@ -807,7 +807,7 @@ fn synthesize_accessors(
 
   if spec.readonly { return out }
 
-  let setter_selector = spec.setter.unwrap_or(default_setter_selector(
+  let setter_selector = spec.setter.unwrap_or_else(|| default_setter_selector(
     spec.property,
   ))
   let setter_key = selector_key(false, setter_selector)

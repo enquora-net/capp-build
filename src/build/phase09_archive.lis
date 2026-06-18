@@ -308,9 +308,15 @@ fn write_app_info_plist(
   // runtime's required keys are always present.
   let xml_content = os.ReadFile(src_path).map_or("", |b| b as string)
 
-  let version = plist_xml_string(xml_content, "CPBundleVersion").unwrap_or_else(|| "1.0")
-  let copyright = plist_xml_string(xml_content, "CPHumanReadableCopyright").unwrap_or_else(|| "")
-  let cib_name = plist_xml_string(xml_content, "Main cib file base name").unwrap_or_else(|| "")
+  let version = plist_xml_string(xml_content, "CPBundleVersion").unwrap_or(
+    "1.0",
+  )
+  let copyright = plist_xml_string(xml_content, "CPHumanReadableCopyright").unwrap_or(
+    "",
+  )
+  let cib_name = plist_xml_string(xml_content, "Main cib file base name").unwrap_or(
+    "",
+  )
 
   let executable = f"{meta.name}.sj"
 

@@ -1,6 +1,6 @@
 [project]
 name = "capp-build"
-version = "0.1.0"
+version = "2.0.0-beta.1"
 
 [dependencies.go]
 "github.com/spf13/cobra" = "v1.10.2"
