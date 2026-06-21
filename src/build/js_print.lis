@@ -30,30 +30,38 @@
 // ivars, synthesized accessor bodies, protocols, typedefs, conformance —
 // transcribed from the legacy ClassDeclarationStatement /
 // MethodDeclarationStatement / ProtocolDeclarationStatement emitters
-// (PHASE-8-BRIEF.md, "The emitter law, tier B"), plus the ivar →
+// (PHASE-8-BRIEF.md, "The emitter law, tier B"), plus the ivar ->
 // self.ivar rewrite with its scope machinery.
 //
 // Recorded deviations from the legacy mechanics (all corpus-invisible):
-//   — Object-literal and class methods print with the rewrite OFF.  The
+//   - Object-literal and class methods print with the rewrite OFF.  The
 //     legacy emitter with the transform enabled would produce `name = (...)`
-//     inside braces — invalid JavaScript.  No corpus file contains either
+//     inside braces -- invalid JavaScript.  No corpus file contains either
 //     form; the valid-JS reading is taken.  (PROGRESS-SNAPSHOT.md.)
-//   — `using` / `await using` declarations have no legacy emitter; they
+//   - `using` / `await using` declarations have no legacy emitter; they
 //     print mechanically in variable-declaration shape.
-//   — Scope pre-scan: locals are collected once per function scope (all
+//   - Scope pre-scan: locals are collected once per function scope (all
 //     block depths), where the legacy registers in visit order and
 //     retroactively unprefixes hoisted vars by buffer surgery.  Output
 //     differs only for an ivar-shadowing local declared in a different
-//     block of the same function — none exist in any corpus, and the
+//     block of the same function -- none exist in any corpus, and the
 //     legacy warns on the pattern anyway.
 //
 // Deferred constructs route through named catch-all diagnostics, per the
 // house pattern: message sends and the @accessors(copy) setter (tier C),
-// ObjJ expression literals — @"…", @[…], @{…}, @selector, @protocol
+// ObjJ expression literals -- @"...", @[...], @{...}, @selector, @protocol
 // expressions, @ref/@deref (tier D), and #if blocks (pending the
 // build-feature environment, PHASE-8-BRIEF.md decision 4).  Each deferral
 // emits no text, so payloads for files containing them are incomplete by
 // construction; the diagnostics say exactly what is missing.
+//
+// Text accumulation: every printer method takes a buf: Ref<strings.Builder>
+// and writes directly to it, returning only Slice<Diagnostic>.  A single
+// Builder threads from print_js_program through every recursive call;
+// strings.Builder.String() is called once at the top to produce the payload.
+// This replaces the prior += accumulation pattern, which went quadratic as
+// output grew.  The public JsPrinted struct is retained as the boundary type
+// for phase08_compile.lis, which is unchanged.
 //
 // Everything here is pure: typed values in, JsPrinted out.  Indentation
 // is an explicit parameter (4-space unit); a block prints its braces one
@@ -63,27 +71,20 @@
 // **
 import "go:strings"
 
-// JsPrinted is the printer's accumulation unit: emitted text plus any
-// deferral diagnostics encountered beneath the printed node.
+// JsPrinted is the printer's output type at the phase boundary.
+// Internally all text is written through a shared strings.Builder;
+// this struct is only constructed once, at the top of print_js_program.
 pub struct JsPrinted {
   pub text: string,
   pub diags: Slice<Diagnostic>,
 }
 
-// print_js_program renders a typed Program as the JavaScript payload body.
-// The debug-mode "\n\n" prologue is NOT emitted here — it belongs to
-// per-file record composition (phase 8 proper), since it is a property of
-// the build mode, not of the program.
 pub fn print_js_program(
   program: Program,
   file: string,
   symbols: Option<SymbolTable>,
   debug_dispatch: bool,
 ) -> JsPrinted {
-  // The known-class set governs null-guard decisions on class-named
-  // receivers: symbol-table classes plus @class forwards, mirroring the
-  // legacy classDefs table (within the project world — see the brief's
-  // recorded cross-framework limitation).
   let mut known_classes = Map.new<string, bool>()
   if let Some(table) = symbols {
     for class_symbol in table.classes {
@@ -93,9 +94,6 @@ pub fn print_js_program(
       known_classes[forward.name] = true
     }
   }
-  // Top-level sends number their temporaries through a program-level
-  // state but never get a var declaration — the legacy leaks them as
-  // implicit globals, copied faithfully.
   let mut top_receivers = ReceiverState { .. }
   let p = JsPrint { 
     file,
@@ -105,30 +103,22 @@ pub fn print_js_program(
     receivers: Some(&top_receivers),
     ..,
   }
-  let mut out = text_of("")
+  let mut buf = strings.Builder { .. }
   if let Some(hash_bang) = program.hash_bang {
-    out.text += hash_bang.text
-    out.text += "\n"
+    write(&buf, hash_bang.text)
+    write(&buf, "\n")
   }
   let prologue = directive_prologue_len(program.body)
+  let mut diags: Slice<Diagnostic> = []
   for i in 0..program.body.length() {
-    emit(&out, p.statement(program.body[i], "", i < prologue))
+    diags = merge_diags(
+      diags,
+      p.statement(&buf, program.body[i], "", i < prologue),
+    )
   }
-  out
+  JsPrinted { text: buf.String(), diags }
 }
 
-// ---------------------------------------------------------------------------
-// Accumulation helpers
-// ---------------------------------------------------------------------------
-
-// JsPrint carries the printing context.  file, symbols, known_classes,
-// and debug_dispatch are fixed for the whole program; current_class,
-// in_instance_method, self_assigned, and locals are scope state — the
-// printer is a value, so entering a class, method, or function scope
-// copies it with the new state, and the recursion carries the copy (no
-// mutation, no restore).  receivers is deliberately a Ref: the ___rN
-// counter is shared mutable state across one function scope, mirroring
-// the legacy var-scope object.
 struct JsPrint {
   file: string,
   symbols: Option<SymbolTable>,
@@ -141,40 +131,24 @@ struct JsPrint {
   receivers: Option<Ref<ReceiverState>>,
 }
 
-// ClassContext is the current @implementation: its name (super-send
-// class lookups) and its ivar universe (own + inherited project-known),
-// the domain of the ivar → self.ivar rewrite.
 struct ClassContext { name: string, ivars: Map<string, bool> }
 
-// ReceiverState is one function scope's ___rN bookkeeping: level is the
-// current send-nesting depth, max the high-water mark the end-of-scope
-// `var ___r1, …;` declaration covers.
 struct ReceiverState { level: int, max: int }
 
-fn text_of(text: string) -> JsPrinted {
-  JsPrinted { text, .. }
-}
-
-fn emit(acc: Ref<JsPrinted>, piece: JsPrinted) {
-  acc.text += piece.text
-  acc.diags = merge_diags(acc.diags, piece.diags)
+// write appends s to buf, discarding the Partial return that
+// strings.Builder.WriteString always resolves to Ok.
+fn write(buf: Ref<strings.Builder>, s: string) {
+  let _ = buf.WriteString(s)
 }
 
 fn indent_step() -> string {
   "    "
 }
 
-// outdent removes one indentation step; block braces print at this level.
 fn outdent(ind: string) -> string {
   if ind.length() >= 4 { ind.substring(4..ind.length()) } else { "" }
 }
 
-// ---------------------------------------------------------------------------
-// Precedence tables (PHASE-8-BRIEF.md, "Parenthesization")
-// ---------------------------------------------------------------------------
-
-// expr_prec is the legacy node-precedence table P.  Smaller binds tighter;
-// -1 means the node never takes precedence parentheses.
 fn expr_prec(e: Expression) -> int {
   match e {
     Primary(primary) => primary_prec(primary),
@@ -200,9 +174,6 @@ fn primary_prec(primary: PrimaryExpression) -> int {
   }
 }
 
-// binary_op_t is the legacy operator-precedence table T.  0 marks an
-// operator absent from the table (only `**`); comparisons against an
-// absent entry are false in both directions, as in the original.
 fn binary_op_t(op: BinaryOp) -> int {
   match op {
     Mul | Div | Mod => 3,
@@ -220,8 +191,6 @@ fn binary_op_t(op: BinaryOp) -> int {
   }
 }
 
-// The legacy generator types `&&`/`||`/`??` as LogicalExpression (P = 6);
-// every other operator is BinaryExpression (P = 5).
 fn binary_op_is_logical(op: BinaryOp) -> bool {
   match op {
     LogicalAnd | LogicalOr | NullishCoalesce => true,
@@ -271,8 +240,6 @@ fn unary_op_text(op: UnaryOp) -> string {
   }
 }
 
-// Word operators take a space before their operand (legacy regex
-// `delete in instanceof new typeof void`).
 fn unary_op_is_word(op: UnaryOp) -> bool {
   match op {
     Typeof | Void | Delete => true,
@@ -324,10 +291,6 @@ fn variable_kind_text(kind: VariableKind) -> string {
   }
 }
 
-// operand_needs_parens is the legacy A() predicate: a child operand is
-// parenthesized iff its P exceeds the parent's, or P ties and the parent
-// is an operator expression whose T-precedence is looser than the
-// child's (or equal, on the right operand).
 fn operand_needs_parens(
   parent_prec: int,
   parent_t: int,
@@ -346,14 +309,6 @@ fn operand_needs_parens(
   parent_t < child_t || (is_right && parent_t == child_t)
 }
 
-// ---------------------------------------------------------------------------
-// Directive prologue
-// ---------------------------------------------------------------------------
-
-// directive_prologue_len counts the leading run of string-literal
-// expression statements: acorn's directive set.  A "use strict" literal
-// inside the prologue prints bare; the same statement elsewhere is
-// parenthesized (legacy ExpressionStatement special case).
 fn directive_prologue_len(body: Slice<Statement>) -> int {
   let mut n = 0
   for st in body {
@@ -384,71 +339,82 @@ fn is_use_strict(literal: StringLiteral) -> bool {
   literal.text == "\"use strict\"" || literal.text == "'use strict'"
 }
 
-// ---------------------------------------------------------------------------
-// Statements
-// ---------------------------------------------------------------------------
-
 impl JsPrint {
-  fn statement(self, st: Statement, ind: string, is_directive: bool) -> JsPrinted {
+  fn statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: Statement,
+    ind: string,
+    is_directive: bool,
+  ) -> Slice<Diagnostic> {
     match st {
-      Expression(es) => self.expression_statement(es, ind, is_directive),
-      Declaration(declaration) => self.declaration(declaration, ind),
-      BlockScope(block) => self.block(block, ind, false, true, false),
-      If(if_st) => self.if_statement(if_st, ind, false),
-      Switch(switch_st) => self.switch_statement(switch_st, ind),
-      For(for_st) => self.for_statement(for_st, ind),
-      ForIn(for_in) => self.for_in_statement(for_in, ind),
-      While(while_st) => self.while_statement(while_st, ind),
-      Do(do_st) => self.do_statement(do_st, ind),
-      Try(try_st) => self.try_statement(try_st, ind),
-      With(with_st) => self.with_statement(with_st, ind),
+      Expression(es) => self.expression_statement(buf, es, ind, is_directive),
+      Declaration(declaration) => self.declaration(buf, declaration, ind),
+      BlockScope(block) => self.block(buf, block, ind, false, true, false),
+      If(if_st) => self.if_statement(buf, if_st, ind, false),
+      Switch(switch_st) => self.switch_statement(buf, switch_st, ind),
+      For(for_st) => self.for_statement(buf, for_st, ind),
+      ForIn(for_in) => self.for_in_statement(buf, for_in, ind),
+      While(while_st) => self.while_statement(buf, while_st, ind),
+      Do(do_st) => self.do_statement(buf, do_st, ind),
+      Try(try_st) => self.try_statement(buf, try_st, ind),
+      With(with_st) => self.with_statement(buf, with_st, ind),
       Break(break_st) => {
         let label = break_st.label.map_or(
           "",
           |identifier| f" {identifier.text}",
         )
-        text_of(f"{ind}break{label};\n")
+        write(buf, f"{ind}break{label};\n")
+        []
       },
       Continue(continue_st) => {
         let label = continue_st.label.map_or(
           "",
           |identifier| f" {identifier.text}",
         )
-        text_of(f"{ind}continue{label};\n")
+        write(buf, f"{ind}continue{label};\n")
+        []
       },
       Return(return_st) => {
-        let mut out = text_of(ind + "return")
+        write(buf, ind + "return")
+        let mut diags: Slice<Diagnostic> = []
         if let Some(value) = return_st.value {
-          out.text += " "
-          emit(&out, self.expressions(value, ind))
+          write(buf, " ")
+          diags = self.expressions(buf, value, ind)
         }
-        out.text += ";\n"
-        out
+        write(buf, ";\n")
+        diags
       },
       Throw(throw_st) => {
-        let mut out = text_of(ind + "throw ")
-        emit(&out, self.expressions(throw_st.value.*, ind))
-        out.text += ";\n"
-        out
+        write(buf, ind + "throw ")
+        let diags = self.expressions(buf, throw_st.value.*, ind)
+        write(buf, ";\n")
+        diags
       },
-      Empty(_) => text_of(";\n"),
+      Empty(_) => {
+        write(buf, ";\n")
+        []
+      },
       Labeled(labeled) => {
-        // Legacy quirk: the label prints with no leading indentation.
-        let mut out = text_of(labeled.label.text + ": ")
-        emit(&out, self.statement(labeled.body.*, ind, false))
-        out
+        write(buf, labeled.label.text + ": ")
+        self.statement(buf, labeled.body.*, ind, false)
       },
-      Debugger(_) => text_of(ind + "debugger;\n"),
-      Import(import_st) => self.es_import(import_st),
-      Export(export_st) => self.es_export(export_st, ind),
-      ObjjImport(import_directive) => self.objj_import(import_directive),
-      // @global and @class are compile-time bookkeeping in the legacy
-      // generator (scope vars, class-def table): they emit nothing.
-      ObjjGlobal(_) => text_of(""),
-      ObjjClassForward(_) => text_of(""),
-      ObjjTypedef(typedef) => objj_typedef_text(typedef.name.text),
-      ObjjProtocol(protocol) => self.objj_protocol(protocol),
+      Debugger(_) => {
+        write(buf, ind + "debugger;\n")
+        []
+      },
+      Import(import_st) => self.es_import(buf, import_st),
+      Export(export_st) => self.es_export(buf, export_st, ind),
+      ObjjImport(import_directive) => self.objj_import(buf, import_directive),
+      ObjjGlobal(_) => [],
+      ObjjClassForward(_) => [],
+      ObjjTypedef(typedef) => {
+        objj_typedef_write(buf, typedef.name.text)
+        []
+      },
+      ObjjProtocol(protocol) => self.objj_protocol(buf, protocol),
       ObjjClassImpl(implementation) => self.objj_class_implementation(
+        buf,
         implementation,
       ),
       PreprocIf(preproc) => self.deferred(
@@ -464,192 +430,225 @@ impl JsPrint {
     }
   }
 
-  // deferred is the named catch-all: no text, one warning saying exactly
-  // which construct is awaiting which tier.
-  fn deferred(self, what: string, pending: string, pos: Position) -> JsPrinted {
-    JsPrinted { 
-      diags: [
-        diag_warn_at(
-          BuildPhase.Compile,
-          f"codegen: {what} deferred pending {pending}",
-          self.file,
-          pos.row,
-          pos.col,
-        ),
-      ],
-      ..,
-    }
+  fn deferred(self, what: string, pending: string, pos: Position) -> Slice<Diagnostic> {
+    [
+      diag_warn_at(
+        BuildPhase.Compile,
+        f"codegen: {what} deferred pending {pending}",
+        self.file,
+        pos.row,
+        pos.col,
+      ),
+    ]
   }
 
   fn expression_statement(
     self,
+    buf: Ref<strings.Builder>,
     st: ExpressionStatement,
     ind: string,
     is_directive: bool,
-  ) -> JsPrinted {
-    let mut out = text_of(ind)
-    match st.expression.* {
-      Sequence(sequence) => emit(&out, self.sequence(sequence, ind)),
+  ) -> Slice<Diagnostic> {
+    write(buf, ind)
+    let diags = match st.expression.* {
+      Sequence(sequence) => self.sequence(buf, sequence, ind),
       Single(e) => {
         if statement_needs_parens(e, is_directive) {
-          emit(&out, self.wrapped(e, ind))
+          self.wrapped(buf, e, ind)
         } else {
-          emit(&out, self.expression(e, ind))
+          self.expression(buf, e, ind)
         }
       },
     }
-    out.text += ";\n"
-    out
+    write(buf, ";\n")
+    diags
   }
 
-  // block prints `{`/`}` one indentation step shallower than its contents
-  // (content_ind).  skip_indent suppresses the leading outdent (try/catch/
-  // finally and arrow bodies, where the brace follows on the same line);
-  // trailing_newline is off for function-expression bodies and skip-indent
-  // positions, exactly as the legacy isDecl/skipIndentation bookkeeping.
   fn block(
     self,
+    buf: Ref<strings.Builder>,
     block: StatementBlock,
     content_ind: string,
     skip_indent: bool,
     trailing_newline: bool,
     end_of_scope: bool,
-  ) -> JsPrinted {
-    let mut out = text_of("")
-    if !skip_indent { out.text += outdent(content_ind) }
-    out.text += "{\n"
+  ) -> Slice<Diagnostic> {
+    if !skip_indent { write(buf, outdent(content_ind)) }
+    write(buf, "{\n")
     let prologue = directive_prologue_len(block.body)
+    let mut diags: Slice<Diagnostic> = []
     for i in 0..block.body.length() {
       let st = block.body[i]
       match st {
-        // A bare block nested directly in a block indents one extra step
-        // (legacy BlockStatement special case).
-        BlockScope(inner) => emit(
-          &out,
-          self.block(inner, content_ind + indent_step(), false, true, false),
+        BlockScope(inner) => diags = merge_diags(
+          diags,
+          self.block(
+            buf,
+            inner,
+            content_ind + indent_step(),
+            false,
+            true,
+            false,
+          ),
         ),
-        _ => emit(&out, self.statement(st, content_ind, i < prologue)),
+        _ => diags = merge_diags(
+          diags,
+          self.statement(buf, st, content_ind, i < prologue),
+        ),
       }
     }
-    // Function bodies declare their dispatch temporaries before the
-    // closing brace (the legacy endOfScopeBody hook).
     if end_of_scope {
       if let Some(state) = self.receivers {
         if state.max > 0 {
-          out.text += content_ind + "var "
+          write(buf, content_ind + "var ")
           for i in 0..state.max {
-            if i > 0 { out.text += ", " }
-            out.text += f"___r{i + 1}"
+            if i > 0 { write(buf, ", ") }
+            write(buf, f"___r{i + 1}")
           }
-          out.text += ";\n"
+          write(buf, ";\n")
         }
       }
     }
-    out.text += outdent(content_ind)
-    out.text += "}"
-    if trailing_newline { out.text += "\n" }
-    out
+    write(buf, outdent(content_ind))
+    write(buf, "}")
+    if trailing_newline { write(buf, "\n") }
+    diags
   }
 
-  fn if_statement(self, st: IfStatement, ind: string, as_else: bool) -> JsPrinted {
-    let mut out = text_of("")
-    if !as_else { out.text += ind }
-    out.text += "if ("
-    emit(&out, self.expressions(st.condition.expression.*, ind))
-    out.text += ")"
+  fn if_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: IfStatement,
+    ind: string,
+    as_else: bool,
+  ) -> Slice<Diagnostic> {
+    if !as_else { write(buf, ind) }
+    write(buf, "if (")
+    let mut diags = self.expressions(buf, st.condition.expression.*, ind)
+    write(buf, ")")
     let consequent_empty = match st.consequence.* {
       Empty(_) => true,
       _ => false,
     }
-    if !consequent_empty { out.text += "\n" }
-    emit(&out, self.statement(st.consequence.*, ind + indent_step(), false))
+    if !consequent_empty { write(buf, "\n") }
+    diags = merge_diags(
+      diags,
+      self.statement(buf, st.consequence.*, ind + indent_step(), false),
+    )
     if let Some(alternative) = st.alternative {
       match alternative.body.* {
         If(nested) => {
-          out.text += ind + "else "
-          emit(&out, self.if_statement(nested, ind, true))
+          write(buf, ind + "else ")
+          diags = merge_diags(diags, self.if_statement(buf, nested, ind, true))
         },
-        Empty(_) => out.text += ind + "else;\n",
+        Empty(_) => write(buf, ind + "else;\n"),
         _ => {
-          out.text += ind + "else\n"
-          emit(
-            &out,
-            self.statement(alternative.body.*, ind + indent_step(), false),
+          write(buf, ind + "else\n")
+          diags = merge_diags(
+            diags,
+            self.statement(buf, alternative.body.*, ind + indent_step(), false),
           )
         },
       }
     }
-    out
+    diags
   }
 
-  fn switch_statement(self, st: SwitchStatement, ind: string) -> JsPrinted {
-    // Legacy quirks: no space after `switch`; `{` on the same line;
-    // `default:` prints with NO indentation.
-    let mut out = text_of(ind + "switch(")
-    emit(&out, self.expressions(st.value.expression.*, ind))
-    out.text += ") {\n"
+  fn switch_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: SwitchStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + "switch(")
+    let mut diags = self.expressions(buf, st.value.expression.*, ind)
+    write(buf, ") {\n")
     let case_ind = ind + indent_step()
     for entry in st.body.entries {
       match entry {
         Case(case) => {
-          out.text += case_ind + "case "
-          emit(&out, self.expressions(case.value.*, case_ind))
-          out.text += ":\n"
+          write(buf, case_ind + "case ")
+          diags = merge_diags(
+            diags,
+            self.expressions(buf, case.value.*, case_ind),
+          )
+          write(buf, ":\n")
           for body_st in case.body {
-            emit(&out, self.statement(body_st, case_ind + indent_step(), false))
+            diags = merge_diags(
+              diags,
+              self.statement(buf, body_st, case_ind + indent_step(), false),
+            )
           }
         },
         Default(default) => {
-          out.text += "default:\n"
+          write(buf, "default:\n")
           for body_st in default.body {
-            emit(&out, self.statement(body_st, case_ind + indent_step(), false))
+            diags = merge_diags(
+              diags,
+              self.statement(buf, body_st, case_ind + indent_step(), false),
+            )
           }
         },
       }
     }
-    out.text += ind + "}\n"
-    out
+    write(buf, ind + "}\n")
+    diags
   }
 
-  fn for_statement(self, st: ForStatement, ind: string) -> JsPrinted {
-    let mut out = text_of(ind + "for (")
+  fn for_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: ForStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + "for (")
+    let mut diags: Slice<Diagnostic> = []
     match st.initializer {
-      Lexical(lexical) => emit(
-        &out,
+      Lexical(lexical) => diags = merge_diags(
+        diags,
         self.declarators_inline(
+          buf,
           lexical_kind_text(lexical.kind),
           lexical.declarators,
           ind,
         ),
       ),
-      Variable(variable) => emit(
-        &out,
-        self.declarators_inline("var", variable.declarators, ind),
+      Variable(variable) => diags = merge_diags(
+        diags,
+        self.declarators_inline(buf, "var", variable.declarators, ind),
       ),
-      Expression(exprs) => emit(&out, self.for_init_expression(exprs.*, ind)),
+      Expression(exprs) => diags = merge_diags(
+        diags,
+        self.for_init_expression(buf, exprs.*, ind),
+      ),
       Empty(_) => (),
     }
-    out.text += "; "
+    write(buf, "; ")
     if let ForCondition.Expression(exprs) = st.condition {
-      emit(&out, self.expressions(exprs.*, ind))
+      diags = merge_diags(diags, self.expressions(buf, exprs.*, ind))
     }
-    out.text += "; "
+    write(buf, "; ")
     if let Some(increment) = st.increment {
-      emit(&out, self.expressions(increment, ind))
+      diags = merge_diags(diags, self.expressions(buf, increment, ind))
     }
-    out.text += ")"
+    write(buf, ")")
     let body_empty = match st.body.* {
       Empty(_) => true,
       _ => false,
     }
-    if !body_empty { out.text += "\n" }
-    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
-    out
+    if !body_empty { write(buf, "\n") }
+    merge_diags(
+      diags,
+      self.statement(buf, st.body.*, ind + indent_step(), false),
+    )
   }
 
-  // A bare `in` binary expression in for-init position is parenthesized
-  // (legacy ForInit), disambiguating it from a for-in header.
-  fn for_init_expression(self, exprs: Expressions, ind: string) -> JsPrinted {
+  fn for_init_expression(
+    self,
+    buf: Ref<strings.Builder>,
+    exprs: Expressions,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match exprs {
       Single(e) => {
         let bare_in = match e {
@@ -659,124 +658,182 @@ impl JsPrint {
           },
           _ => false,
         }
-        if bare_in { self.wrapped(e, ind) } else { self.expression(e, ind) }
+        if bare_in {
+          self.wrapped(buf, e, ind)
+        } else {
+          self.expression(buf, e, ind)
+        }
       },
-      Sequence(sequence) => self.sequence(sequence, ind),
+      Sequence(sequence) => self.sequence(buf, sequence, ind),
     }
   }
 
-  fn for_in_statement(self, st: ForInStatement, ind: string) -> JsPrinted {
+  fn for_in_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: ForInStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let is_of = match st.header.operator {
       Of => true,
       In => false,
     }
-    let mut out = text_of("")
     if is_of {
-      // Legacy quirk: for-of prints with no leading indentation and no
-      // space after `for`.
-      out.text += "for"
-      if st.is_await { out.text += " await " }
-      out.text += "("
+      write(buf, "for")
+      if st.is_await { write(buf, " await ") }
+      write(buf, "(")
     } else {
-      out.text += ind + "for ("
+      write(buf, ind + "for (")
     }
-    emit(&out, self.for_binding(st.header.binding, ind))
-    let operator = if is_of { " of " } else { " in " }
-    out.text += operator
-    emit(&out, self.expressions(st.header.right.*, ind))
-    out.text += ")\n"
-    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
-    out
+    let mut diags = self.for_binding(buf, st.header.binding, ind)
+    let of_or_in = if is_of { " of " } else { " in " }
+    write(buf, of_or_in)
+    diags = merge_diags(diags, self.expressions(buf, st.header.right.*, ind))
+    write(buf, ")\n")
+    merge_diags(
+      diags,
+      self.statement(buf, st.body.*, ind + indent_step(), false),
+    )
   }
 
-  fn for_binding(self, binding: ForBinding, ind: string) -> JsPrinted {
+  fn for_binding(
+    self,
+    buf: Ref<strings.Builder>,
+    binding: ForBinding,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match binding {
       Plain(plain) => match plain.left {
-        Lhs(lhs) => self.lhs_expression_value(lhs, ind),
-        Parenthesized(parenthesized) => self.parenthesized(parenthesized, ind),
+        Lhs(lhs) => self.lhs_expression_value(buf, lhs, ind),
+        Parenthesized(parenthesized) => self.parenthesized(
+          buf,
+          parenthesized,
+          ind,
+        ),
       },
       Declared(declared) => {
-        let mut out = text_of(variable_kind_text(declared.kind) + " ")
+        write(buf, variable_kind_text(declared.kind) + " ")
+        let mut diags: Slice<Diagnostic> = []
         match declared.left {
-          Identifier(identifier) => out.text += identifier.text,
-          Destructuring(pattern) => emit(&out, self.destructuring(pattern, ind)),
+          Identifier(identifier) => write(buf, identifier.text),
+          Destructuring(pattern) => diags = self.destructuring(
+            buf,
+            pattern,
+            ind,
+          ),
         }
         if let Some(initializer) = declared.initializer {
-          out.text += " = "
-          emit(&out, self.expression(initializer.value.*, ind))
+          write(buf, " = ")
+          diags = merge_diags(
+            diags,
+            self.expression(buf, initializer.value.*, ind),
+          )
         }
-        out
+        diags
       },
     }
   }
 
-  fn while_statement(self, st: WhileStatement, ind: string) -> JsPrinted {
-    let mut out = text_of(ind + "while (")
-    emit(&out, self.expressions(st.condition.expression.*, ind))
-    out.text += ")"
+  fn while_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: WhileStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + "while (")
+    let diags = self.expressions(buf, st.condition.expression.*, ind)
+    write(buf, ")")
     let body_empty = match st.body.* {
       Empty(_) => true,
       _ => false,
     }
-    if !body_empty { out.text += "\n" }
-    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
-    out
+    if !body_empty { write(buf, "\n") }
+    merge_diags(
+      diags,
+      self.statement(buf, st.body.*, ind + indent_step(), false),
+    )
   }
 
-  fn do_statement(self, st: DoStatement, ind: string) -> JsPrinted {
-    let mut out = text_of(ind + "do\n")
-    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
-    out.text += ind + "while ("
-    emit(&out, self.expressions(st.condition.expression.*, ind))
-    out.text += ");\n"
-    out
+  fn do_statement(self, buf: Ref<strings.Builder>, st: DoStatement, ind: string) -> Slice<Diagnostic> {
+    write(buf, ind + "do\n")
+    let mut diags = self.statement(buf, st.body.*, ind + indent_step(), false)
+    write(buf, ind + "while (")
+    diags = merge_diags(
+      diags,
+      self.expressions(buf, st.condition.expression.*, ind),
+    )
+    write(buf, ");\n")
+    diags
   }
 
-  fn with_statement(self, st: WithStatement, ind: string) -> JsPrinted {
-    // Legacy: no space after `with`.
-    let mut out = text_of(ind + "with(")
-    emit(&out, self.expressions(st.object.expression.*, ind))
-    out.text += ")\n"
-    emit(&out, self.statement(st.body.*, ind + indent_step(), false))
-    out
+  fn with_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: WithStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + "with(")
+    let diags = self.expressions(buf, st.object.expression.*, ind)
+    write(buf, ")\n")
+    merge_diags(
+      diags,
+      self.statement(buf, st.body.*, ind + indent_step(), false),
+    )
   }
 
-  fn try_statement(self, st: TryStatement, ind: string) -> JsPrinted {
-    let mut out = text_of(ind + "try ")
-    emit(&out, self.block(st.body, ind + indent_step(), true, false, false))
+  fn try_statement(
+    self,
+    buf: Ref<strings.Builder>,
+    st: TryStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + "try ")
+    let mut diags = self.block(
+      buf,
+      st.body,
+      ind + indent_step(),
+      true,
+      false,
+      false,
+    )
     if let Some(handler) = st.handler {
-      out.text += "\n" + ind + "catch"
+      write(buf, "\n" + ind + "catch")
       if let Some(parameter) = handler.parameter {
-        out.text += "("
+        write(buf, "(")
         match parameter {
-          Identifier(identifier) => out.text += identifier.text,
-          Destructuring(pattern) => emit(&out, self.destructuring(pattern, ind)),
+          Identifier(identifier) => write(buf, identifier.text),
+          Destructuring(pattern) => diags = merge_diags(
+            diags,
+            self.destructuring(buf, pattern, ind),
+          ),
         }
-        out.text += ") "
+        write(buf, ") ")
       }
-      emit(
-        &out,
-        self.block(handler.body, ind + indent_step(), true, false, false),
+      diags = merge_diags(
+        diags,
+        self.block(buf, handler.body, ind + indent_step(), true, false, false),
       )
     }
     if let Some(finalizer) = st.finalizer {
-      out.text += "\n" + ind + "finally "
-      emit(
-        &out,
-        self.block(finalizer.body, ind + indent_step(), true, false, false),
+      write(buf, "\n" + ind + "finally ")
+      diags = merge_diags(
+        diags,
+        self.block(buf, finalizer.body, ind + indent_step(), true, false, false),
       )
     }
-    out.text += "\n"
-    out
+    write(buf, "\n")
+    diags
   }
 
-  // ---------------------------------------------------------------------------
-  // Declarations
-  // ---------------------------------------------------------------------------
-
-  fn declaration(self, declaration: Declaration, ind: string) -> JsPrinted {
+  fn declaration(
+    self,
+    buf: Ref<strings.Builder>,
+    declaration: Declaration,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match declaration {
       Function(function) => self.function_like(
+        buf,
         ind,
         Some(function.name),
         function.is_async,
@@ -786,6 +843,7 @@ impl JsPrint {
         true,
       ),
       GeneratorFunction(generator) => self.function_like(
+        buf,
         ind,
         Some(generator.name),
         generator.is_async,
@@ -795,6 +853,7 @@ impl JsPrint {
         true,
       ),
       Class(class) => self.class_like(
+        buf,
         Some(class.name),
         class.heritage,
         class.body,
@@ -802,80 +861,82 @@ impl JsPrint {
         false,
       ),
       Lexical(lexical) => self.variable_declaration(
+        buf,
         lexical_kind_text(lexical.kind),
         lexical.declarators,
         ind,
       ),
       Variable(variable) => self.variable_declaration(
+        buf,
         "var",
         variable.declarators,
         ind,
       ),
       Using(using) => {
-        // No legacy emitter exists for using declarations; mechanical
-        // variable-declaration shape (recorded decision).
         let kind = if using.is_await { "await using" } else { "using" }
-        self.variable_declaration(kind, using.declarators, ind)
+        self.variable_declaration(buf, kind, using.declarators, ind)
       },
     }
   }
 
-  // variable_declaration is the statement form: continuation declarators
-  // each start a new line at the declaration's indentation plus four
-  // literal spaces (legacy VariableDeclaration).
   fn variable_declaration(
     self,
+    buf: Ref<strings.Builder>,
     kind: string,
     declarators: Slice<VariableDeclarator>,
     ind: string,
-  ) -> JsPrinted {
-    let mut out = text_of(ind + kind + " ")
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + kind + " ")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for declarator in declarators {
-      if !first { out.text += ",\n" + ind + "    " }
-      emit(&out, self.declarator(declarator, ind))
+      if !first { write(buf, ",\n" + ind + "    ") }
+      diags = merge_diags(diags, self.declarator(buf, declarator, ind))
       first = false
     }
-    out.text += ";\n"
-    out
+    write(buf, ";\n")
+    diags
   }
 
-  // declarators_inline is the for-init form: comma-space separators, no
-  // indentation, no terminator.
   fn declarators_inline(
     self,
+    buf: Ref<strings.Builder>,
     kind: string,
     declarators: Slice<VariableDeclarator>,
     ind: string,
-  ) -> JsPrinted {
-    let mut out = text_of(kind + " ")
+  ) -> Slice<Diagnostic> {
+    write(buf, kind + " ")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for declarator in declarators {
-      if !first { out.text += ", " }
-      emit(&out, self.declarator(declarator, ind))
+      if !first { write(buf, ", ") }
+      diags = merge_diags(diags, self.declarator(buf, declarator, ind))
       first = false
     }
-    out
+    diags
   }
 
-  fn declarator(self, declarator: VariableDeclarator, ind: string) -> JsPrinted {
-    let mut out = match declarator.name {
-      Identifier(identifier) => text_of(identifier.text),
-      Destructuring(pattern) => self.destructuring(pattern, ind),
+  fn declarator(
+    self,
+    buf: Ref<strings.Builder>,
+    declarator: VariableDeclarator,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let mut diags: Slice<Diagnostic> = []
+    match declarator.name {
+      Identifier(identifier) => write(buf, identifier.text),
+      Destructuring(pattern) => diags = self.destructuring(buf, pattern, ind),
     }
     if let Some(initializer) = declarator.initializer {
-      out.text += " = "
-      emit(&out, self.expression(initializer.value.*, ind))
+      write(buf, " = ")
+      diags = merge_diags(diags, self.expression(buf, initializer.value.*, ind))
     }
-    out
+    diags
   }
 
-  // function_like covers function declarations and expressions, plain and
-  // generator.  The global-escape rewrite applies to every named function
-  // (see header); the legacy emitter prefixes the CURRENT indentation even
-  // mid-expression — that quirk is preserved by emitting `ind` first.
   fn function_like(
     self,
+    buf: Ref<strings.Builder>,
     ind: string,
     name: Option<Identifier>,
     is_async: bool,
@@ -883,90 +944,104 @@ impl JsPrint {
     parameters: FormalParameters,
     body: StatementBlock,
     is_declaration: bool,
-  ) -> JsPrinted {
-    let mut out = text_of(ind)
-    if let Some(identifier) = name { out.text += identifier.text + " = " }
+  ) -> Slice<Diagnostic> {
+    write(buf, ind)
+    if let Some(identifier) = name { write(buf, identifier.text + " = ") }
     let mut keywords: Slice<string> = []
     if is_async { keywords = keywords.append("async") }
     keywords = keywords.append("function")
     if is_generator { keywords = keywords.append("*") }
-    out.text += strings.Join(keywords, " ")
-    out.text += "("
-    emit(&out, self.formal_parameters(parameters, ind))
-    out.text += ")\n"
+    write(buf, strings.Join(keywords, " "))
+    write(buf, "(")
+    let diags = self.formal_parameters(buf, parameters, ind)
+    write(buf, ")\n")
     let mut inner = self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
     inner.locals = function_scope_locals(self.locals, name, parameters, body)
-    emit(
-      &out,
-      inner.block(body, ind + indent_step(), false, is_declaration, true),
+    merge_diags(
+      diags,
+      inner.block(buf, body, ind + indent_step(), false, is_declaration, true),
     )
-    out
   }
 
-  fn formal_parameters(self, parameters: FormalParameters, ind: string) -> JsPrinted {
-    let mut out = text_of("")
+  fn formal_parameters(
+    self,
+    buf: Ref<strings.Builder>,
+    parameters: FormalParameters,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for parameter in parameters.parameters {
-      if !first { out.text += ", " }
+      if !first { write(buf, ", ") }
       match parameter {
-        Pattern(pattern) => emit(&out, self.pattern(pattern, ind)),
-        Assignment(assignment) => emit(
-          &out,
-          self.assignment_pattern(assignment, ind),
+        Pattern(pattern) => diags = merge_diags(
+          diags,
+          self.pattern(buf, pattern, ind),
+        ),
+        Assignment(assignment) => diags = merge_diags(
+          diags,
+          self.assignment_pattern(buf, assignment, ind),
         ),
       }
       first = false
     }
-    out
+    diags
   }
-
-  // ---------------------------------------------------------------------------
-  // Classes (corpus-rare; transcribed from the legacy emitters, with the
-  // recorded method-rewrite deviation — see header)
-  // ---------------------------------------------------------------------------
 
   fn class_like(
     self,
+    buf: Ref<strings.Builder>,
     name: Option<Identifier>,
     heritage: Option<ClassHeritage>,
     body: ClassBody,
     ind: string,
     is_expression: bool,
-  ) -> JsPrinted {
-    // Legacy quirk: class declarations print no leading indentation.
-    let mut out = text_of("")
-    if is_expression { out.text += "(" }
-    out.text += "class "
-    if let Some(identifier) = name { out.text += identifier.text }
+  ) -> Slice<Diagnostic> {
+    if is_expression { write(buf, "(") }
+    write(buf, "class ")
+    if let Some(identifier) = name { write(buf, identifier.text) }
+    let mut diags: Slice<Diagnostic> = []
     if let Some(parent) = heritage {
-      out.text += " extends "
-      emit(&out, self.expression(parent.parent.*, ind))
+      write(buf, " extends ")
+      diags = self.expression(buf, parent.parent.*, ind)
     }
-    emit(&out, self.class_body(body, ind + indent_step()))
-    if is_expression { out.text += ")" }
-    out
+    diags = merge_diags(diags, self.class_body(buf, body, ind + indent_step()))
+    if is_expression { write(buf, ")") }
+    diags
   }
 
-  fn class_body(self, body: ClassBody, ind: string) -> JsPrinted {
-    let mut out = text_of(" {\n")
+  fn class_body(self, buf: Ref<strings.Builder>, body: ClassBody, ind: string) -> Slice<Diagnostic> {
+    write(buf, " {\n")
+    let mut diags: Slice<Diagnostic> = []
     for member in body.members {
       match member {
-        Method(method) => emit(&out, self.class_method(method, ind)),
-        Field(field) => emit(&out, self.field_definition(field, ind)),
-        StaticBlock(static_block) => emit(
-          &out,
-          self.static_block(static_block, ind),
+        Method(method) => diags = merge_diags(
+          diags,
+          self.class_method(buf, method, ind),
+        ),
+        Field(field) => diags = merge_diags(
+          diags,
+          self.field_definition(buf, field, ind),
+        ),
+        StaticBlock(static_block) => diags = merge_diags(
+          diags,
+          self.static_block(buf, static_block, ind),
         ),
       }
-      out.text += "\n"
+      write(buf, "\n")
     }
-    out.text += "}\n"
-    out
+    write(buf, "}\n")
+    diags
   }
 
-  fn class_method(self, method: MethodDefinition, ind: string) -> JsPrinted {
+  fn class_method(
+    self,
+    buf: Ref<strings.Builder>,
+    method: MethodDefinition,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let mut keywords: Slice<string> = []
     if method.is_static { keywords = keywords.append("static") }
     let mut is_generator = false
@@ -979,13 +1054,16 @@ impl JsPrint {
     }
     if method.is_async { keywords = keywords.append("async") }
     if is_generator { keywords = keywords.append("*") }
-    let mut out = text_of(ind)
-    out.text += strings.Join(keywords, " ")
-    out.text += " "
-    emit(&out, self.property_name(method.name, ind))
-    out.text += "("
-    emit(&out, self.formal_parameters(method.parameters, ind))
-    out.text += ")\n"
+    write(buf, ind)
+    write(buf, strings.Join(keywords, " "))
+    write(buf, " ")
+    let mut diags = self.property_name(buf, method.name, ind)
+    write(buf, "(")
+    diags = merge_diags(
+      diags,
+      self.formal_parameters(buf, method.parameters, ind),
+    )
+    write(buf, ")\n")
     let mut inner = self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
@@ -995,68 +1073,76 @@ impl JsPrint {
       method.parameters,
       method.body,
     )
-    emit(
-      &out,
-      inner.block(method.body, ind + indent_step(), false, false, true),
+    merge_diags(
+      diags,
+      inner.block(buf, method.body, ind + indent_step(), false, false, true),
     )
-    out
   }
 
-  fn field_definition(self, field: FieldDefinition, ind: string) -> JsPrinted {
-    let mut out = text_of(ind)
-    if field.is_static { out.text += "static " }
-    emit(&out, self.property_name(field.property, ind))
+  fn field_definition(
+    self,
+    buf: Ref<strings.Builder>,
+    field: FieldDefinition,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind)
+    if field.is_static { write(buf, "static ") }
+    let mut diags = self.property_name(buf, field.property, ind)
     if let Some(initializer) = field.initializer {
-      out.text += " = "
-      emit(&out, self.expression(initializer.value.*, ind))
+      write(buf, " = ")
+      diags = merge_diags(diags, self.expression(buf, initializer.value.*, ind))
     }
-    out.text += ";"
-    out
+    write(buf, ";")
+    diags
   }
 
-  fn static_block(self, static_block: ClassStaticBlock, ind: string) -> JsPrinted {
-    // Legacy StaticBlock: `static{` with no spacing or newline.
-    let mut out = text_of(ind + "static{")
+  fn static_block(
+    self,
+    buf: Ref<strings.Builder>,
+    static_block: ClassStaticBlock,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, ind + "static{")
+    let mut diags: Slice<Diagnostic> = []
     for st in static_block.body.body {
-      emit(&out, self.statement(st, ind, false))
+      diags = merge_diags(diags, self.statement(buf, st, ind, false))
     }
-    out.text += "}"
-    out
+    write(buf, "}")
+    diags
   }
 
-  // ---------------------------------------------------------------------------
-  // ES module statements (transcribed; corpus-absent)
-  // ---------------------------------------------------------------------------
-
-  fn es_import(self, st: ImportStatement) -> JsPrinted {
-    // Legacy ImportDeclaration: no leading indentation; trailing newline.
-    let mut out = text_of("import ")
+  fn es_import(self, buf: Ref<strings.Builder>, st: ImportStatement) -> Slice<Diagnostic> {
+    write(buf, "import ")
+    let mut diags: Slice<Diagnostic> = []
     if let Some(clause) = st.clause {
       match clause {
-        Namespace(namespace) => out.text += f"* as {namespace.alias.text}",
-        Named(named) => emit(&out, self.named_imports(named)),
+        Namespace(namespace) => write(buf, f"* as {namespace.alias.text}"),
+        Named(named) => diags = self.named_imports(buf, named),
         Default(default) => {
-          out.text += default.name.text
+          write(buf, default.name.text)
           if let Some(extra) = default.extra {
-            out.text += ", "
+            write(buf, ", ")
             match extra {
-              Namespace(namespace) => out.text += f"* as {namespace.alias.text}",
-              Named(named) => emit(&out, self.named_imports(named)),
+              Namespace(namespace) => write(buf, f"* as {namespace.alias.text}"),
+              Named(named) => diags = merge_diags(
+                diags,
+                self.named_imports(buf, named),
+              ),
             }
           }
         },
       }
-      out.text += " from "
+      write(buf, " from ")
     }
-    out.text += st.source.text
-    out.text += "\n"
+    write(buf, st.source.text)
+    write(buf, "\n")
     if let Some(attribute) = st.attribute {
-      out.diags = merge_diags(
-        out.diags,
+      diags = merge_diags(
+        diags,
         [
           diag_warn_at(
             BuildPhase.Compile,
-            "codegen: import attribute deferred — no legacy emitter",
+            "codegen: import attribute deferred -- no legacy emitter",
             self.file,
             attribute.pos.row,
             attribute.pos.col,
@@ -1064,186 +1150,203 @@ impl JsPrint {
         ],
       )
     }
-    out
+    diags
   }
 
-  fn named_imports(self, named: NamedImports) -> JsPrinted {
-    let mut out = text_of("{")
+  fn named_imports(self, buf: Ref<strings.Builder>, named: NamedImports) -> Slice<Diagnostic> {
+    write(buf, "{")
     let mut first = true
     for specifier in named.specifiers {
-      if !first { out.text += ", " }
-      out.text += module_export_name_text(specifier.name)
-      if let Some(alias) = specifier.alias { out.text += f" as {alias.text}" }
+      if !first { write(buf, ", ") }
+      write(buf, module_export_name_text(specifier.name))
+      if let Some(alias) = specifier.alias { write(buf, f" as {alias.text}") }
       first = false
     }
-    out.text += "}"
-    out
+    write(buf, "}")
+    []
   }
 
-  fn es_export(self, st: ExportStatement, ind: string) -> JsPrinted {
+  fn es_export(
+    self,
+    buf: Ref<strings.Builder>,
+    st: ExportStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match st {
-      // Legacy ExportAllDeclaration concatenates "export * " and " from ",
-      // yielding a double space when no alias intervenes.  The quirk is
-      // the law.
-      All(all) => text_of(f"export *  from {all.source.text}\n"),
+      All(all) => {
+        write(buf, f"export *  from {all.source.text}\n")
+        []
+      },
       Namespace(namespace) => {
         let name = module_export_name_text(namespace.name)
-        text_of(f"export * as {name} from {namespace.source.text}\n")
+        write(buf, f"export * as {name} from {namespace.source.text}\n")
+        []
       },
       Named(named) => {
-        let mut out = text_of("export {")
+        write(buf, "export {")
         let mut first = true
         for specifier in named.clause.specifiers {
-          if !first { out.text += ", " }
-          out.text += module_export_name_text(specifier.name)
+          if !first { write(buf, ", ") }
+          write(buf, module_export_name_text(specifier.name))
           if let Some(alias) = specifier.alias {
-            out.text += f" as {module_export_name_text(alias)}"
+            write(buf, f" as {module_export_name_text(alias)}")
           }
           first = false
         }
-        out.text += "}"
+        write(buf, "}")
         if let Some(source) = named.source {
-          out.text += f" from {source.text}"
+          write(buf, f" from {source.text}")
         }
-        out.text += "\n"
-        out
+        write(buf, "\n")
+        []
       },
       Declaration(declaration) => {
-        let mut out = text_of("export ")
-        emit(&out, self.declaration(declaration, ind))
-        out
+        write(buf, "export ")
+        self.declaration(buf, declaration, ind)
       },
       DefaultDeclaration(declaration) => {
-        let mut out = text_of("export default ")
-        emit(&out, self.declaration(declaration, ind))
-        out
+        write(buf, "export default ")
+        self.declaration(buf, declaration, ind)
       },
       DefaultValue(e) => {
-        let mut out = text_of("export default ")
-        emit(&out, self.expression(e, ind))
-        out
+        write(buf, "export default ")
+        self.expression(buf, e, ind)
       },
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // @import → objj_executeFile (the one ObjJ statement tier A must own:
-  // the main.j oracle includes the import prelude, and the legacy emitter
-  // writes these inline at the statement's source position)
-  // ---------------------------------------------------------------------------
-
-  fn objj_import(self, st: ObjjImport) -> JsPrinted {
+  fn objj_import(self, buf: Ref<strings.Builder>, st: ObjjImport) -> Slice<Diagnostic> {
     match st.path {
       System(lib) => {
-        // SystemLibString text is the raw token: <Foundation/Foundation.j>
         let length = lib.text.length()
         let inner = if length > 2 {
           lib.text.substring(1..length - 1)
         } else {
           ""
         }
-        text_of("objj_executeFile(\"" + inner + "\", NO);")
+        write(buf, "objj_executeFile(\"" + inner + "\", NO);")
       },
       Local(literal) => {
         let inner = string_literal_inner(literal)
-        text_of("objj_executeFile(\"" + inner + "\", YES);")
+        write(buf, "objj_executeFile(\"" + inner + "\", YES);")
       },
     }
+    []
   }
 
-  // ---------------------------------------------------------------------------
-  // Expressions
-  // ---------------------------------------------------------------------------
-
-  fn expressions(self, exprs: Expressions, ind: string) -> JsPrinted {
+  fn expressions(
+    self,
+    buf: Ref<strings.Builder>,
+    exprs: Expressions,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match exprs {
-      Single(e) => self.expression(e, ind),
-      Sequence(sequence) => self.sequence(sequence, ind),
+      Single(e) => self.expression(buf, e, ind),
+      Sequence(sequence) => self.sequence(buf, sequence, ind),
     }
   }
 
-  // Sequences always print their own parentheses (legacy SequenceExpression).
-  fn sequence(self, sequence: SequenceExpression, ind: string) -> JsPrinted {
-    let mut out = text_of("(")
+  fn sequence(
+    self,
+    buf: Ref<strings.Builder>,
+    sequence: SequenceExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "(")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for item in sequence.items {
-      if !first { out.text += ", " }
-      emit(&out, self.expression(item, ind))
+      if !first { write(buf, ", ") }
+      diags = merge_diags(diags, self.expression(buf, item, ind))
       first = false
     }
-    out.text += ")"
-    out
+    write(buf, ")")
+    diags
   }
 
-  fn expression(self, e: Expression, ind: string) -> JsPrinted {
+  fn expression(self, buf: Ref<strings.Builder>, e: Expression, ind: string) -> Slice<Diagnostic> {
     match e {
-      Primary(primary) => self.primary(primary, ind),
-      Assignment(assignment) => self.assignment(assignment, ind),
+      Primary(primary) => self.primary(buf, primary, ind),
+      Assignment(assignment) => self.assignment(buf, assignment, ind),
       AugmentedAssignment(augmented) => self.augmented_assignment(
+        buf,
         augmented,
         ind,
       ),
       Await(await_expr) => {
-        // Legacy AwaitExpression always parenthesizes its argument.
-        let mut out = text_of("await (")
-        emit(&out, self.expression(await_expr.argument.*, ind))
-        out.text += ")"
-        out
+        write(buf, "await (")
+        let diags = self.expression(buf, await_expr.argument.*, ind)
+        write(buf, ")")
+        diags
       },
       Unary(unary) => {
-        let mut out = text_of(unary_op_text(unary.operator))
-        if unary_op_is_word(unary.operator) { out.text += " " }
-        emit(&out, self.operand(4, 0, false, unary.argument.*, false, ind))
-        out
+        write(buf, unary_op_text(unary.operator))
+        if unary_op_is_word(unary.operator) { write(buf, " ") }
+        self.operand(buf, 4, 0, false, unary.argument.*, false, ind)
       },
-      Binary(binary) => self.binary(binary, ind),
+      Binary(binary) => self.binary(buf, binary, ind),
       Ternary(ternary) => {
-        let mut out = self.operand(7, 0, false, ternary.condition.*, false, ind)
-        out.text += " ? "
-        emit(&out, self.expression(ternary.consequence.*, ind))
-        out.text += " : "
-        emit(&out, self.expression(ternary.alternative.*, ind))
-        out
+        let mut diags = self.operand(
+          buf,
+          7,
+          0,
+          false,
+          ternary.condition.*,
+          false,
+          ind,
+        )
+        write(buf, " ? ")
+        diags = merge_diags(
+          diags,
+          self.expression(buf, ternary.consequence.*, ind),
+        )
+        write(buf, " : ")
+        merge_diags(diags, self.expression(buf, ternary.alternative.*, ind))
       },
       Update(update) => {
-        // Update on an @deref target rewrites through the setter form:
-        // prefix `(x)(x() + 1)`, postfix `((x)(x() + 1) - 1)` (mirrored
-        // for --).  Recorded in the brief; no corpus instance.
         if let Some(deref) = expression_as_deref(update.argument.*) {
-          self.deref_update(deref, update.operator, update.is_prefix, ind)
+          self.deref_update(buf, deref, update.operator, update.is_prefix, ind)
         } else if update.is_prefix {
-          let mut out = text_of(update_op_text(update.operator))
-          emit(&out, self.operand(4, 0, false, update.argument.*, false, ind))
-          out
+          write(buf, update_op_text(update.operator))
+          self.operand(buf, 4, 0, false, update.argument.*, false, ind)
         } else {
-          let mut out = self.operand(4, 0, false, update.argument.*, false, ind)
-          out.text += update_op_text(update.operator)
-          out
+          let diags = self.operand(
+            buf,
+            4,
+            0,
+            false,
+            update.argument.*,
+            false,
+            ind,
+          )
+          write(buf, update_op_text(update.operator))
+          diags
         }
       },
-      New(new_expr) => self.new_expression(new_expr, ind),
+      New(new_expr) => self.new_expression(buf, new_expr, ind),
       Yield(yield_expr) => {
-        let mut out = text_of("yield")
-        if yield_expr.is_delegate { out.text += "*" }
+        write(buf, "yield")
+        if yield_expr.is_delegate { write(buf, "*") }
         if let Some(argument) = yield_expr.argument {
-          out.text += " "
-          emit(&out, self.expression(argument.*, ind))
+          write(buf, " ")
+          self.expression(buf, argument.*, ind)
+        } else {
+          []
         }
-        out
       },
     }
   }
 
-  // operand prints a child expression, parenthesized per the A() predicate.
   fn operand(
     self,
+    buf: Ref<strings.Builder>,
     parent_prec: int,
     parent_t: int,
     parent_is_operator: bool,
     e: Expression,
     is_right: bool,
     ind: string,
-  ) -> JsPrinted {
+  ) -> Slice<Diagnostic> {
     if operand_needs_parens(
       parent_prec,
       parent_t,
@@ -1251,18 +1354,25 @@ impl JsPrint {
       e,
       is_right,
     ) {
-      self.wrapped(e, ind)
+      self.wrapped(buf, e, ind)
     } else {
-      self.expression(e, ind)
+      self.expression(buf, e, ind)
     }
   }
 
-  fn wrapped(self, e: Expression, ind: string) -> JsPrinted {
-    let inner = self.expression(e, ind)
-    JsPrinted { text: f"({inner.text})", diags: inner.diags }
+  fn wrapped(self, buf: Ref<strings.Builder>, e: Expression, ind: string) -> Slice<Diagnostic> {
+    write(buf, "(")
+    let diags = self.expression(buf, e, ind)
+    write(buf, ")")
+    diags
   }
 
-  fn binary(self, binary: BinaryExpression, ind: string) -> JsPrinted {
+  fn binary(
+    self,
+    buf: Ref<strings.Builder>,
+    binary: BinaryExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let parent_prec = if binary_op_is_logical(binary.operator) { 6 } else { 5 }
     let parent_t = binary_op_t(binary.operator)
     let nullish = match binary.operator {
@@ -1273,12 +1383,10 @@ impl JsPrint {
       Exp => true,
       _ => false,
     }
-    let mut out = text_of("")
+    let mut diags: Slice<Diagnostic> = []
     match binary.left {
-      PrivateProperty(private) => out.text += f"#{private.text}",
+      PrivateProperty(private) => write(buf, f"#{private.text}"),
       Expression(left) => {
-        // Forced parentheses: the left operand of `**`, an arrow function
-        // as a binary left operand, and both operands of `??`.
         let left_is_arrow = match left.* {
           Primary(primary) => match primary {
             Arrow(_) => true,
@@ -1287,88 +1395,114 @@ impl JsPrint {
           _ => false,
         }
         if nullish || exponent || left_is_arrow {
-          emit(&out, self.wrapped(left.*, ind))
+          diags = self.wrapped(buf, left.*, ind)
         } else {
-          emit(
-            &out,
-            self.operand(parent_prec, parent_t, true, left.*, false, ind),
+          diags = self.operand(
+            buf,
+            parent_prec,
+            parent_t,
+            true,
+            left.*,
+            false,
+            ind,
           )
         }
       },
     }
-    out.text += f" {binary_op_text(binary.operator)} "
+    write(buf, f" {binary_op_text(binary.operator)} ")
     if nullish {
-      emit(&out, self.wrapped(binary.right.*, ind))
+      merge_diags(diags, self.wrapped(buf, binary.right.*, ind))
     } else {
-      emit(
-        &out,
-        self.operand(parent_prec, parent_t, true, binary.right.*, true, ind),
+      merge_diags(
+        diags,
+        self.operand(
+          buf,
+          parent_prec,
+          parent_t,
+          true,
+          binary.right.*,
+          true,
+          ind,
+        ),
       )
     }
-    out
   }
 
-  fn assignment(self, assignment: AssignmentExpression, ind: string) -> JsPrinted {
+  fn assignment(
+    self,
+    buf: Ref<strings.Builder>,
+    assignment: AssignmentExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match assignment {
       Standard(standard) => {
-        let mut out = self.assignment_target(standard.left, ind)
-        out.text += " = "
-        emit(&out, self.operand(8, 0, false, standard.right.*, true, ind))
-        out
+        let diags = self.assignment_target(buf, standard.left, ind)
+        write(buf, " = ")
+        merge_diags(
+          diags,
+          self.operand(buf, 8, 0, false, standard.right.*, true, ind),
+        )
       },
-      // @deref assignment: `(expr)(value)` for =, `(expr)(expr() <op> value)`
-      // for compound, where <op> is the assignment operator's first char.
       ObjjDeref(deref) => {
-        let target = self.expression(deref.left.argument.*, ind)
-        let mut out = JsPrinted { 
-          text: "(" + target.text + ")(",
-          diags: target.diags,
-        }
+        write(buf, "(")
+        let mut diags = self.expression(buf, deref.left.argument.*, ind)
+        write(buf, ")(")
         if let AssignmentOp.Assign = deref.operator {
-          emit(&out, self.expression(deref.right.*, ind))
+          diags = merge_diags(diags, self.expression(buf, deref.right.*, ind))
         } else {
-          emit(&out, self.expression(deref.left.argument.*, ind))
-          out.text += "() " + assignment_op_char(deref.operator) + " "
-          emit(&out, self.expression(deref.right.*, ind))
+          diags = merge_diags(
+            diags,
+            self.expression(buf, deref.left.argument.*, ind),
+          )
+          write(buf, "() " + assignment_op_char(deref.operator) + " ")
+          diags = merge_diags(diags, self.expression(buf, deref.right.*, ind))
         }
-        out.text += ")"
-        out
+        write(buf, ")")
+        diags
       },
     }
   }
 
-  fn assignment_target(self, target: AssignmentTarget, ind: string) -> JsPrinted {
+  fn assignment_target(
+    self,
+    buf: Ref<strings.Builder>,
+    target: AssignmentTarget,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match target {
-      Parenthesized(parenthesized) => self.parenthesized(parenthesized.*, ind),
-      Lhs(lhs) => self.lhs_expression_value(lhs.*, ind),
+      Parenthesized(parenthesized) => self.parenthesized(
+        buf,
+        parenthesized.*,
+        ind,
+      ),
+      Lhs(lhs) => self.lhs_expression_value(buf, lhs.*, ind),
     }
   }
 
-  // lhs_expression_value is the expression-position reading of an LHS:
-  // a bare identifier is subject to the ivar rewrite (`theWindow = x`
-  // becomes `self.theWindow = x`).  Pattern positions — parameters,
-  // declarations, destructuring — use lhs_expression, which never
-  // rewrites.
-  fn lhs_expression_value(self, lhs: LhsExpression, ind: string) -> JsPrinted {
+  fn lhs_expression_value(
+    self,
+    buf: Ref<strings.Builder>,
+    lhs: LhsExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match lhs {
-      Identifier(identifier) => self.identifier(identifier),
-      _ => self.lhs_expression(lhs, ind),
+      Identifier(identifier) => self.identifier(buf, identifier),
+      _ => self.lhs_expression(buf, lhs, ind),
     }
   }
 
-  // identifier applies the legacy ivar rule: inside an instance method,
-  // an identifier that is not locally bound, not one of the reserved
-  // names, and names an ivar of the current class prints as self.name.
-  fn identifier(self, identifier: Identifier) -> JsPrinted {
+  fn identifier(self, buf: Ref<strings.Builder>, identifier: Identifier) -> Slice<Diagnostic> {
     if self.in_instance_method && !reserved_identifier(identifier.text) &&
     !self.is_local(identifier.text) {
       if let Some(context) = self.current_class {
         if context.ivars[identifier.text] {
-          return text_of(f"self.{identifier.text}")
+          write(buf, f"self.{identifier.text}")
+          return []
         }
       }
     }
-    text_of(identifier.text)
+    write(buf, identifier.text)
+    []
   }
 
   fn is_local(self, name: string) -> bool {
@@ -1380,64 +1514,111 @@ impl JsPrint {
 
   fn augmented_assignment(
     self,
+    buf: Ref<strings.Builder>,
     augmented: AugmentedAssignmentExpression,
     ind: string,
-  ) -> JsPrinted {
-    let mut out = match augmented.left {
-      Member(member) => self.member(member.*, ind),
-      Subscript(subscript) => self.subscript(subscript.*, ind),
-      Identifier(identifier) => self.identifier(identifier),
-      Parenthesized(parenthesized) => self.parenthesized(parenthesized.*, ind),
+  ) -> Slice<Diagnostic> {
+    let diags = match augmented.left {
+      Member(member) => self.member(buf, member.*, ind),
+      Subscript(subscript) => self.subscript(buf, subscript.*, ind),
+      Identifier(identifier) => self.identifier(buf, identifier),
+      Parenthesized(parenthesized) => self.parenthesized(
+        buf,
+        parenthesized.*,
+        ind,
+      ),
     }
-    out.text += f" {augmented_op_text(augmented.operator)} "
-    emit(&out, self.operand(8, 0, false, augmented.right.*, true, ind))
-    out
+    write(buf, f" {augmented_op_text(augmented.operator)} ")
+    merge_diags(
+      diags,
+      self.operand(buf, 8, 0, false, augmented.right.*, true, ind),
+    )
   }
 
-  fn new_expression(self, new_expr: NewExpression, ind: string) -> JsPrinted {
-    let mut out = text_of("new ")
+  fn new_expression(
+    self,
+    buf: Ref<strings.Builder>,
+    new_expr: NewExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "new ")
+    let mut diags: Slice<Diagnostic> = []
     match new_expr.constructor {
       Primary(primary) => {
         if 1 < primary_prec(primary.*) {
-          let inner = self.primary(primary.*, ind)
-          out.text += f"({inner.text})"
-          out.diags = merge_diags(out.diags, inner.diags)
+          write(buf, "(")
+          diags = self.primary(buf, primary.*, ind)
+          write(buf, ")")
         } else {
-          emit(&out, self.primary(primary.*, ind))
+          diags = self.primary(buf, primary.*, ind)
         }
       },
-      New(nested) => emit(&out, self.new_expression(nested.*, ind)),
+      New(nested) => diags = self.new_expression(buf, nested.*, ind),
     }
-    // Legacy NewExpression always prints the argument parentheses.
-    out.text += "("
+    write(buf, "(")
     if let Some(arguments) = new_expr.arguments {
-      emit(&out, self.arguments(arguments, ind))
+      diags = merge_diags(diags, self.arguments(buf, arguments, ind))
     }
-    out.text += ")"
-    out
+    write(buf, ")")
+    diags
   }
 
-  fn primary(self, primary: PrimaryExpression, ind: string) -> JsPrinted {
+  fn primary(
+    self,
+    buf: Ref<strings.Builder>,
+    primary: PrimaryExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match primary {
-      Subscript(subscript) => self.subscript(subscript, ind),
-      Member(member) => self.member(member, ind),
-      Parenthesized(parenthesized) => self.parenthesized(parenthesized, ind),
-      Identifier(identifier) => self.identifier(identifier),
-      Undefined(_) => text_of("undefined"),
-      This(_) => text_of("this"),
-      Super(_) => text_of("super"),
-      Number(number) => text_of(number.text),
-      String(literal) => text_of(literal.text),
-      Template(template) => self.template(template, ind),
+      Subscript(subscript) => self.subscript(buf, subscript, ind),
+      Member(member) => self.member(buf, member, ind),
+      Parenthesized(parenthesized) => self.parenthesized(
+        buf,
+        parenthesized,
+        ind,
+      ),
+      Identifier(identifier) => self.identifier(buf, identifier),
+      Undefined(_) => {
+        write(buf, "undefined")
+        []
+      },
+      This(_) => {
+        write(buf, "this")
+        []
+      },
+      Super(_) => {
+        write(buf, "super")
+        []
+      },
+      Number(number) => {
+        write(buf, number.text)
+        []
+      },
+      String(literal) => {
+        write(buf, literal.text)
+        []
+      },
+      Template(template) => self.template(buf, template, ind),
       Regex(regex) => {
         let flags = regex.flags.map_or("", |regex_flags| regex_flags.text)
-        text_of(f"/{regex.pattern.text}/{flags}")
+        write(buf, f"/{regex.pattern.text}/{flags}")
+        []
       },
-      True(_) => text_of("true"),
-      False(_) => text_of("false"),
-      Null(_) => text_of("null"),
-      Object(object) => self.object_literal(object, ind),
+      True(_) => {
+        write(buf, "true")
+        []
+      },
+      False(_) => {
+        write(buf, "false")
+        []
+      },
+      Null(_) => {
+        write(buf, "null")
+        []
+      },
+      Object(object) => self.object_literal(buf, object, ind),
       Function(function) => self.function_like(
+        buf,
         ind,
         function.name,
         function.is_async,
@@ -1446,8 +1627,9 @@ impl JsPrint {
         function.body,
         false,
       ),
-      Arrow(arrow) => self.arrow(arrow, ind),
+      Arrow(arrow) => self.arrow(buf, arrow, ind),
       Generator(generator) => self.function_like(
+        buf,
         ind,
         generator.name,
         generator.is_async,
@@ -1457,6 +1639,7 @@ impl JsPrint {
         false,
       ),
       Class(class) => self.class_like(
+        buf,
         class.name,
         class.heritage,
         class.body,
@@ -1464,118 +1647,164 @@ impl JsPrint {
         true,
       ),
       MetaProperty(meta) => match meta {
-        NewTarget(_) => text_of("new.target"),
-        ImportMeta(_) => text_of("import.meta"),
+        NewTarget(_) => {
+          write(buf, "new.target")
+          []
+        },
+        ImportMeta(_) => {
+          write(buf, "import.meta")
+          []
+        },
       },
-      Call(call) => self.call(call, ind),
-      NativeArray(array) => self.array_literal(array, ind),
-      ObjjDictionary(dictionary) => self.objj_dictionary(dictionary, ind),
-      ObjjArray(array_literal) => self.objj_array(array_literal, ind),
-      // @"…" is the raw string literal with the @ dropped (tier A law).
-      ObjjString(literal) => text_of(literal.value.text),
-      ObjjSelector(selector) => text_of(
-        "sel_getUid(\"" + selector.name.selector_string() + "\")",
-      ),
-      ObjjProtocol(protocol) => text_of(
-        "objj_getProtocol(\"" + protocol.protocol.text + "\")",
-      ),
-      ObjjMessage(message) => self.objj_message(message, ind),
+      Call(call) => self.call(buf, call, ind),
+      NativeArray(array) => self.array_literal(buf, array, ind),
+      ObjjDictionary(dictionary) => self.objj_dictionary(buf, dictionary, ind),
+      ObjjArray(array_literal) => self.objj_array(buf, array_literal, ind),
+      ObjjString(literal) => {
+        write(buf, literal.value.text)
+        []
+      },
+      ObjjSelector(selector) => {
+        write(buf, "sel_getUid(\"" + selector.name.selector_string() + "\")")
+        []
+      },
+      ObjjProtocol(protocol) => {
+        write(buf, "objj_getProtocol(\"" + protocol.protocol.text + "\")")
+        []
+      },
+      ObjjMessage(message) => self.objj_message(buf, message, ind),
       ObjjRef(reference) => {
-        let element = self.expression(reference.argument.*, ind)
-        JsPrinted { 
-          text: "function(__input) { if (arguments.length) return " +
-          element.text +
-          " = __input; return " +
-          element.text +
-          "; }",
-          diags: element.diags,
-        }
+        write(buf, "function(__input) { if (arguments.length) return ")
+        let diags = self.expression(buf, reference.argument.*, ind)
+        write(buf, " = __input; return ")
+        let diags2 = self.expression(buf, reference.argument.*, ind)
+        write(buf, "; }")
+        merge_diags(diags, diags2)
       },
       ObjjDeref(dereference) => {
-        let mut out = self.expression(dereference.argument.*, ind)
-        out.text += "()"
-        out
+        let diags = self.expression(buf, dereference.argument.*, ind)
+        write(buf, "()")
+        diags
       },
     }
   }
 
-  fn subscript(self, subscript: SubscriptExpression, ind: string) -> JsPrinted {
-    let mut out = self.operand(1, 0, false, subscript.object.*, false, ind)
+  fn subscript(
+    self,
+    buf: Ref<strings.Builder>,
+    subscript: SubscriptExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let diags = self.operand(buf, 1, 0, false, subscript.object.*, false, ind)
     let bracket = if subscript.optional_chain { "?.[" } else { "[" }
-    out.text += bracket
-    emit(&out, self.expressions(subscript.index.*, ind))
-    out.text += "]"
-    out
+    write(buf, bracket)
+    let diags2 = self.expressions(buf, subscript.index.*, ind)
+    write(buf, "]")
+    merge_diags(diags, diags2)
   }
 
-  fn member(self, member: MemberExpression, ind: string) -> JsPrinted {
-    let mut out = match member.object {
-      Expression(object) => self.operand(1, 0, false, object.*, false, ind),
-      Import(_) => text_of("import"),
+  fn member(
+    self,
+    buf: Ref<strings.Builder>,
+    member: MemberExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let diags = match member.object {
+      Expression(object) => self.operand(buf, 1, 0, false, object.*, false, ind),
+      Import(_) => {
+        write(buf, "import")
+        []
+      },
     }
     let accessor = if member.optional_chain { "?." } else { "." }
-    out.text += accessor
+    write(buf, accessor)
     match member.property {
-      Private(private) => out.text += f"#{private.text}",
-      Property(identifier) => out.text += identifier.text,
+      Private(private) => write(buf, f"#{private.text}"),
+      Property(identifier) => write(buf, identifier.text),
     }
-    out
+    diags
   }
 
-  fn parenthesized(self, parenthesized: ParenthesizedExpression, ind: string) -> JsPrinted {
-    let mut out = text_of("(")
-    emit(&out, self.expressions(parenthesized.expression.*, ind))
-    out.text += ")"
-    out
+  fn parenthesized(
+    self,
+    buf: Ref<strings.Builder>,
+    parenthesized: ParenthesizedExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "(")
+    let diags = self.expressions(buf, parenthesized.expression.*, ind)
+    write(buf, ")")
+    diags
   }
 
-  fn template(self, template: TemplateString, ind: string) -> JsPrinted {
-    let mut out = text_of("`")
+  fn template(
+    self,
+    buf: Ref<strings.Builder>,
+    template: TemplateString,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "`")
+    let mut diags: Slice<Diagnostic> = []
     for part in template.parts {
       match part {
-        Fragment(fragment) => out.text += fragment.text,
-        Escape(escape) => out.text += escape.text,
+        Fragment(fragment) => write(buf, fragment.text),
+        Escape(escape) => write(buf, escape.text),
         Substitution(substitution) => {
-          out.text += "${"
-          emit(&out, self.expressions(substitution.expression, ind))
-          out.text += "}"
+          write(buf, "${")
+          diags = merge_diags(
+            diags,
+            self.expressions(buf, substitution.expression, ind),
+          )
+          write(buf, "}")
         },
       }
     }
-    out.text += "`"
-    out
+    write(buf, "`")
+    diags
   }
 
-  fn object_literal(self, object: Object, ind: string) -> JsPrinted {
-    let mut out = text_of("{")
+  fn object_literal(
+    self,
+    buf: Ref<strings.Builder>,
+    object: Object,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "{")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for member in object.members {
-      if !first { out.text += ", " }
+      if !first { write(buf, ", ") }
       match member {
         Pair(pair) => {
-          emit(&out, self.property_name(pair.key, ind))
-          out.text += ": "
-          emit(&out, self.expression(pair.value.*, ind))
+          diags = merge_diags(diags, self.property_name(buf, pair.key, ind))
+          write(buf, ": ")
+          diags = merge_diags(diags, self.expression(buf, pair.value.*, ind))
         },
         Spread(spread) => {
-          out.text += "..."
-          emit(&out, self.expression(spread.argument.*, ind))
+          write(buf, "...")
+          diags = merge_diags(
+            diags,
+            self.expression(buf, spread.argument.*, ind),
+          )
         },
-        Method(method) => emit(&out, self.object_method(method, ind)),
-        Shorthand(identifier) => out.text += identifier.text,
+        Method(method) => diags = merge_diags(
+          diags,
+          self.object_method(buf, method, ind),
+        ),
+        Shorthand(identifier) => write(buf, identifier.text),
       }
       first = false
     }
-    out.text += "}"
-    out
+    write(buf, "}")
+    diags
   }
 
-  // object_method follows the legacy Property emitter: a kind prefix
-  // ("get "/"set ", or a bare space for plain methods), then the function
-  // printed without the `function` keyword.  The legacy indentation-prefix
-  // quirk is preserved; the global-escape rewrite is not applied (recorded
-  // deviation — see header).
-  fn object_method(self, method: MethodDefinition, ind: string) -> JsPrinted {
+  fn object_method(
+    self,
+    buf: Ref<strings.Builder>,
+    method: MethodDefinition,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let mut prefix = " "
     let mut is_generator = false
     if let Some(accessor) = method.accessor {
@@ -1588,13 +1817,16 @@ impl JsPrint {
     let mut keywords: Slice<string> = []
     if method.is_async { keywords = keywords.append("async") }
     if is_generator { keywords = keywords.append("*") }
-    let mut out = text_of(prefix + ind)
-    out.text += strings.Join(keywords, " ")
-    out.text += " "
-    emit(&out, self.property_name(method.name, ind))
-    out.text += "("
-    emit(&out, self.formal_parameters(method.parameters, ind))
-    out.text += ")\n"
+    write(buf, prefix + ind)
+    write(buf, strings.Join(keywords, " "))
+    write(buf, " ")
+    let mut diags = self.property_name(buf, method.name, ind)
+    write(buf, "(")
+    diags = merge_diags(
+      diags,
+      self.formal_parameters(buf, method.parameters, ind),
+    )
+    write(buf, ")\n")
     let mut inner = self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
@@ -1604,24 +1836,40 @@ impl JsPrint {
       method.parameters,
       method.body,
     )
-    emit(
-      &out,
-      inner.block(method.body, ind + indent_step(), false, false, true),
+    merge_diags(
+      diags,
+      inner.block(buf, method.body, ind + indent_step(), false, false, true),
     )
-    out
   }
 
-  fn property_name(self, name: PropertyName, ind: string) -> JsPrinted {
+  fn property_name(
+    self,
+    buf: Ref<strings.Builder>,
+    name: PropertyName,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match name {
-      Identifier(identifier) => text_of(identifier.text),
-      Private(private) => text_of(f"#{private.text}"),
-      String(literal) => text_of(literal.text),
-      Number(number) => text_of(number.text),
+      Identifier(identifier) => {
+        write(buf, identifier.text)
+        []
+      },
+      Private(private) => {
+        write(buf, f"#{private.text}")
+        []
+      },
+      String(literal) => {
+        write(buf, literal.text)
+        []
+      },
+      Number(number) => {
+        write(buf, number.text)
+        []
+      },
       Computed(computed) => {
-        let mut out = text_of("[")
-        emit(&out, self.expression(computed.expression.*, ind))
-        out.text += "]"
-        out
+        write(buf, "[")
+        let diags = self.expression(buf, computed.expression.*, ind)
+        write(buf, "]")
+        diags
       },
       ObjjString(literal) => self.deferred(
         "@\"...\" property name",
@@ -1631,43 +1879,54 @@ impl JsPrint {
     }
   }
 
-  fn array_literal(self, array: NativeArray, ind: string) -> JsPrinted {
-    let mut out = text_of("[")
+  fn array_literal(
+    self,
+    buf: Ref<strings.Builder>,
+    array: NativeArray,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "[")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for element in array.elements {
-      if !first { out.text += ", " }
+      if !first { write(buf, ", ") }
       match element {
-        Expression(e) => emit(&out, self.expression(e.*, ind)),
+        Expression(e) => diags = merge_diags(
+          diags,
+          self.expression(buf, e.*, ind),
+        ),
         Spread(spread) => {
-          out.text += "..."
-          emit(&out, self.expression(spread.argument.*, ind))
+          write(buf, "...")
+          diags = merge_diags(
+            diags,
+            self.expression(buf, spread.argument.*, ind),
+          )
         },
       }
       first = false
     }
-    out.text += "]"
-    out
+    write(buf, "]")
+    diags
   }
 
-  fn arrow(self, arrow: ArrowFunction, ind: string) -> JsPrinted {
-    let mut out = text_of("")
-    if arrow.is_async { out.text += "async " }
+  fn arrow(self, buf: Ref<strings.Builder>, arrow: ArrowFunction, ind: string) -> Slice<Diagnostic> {
+    if arrow.is_async { write(buf, "async ") }
+    let mut diags: Slice<Diagnostic> = []
     match arrow.parameters {
-      Single(identifier) => out.text += identifier.text,
+      Single(identifier) => write(buf, identifier.text),
       List(parameters) => {
-        // Legacy rule: parentheses unless exactly one plain identifier.
         let bare = parameters.parameters.length() == 1 &&
         formal_parameter_is_plain_identifier(parameters.parameters[0])
         if bare {
-          emit(&out, self.formal_parameters(parameters, ind))
+          diags = self.formal_parameters(buf, parameters, ind)
         } else {
-          out.text += "("
-          emit(&out, self.formal_parameters(parameters, ind))
-          out.text += ")"
+          write(buf, "(")
+          diags = self.formal_parameters(buf, parameters, ind)
+          write(buf, ")")
         }
       },
     }
-    out.text += " => "
+    write(buf, " => ")
     let mut inner = self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
@@ -1675,177 +1934,234 @@ impl JsPrint {
     match arrow.body {
       Expression(e) => {
         if arrow_body_needs_parens(e.*) {
-          emit(&out, inner.wrapped(e.*, ind))
+          merge_diags(diags, inner.wrapped(buf, e.*, ind))
         } else {
-          emit(&out, inner.expression(e.*, ind))
+          merge_diags(diags, inner.expression(buf, e.*, ind))
         }
       },
-      Block(block) => emit(
-        &out,
-        inner.block(block, ind + indent_step(), true, false, true),
+      Block(block) => merge_diags(
+        diags,
+        inner.block(buf, block, ind + indent_step(), true, false, true),
       ),
     }
-    out
   }
 
-  fn call(self, call: CallExpression, ind: string) -> JsPrinted {
+  fn call(self, buf: Ref<strings.Builder>, call: CallExpression, ind: string) -> Slice<Diagnostic> {
     match call {
       Call(plain) => {
-        let mut out = match plain.callee {
-          Expression(callee) => self.operand(1, 0, false, callee.*, false, ind),
-          Import(_) => text_of("import"),
+        let mut diags = match plain.callee {
+          Expression(callee) => self.operand(
+            buf,
+            1,
+            0,
+            false,
+            callee.*,
+            false,
+            ind,
+          ),
+          Import(_) => {
+            write(buf, "import")
+            []
+          },
         }
-        out.text += "("
-        emit(&out, self.arguments(plain.arguments, ind))
-        out.text += ")"
-        out
+        write(buf, "(")
+        diags = merge_diags(diags, self.arguments(buf, plain.arguments, ind))
+        write(buf, ")")
+        diags
       },
       OptionalCall(optional) => {
-        let mut out = text_of("")
+        let mut diags: Slice<Diagnostic> = []
         if 1 < primary_prec(optional.callee.*) {
-          let inner = self.primary(optional.callee.*, ind)
-          out.text += f"({inner.text})"
-          out.diags = merge_diags(out.diags, inner.diags)
+          write(buf, "(")
+          diags = self.primary(buf, optional.callee.*, ind)
+          write(buf, ")")
         } else {
-          emit(&out, self.primary(optional.callee.*, ind))
+          diags = self.primary(buf, optional.callee.*, ind)
         }
-        out.text += "?.("
-        emit(&out, self.arguments(optional.arguments, ind))
-        out.text += ")"
-        out
+        write(buf, "?.(")
+        diags = merge_diags(diags, self.arguments(buf, optional.arguments, ind))
+        write(buf, ")")
+        diags
       },
       TemplateCall(template_call) => {
-        let mut out = match template_call.callee {
-          Primary(callee) => self.primary(callee.*, ind),
-          New(callee) => self.new_expression(callee.*, ind),
+        let diags = match template_call.callee {
+          Primary(callee) => self.primary(buf, callee.*, ind),
+          New(callee) => self.new_expression(buf, callee.*, ind),
         }
-        emit(&out, self.template(template_call.arguments, ind))
-        out
+        merge_diags(diags, self.template(buf, template_call.arguments, ind))
       },
     }
   }
 
-  fn arguments(self, arguments: Arguments, ind: string) -> JsPrinted {
-    let mut out = text_of("")
+  fn arguments(
+    self,
+    buf: Ref<strings.Builder>,
+    arguments: Arguments,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for item in arguments.items {
-      if !first { out.text += ", " }
+      if !first { write(buf, ", ") }
       match item {
-        Expression(e) => emit(&out, self.expression(e.*, ind)),
+        Expression(e) => diags = merge_diags(
+          diags,
+          self.expression(buf, e.*, ind),
+        ),
         Spread(spread) => {
-          out.text += "..."
-          emit(&out, self.expression(spread.argument.*, ind))
+          write(buf, "...")
+          diags = merge_diags(
+            diags,
+            self.expression(buf, spread.argument.*, ind),
+          )
         },
       }
       first = false
     }
-    out
+    diags
   }
 
-  // ---------------------------------------------------------------------------
-  // Patterns
-  // ---------------------------------------------------------------------------
-
-  fn lhs_expression(self, lhs: LhsExpression, ind: string) -> JsPrinted {
+  fn lhs_expression(
+    self,
+    buf: Ref<strings.Builder>,
+    lhs: LhsExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match lhs {
-      Member(member) => self.member(member.*, ind),
-      Subscript(subscript) => self.subscript(subscript.*, ind),
-      Identifier(identifier) => text_of(identifier.text),
-      Undefined(_) => text_of("undefined"),
-      Destructuring(pattern) => self.destructuring(pattern.*, ind),
+      Member(member) => self.member(buf, member.*, ind),
+      Subscript(subscript) => self.subscript(buf, subscript.*, ind),
+      Identifier(identifier) => {
+        write(buf, identifier.text)
+        []
+      },
+      Undefined(_) => {
+        write(buf, "undefined")
+        []
+      },
+      Destructuring(pattern) => self.destructuring(buf, pattern.*, ind),
     }
   }
 
-  fn pattern(self, pattern: Pattern, ind: string) -> JsPrinted {
+  fn pattern(self, buf: Ref<strings.Builder>, pattern: Pattern, ind: string) -> Slice<Diagnostic> {
     match pattern {
-      Lhs(lhs) => self.lhs_expression(lhs, ind),
+      Lhs(lhs) => self.lhs_expression(buf, lhs, ind),
       Rest(rest) => {
-        let mut out = text_of("...")
-        emit(&out, self.lhs_expression(rest.argument.*, ind))
-        out
+        write(buf, "...")
+        self.lhs_expression(buf, rest.argument.*, ind)
       },
     }
   }
 
-  fn assignment_pattern(self, pattern: AssignmentPattern, ind: string) -> JsPrinted {
-    let mut out = self.pattern(pattern.left.*, ind)
-    out.text += " = "
-    emit(&out, self.expression(pattern.right.*, ind))
-    out
+  fn assignment_pattern(
+    self,
+    buf: Ref<strings.Builder>,
+    pattern: AssignmentPattern,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let diags = self.pattern(buf, pattern.left.*, ind)
+    write(buf, " = ")
+    merge_diags(diags, self.expression(buf, pattern.right.*, ind))
   }
 
-  fn destructuring(self, pattern: DestructuringPattern, ind: string) -> JsPrinted {
+  fn destructuring(
+    self,
+    buf: Ref<strings.Builder>,
+    pattern: DestructuringPattern,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match pattern {
-      Object(object) => self.object_pattern(object, ind),
-      Array(array) => self.array_pattern(array, ind),
+      Object(object) => self.object_pattern(buf, object, ind),
+      Array(array) => self.array_pattern(buf, array, ind),
     }
   }
 
-  fn object_pattern(self, pattern: ObjectPattern, ind: string) -> JsPrinted {
-    let mut out = text_of("{")
+  fn object_pattern(
+    self,
+    buf: Ref<strings.Builder>,
+    pattern: ObjectPattern,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "{")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for member in pattern.members {
-      if !first { out.text += ", " }
+      if !first { write(buf, ", ") }
       match member {
         Pair(pair) => {
-          emit(&out, self.property_name(pair.key, ind))
-          out.text += ": "
+          diags = merge_diags(diags, self.property_name(buf, pair.key, ind))
+          write(buf, ": ")
           match pair.value {
-            Pattern(value) => emit(&out, self.pattern(value.*, ind)),
-            Assignment(value) => emit(
-              &out,
-              self.assignment_pattern(value.*, ind),
+            Pattern(value) => diags = merge_diags(
+              diags,
+              self.pattern(buf, value.*, ind),
+            ),
+            Assignment(value) => diags = merge_diags(
+              diags,
+              self.assignment_pattern(buf, value.*, ind),
             ),
           }
         },
         Rest(rest) => {
-          out.text += "..."
-          emit(&out, self.lhs_expression(rest.argument.*, ind))
+          write(buf, "...")
+          diags = merge_diags(
+            diags,
+            self.lhs_expression(buf, rest.argument.*, ind),
+          )
         },
         Assignment(assignment) => {
           match assignment.left {
-            Shorthand(identifier) => out.text += identifier.text,
-            Destructuring(nested) => emit(
-              &out,
-              self.destructuring(nested.*, ind),
+            Shorthand(identifier) => write(buf, identifier.text),
+            Destructuring(nested) => diags = merge_diags(
+              diags,
+              self.destructuring(buf, nested.*, ind),
             ),
           }
-          out.text += " = "
-          emit(&out, self.expression(assignment.right.*, ind))
+          write(buf, " = ")
+          diags = merge_diags(
+            diags,
+            self.expression(buf, assignment.right.*, ind),
+          )
         },
-        Shorthand(identifier) => out.text += identifier.text,
+        Shorthand(identifier) => write(buf, identifier.text),
       }
       first = false
     }
-    out.text += "}"
-    out
+    write(buf, "}")
+    diags
   }
 
-  fn array_pattern(self, pattern: ArrayPattern, ind: string) -> JsPrinted {
-    let mut out = text_of("[")
+  fn array_pattern(
+    self,
+    buf: Ref<strings.Builder>,
+    pattern: ArrayPattern,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    write(buf, "[")
+    let mut diags: Slice<Diagnostic> = []
     let mut first = true
     for element in pattern.elements {
-      if !first { out.text += ", " }
+      if !first { write(buf, ", ") }
       match element {
-        Pattern(value) => emit(&out, self.pattern(value.*, ind)),
-        Assignment(value) => emit(&out, self.assignment_pattern(value.*, ind)),
+        Pattern(value) => diags = merge_diags(
+          diags,
+          self.pattern(buf, value.*, ind),
+        ),
+        Assignment(value) => diags = merge_diags(
+          diags,
+          self.assignment_pattern(buf, value.*, ind),
+        ),
       }
       first = false
     }
-    out.text += "]"
-    out
+    write(buf, "]")
+    diags
   }
 
-  // ---------------------------------------------------------------------------
-  // ObjJ structure scaffolds (tier B) — transcribed from the legacy
-  // ClassDeclarationStatement / MethodDeclarationStatement /
-  // ProtocolDeclarationStatement emitters; templates and quirks in
-  // PHASE-8-BRIEF.md, "The emitter law, tier B".  Message sends remain
-  // tier C deferrals, so method bodies containing sends are incomplete
-  // by construction and say so.
-  // ---------------------------------------------------------------------------
-
-  fn objj_class_implementation(self, implementation: ObjjClassImplementation) -> JsPrinted {
+  fn objj_class_implementation(
+    self,
+    buf: Ref<strings.Builder>,
+    implementation: ObjjClassImplementation,
+  ) -> Slice<Diagnostic> {
     let class_name = implementation.name.text
     let mut p = self
     p.current_class = Some(
@@ -1854,49 +2170,55 @@ impl JsPrint {
         ivars: self.class_ivar_universe(implementation),
       },
     )
+    let mut diags: Slice<Diagnostic> = []
 
-    let mut out = text_of("")
-
-    // Opener — three exact forms (note the superclass form's leading
-    // newline and the category form's missing semicolon).
     match implementation.category {
       Some(_) => {
-        out.text += "{\nvar the_class = objj_getClass(\"" + class_name + "\")\n"
-        out.text += "if(!the_class) throw new SyntaxError(\"*** Could not find definition for class \\\"" +
-        class_name +
-        "\\\"\");\n"
-        out.text += "var meta_class = the_class.isa;"
+        write(buf, "{\nvar the_class = objj_getClass(\"" + class_name + "\")\n")
+        write(
+          buf,
+          "if(!the_class) throw new SyntaxError(\"*** Could not find definition for class \\\"" +
+          class_name +
+          "\\\"\");\n",
+        )
+        write(buf, "var meta_class = the_class.isa;")
       },
       None => match implementation.superclass {
         Some(superclass) => {
-          out.text += "\n{var the_class = objj_allocateClassPair(" +
-          superclass.text +
-          ", \"" +
-          class_name +
-          "\"),\nmeta_class = the_class.isa;"
+          write(
+            buf,
+            "\n{var the_class = objj_allocateClassPair(" + superclass.text +
+            ", \"" +
+            class_name +
+            "\"),\nmeta_class = the_class.isa;",
+          )
         },
         None => {
-          out.text += "{var the_class = objj_allocateClassPair(Nil, \"" +
-          class_name +
-          "\"),\nmeta_class = the_class.isa;"
+          write(
+            buf,
+            "{var the_class = objj_allocateClassPair(Nil, \"" + class_name +
+            "\"),\nmeta_class = the_class.isa;",
+          )
         },
       },
     }
 
-    // Conformance, one stanza per declared protocol.
     if let Some(list) = implementation.protocols {
       for protocol in list.protocols {
-        out.text += "\nvar aProtocol = objj_getProtocol(\"" + protocol.text +
-        "\");"
-        out.text += "\nif (!aProtocol) throw new SyntaxError(\"*** Could not find definition for protocol \\\"" +
-        protocol.text +
-        "\\\"\");"
-        out.text += "\nclass_addProtocol(the_class, aProtocol);"
+        write(
+          buf,
+          "\nvar aProtocol = objj_getProtocol(\"" + protocol.text + "\");",
+        )
+        write(
+          buf,
+          "\nif (!aProtocol) throw new SyntaxError(\"*** Could not find definition for protocol \\\"" +
+          protocol.text +
+          "\\\"\");",
+        )
+        write(buf, "\nclass_addProtocol(the_class, aProtocol);")
       }
     }
 
-    // Explicit instance-method occupancy: a hand-written method
-    // suppresses accessor synthesis for the same selector (phase 6 rule).
     let mut occupied = Map.new<string, bool>()
     for member in implementation.members {
       if let ObjjImplementationMember.Method(method) = member {
@@ -1906,41 +2228,45 @@ impl JsPrint {
       }
     }
 
-    // Ivars, and synthesized accessor entries (which precede explicit
-    // methods in the instance buffer, as the legacy sub-compilation does).
-    let mut im = text_of("")
+    let mut im_buf = strings.Builder { .. }
+    let mut im_diags: Slice<Diagnostic> = []
     let mut im_any = false
-    let mut cm = text_of("")
+    let mut cm_buf = strings.Builder { .. }
+    let mut cm_diags: Slice<Diagnostic> = []
     let mut cm_any = false
     let mut first_ivar = true
+
     if let Some(instance_variables) = implementation.ivars {
       for member in instance_variables.members {
         match member {
           Variable(variable) => {
             if let ObjjInstanceVariable.Field(field) = variable {
               if first_ivar {
-                out.text += "class_addIvars(the_class, ["
+                write(buf, "class_addIvars(the_class, [")
               } else {
-                out.text += ", "
+                write(buf, ", ")
               }
               first_ivar = false
               let type_name = codegen_type(field.field_type)
-              out.text += "new objj_ivar(\"" + field.name.text + "\", \"" +
-              type_name +
-              "\")"
-              let synthesized = p.synthesized_accessor_entries(
+              write(
+                buf,
+                "new objj_ivar(\"" + field.name.text + "\", \"" + type_name +
+                "\")",
+              )
+              let synth_diags = p.synthesized_accessor_entries(
+                &im_buf,
                 field,
                 class_name,
                 type_name,
                 occupied,
                 im_any,
               )
-              if !synthesized.text.is_empty() { im_any = true }
-              emit(&im, synthesized)
+              if im_buf.Len() > 0 { im_any = true }
+              im_diags = merge_diags(im_diags, synth_diags)
             }
           },
-          PreprocIf(preproc) => emit(
-            &out,
+          PreprocIf(preproc) => diags = merge_diags(
+            diags,
             self.deferred(
               "#if block among ivars",
               "build-feature environment (PHASE-8-BRIEF.md decision 4)",
@@ -1950,37 +2276,40 @@ impl JsPrint {
         }
       }
     }
-    if !first_ivar { out.text += "]);" }
+    if !first_ivar { write(buf, "]);") }
 
-    // Body members: methods divert to the instance/class buffers; plain
-    // declarations print into the class block (between the ivar list and
-    // registration, as the legacy body loop does).
     for member in implementation.members {
       match member {
         Method(method) => {
-          let entry = p.objj_method_entry(method, class_name)
           match method.scope {
             Instance => {
-              if im_any { im.text += ", " }
-              emit(&im, entry)
+              if im_any { let _ = im_buf.WriteString(", ") }
+              im_diags = merge_diags(
+                im_diags,
+                p.objj_method_entry(&im_buf, method, class_name),
+              )
               im_any = true
             },
             Class => {
-              if cm_any { cm.text += ", " }
-              emit(&cm, entry)
+              if cm_any { let _ = cm_buf.WriteString(", ") }
+              cm_diags = merge_diags(
+                cm_diags,
+                p.objj_method_entry(&cm_buf, method, class_name),
+              )
               cm_any = true
             },
           }
         },
         Global(_) => (),
-        Empty(_) => out.text += ";\n",
-        Variable(variable) => emit(
-          &out,
-          p.variable_declaration("var", variable.declarators, ""),
+        Empty(_) => write(buf, ";\n"),
+        Variable(variable) => diags = merge_diags(
+          diags,
+          p.variable_declaration(buf, "var", variable.declarators, ""),
         ),
-        Function(function) => emit(
-          &out,
+        Function(function) => diags = merge_diags(
+          diags,
           p.function_like(
+            buf,
             "",
             Some(function.name),
             function.is_async,
@@ -1990,9 +2319,10 @@ impl JsPrint {
             true,
           ),
         ),
-        GeneratorFunction(generator) => emit(
-          &out,
+        GeneratorFunction(generator) => diags = merge_diags(
+          diags,
           p.function_like(
+            buf,
             "",
             Some(generator.name),
             generator.is_async,
@@ -2002,8 +2332,8 @@ impl JsPrint {
             true,
           ),
         ),
-        PreprocDirective(directive) => emit(
-          &out,
+        PreprocDirective(directive) => diags = merge_diags(
+          diags,
           self.deferred(
             "#preproc directive in implementation",
             "build-feature environment (PHASE-8-BRIEF.md decision 4)",
@@ -2013,28 +2343,25 @@ impl JsPrint {
       }
     }
 
-    // Registration and method installation; categories skip registration.
     if implementation.category.is_none() {
-      out.text += "objj_registerClassPair(the_class);\n"
+      write(buf, "objj_registerClassPair(the_class);\n")
     }
     if im_any {
-      out.text += "class_addMethods(the_class, ["
-      emit(&out, im)
-      out.text += "]);\n"
+      write(buf, "class_addMethods(the_class, [")
+      write(buf, im_buf.String())
+      write(buf, "]);\n")
+      diags = merge_diags(diags, im_diags)
     }
     if cm_any {
-      out.text += "class_addMethods(meta_class, ["
-      emit(&out, cm)
-      out.text += "]);\n"
+      write(buf, "class_addMethods(meta_class, [")
+      write(buf, cm_buf.String())
+      write(buf, "]);\n")
+      diags = merge_diags(diags, cm_diags)
     }
-    out.text += "}\n"
-    out
+    write(buf, "}\n")
+    diags
   }
 
-  // class_ivar_universe is the ivar → self.ivar rewrite domain: the
-  // class's own ivars plus inherited ivars of project-known superclasses
-  // (walked through ctx.symbols; external ancestors are invisible — the
-  // recorded frontier limitation).
   fn class_ivar_universe(self, implementation: ObjjClassImplementation) -> Map<string, bool> {
     let mut ivars = Map.new<string, bool>()
     if let Some(instance_variables) = implementation.ivars {
@@ -2073,21 +2400,22 @@ impl JsPrint {
     ivars
   }
 
-  // synthesized_accessor_entries emits the getter (and setter unless
-  // readonly) objj_method entries for one @accessors directive, joined
-  // onto the instance buffer.  Naming reuses phase 6's rules; an
-  // explicit method with the same selector wins silently.  The copy
-  // setter variant embeds a message send and is deferred with tier C.
+  // synthesized_accessor_entries writes the getter (and setter unless
+  // readonly) objj_method entries for one @accessors directive directly
+  // into im_buf.  Naming reuses phase 6's rules; an explicit method with
+  // the same selector wins silently.  The copy setter variant embeds a
+  // message send and is deferred with tier C.
   fn synthesized_accessor_entries(
     self,
+    im_buf: Ref<strings.Builder>,
     field: ObjjFieldDefinition,
     class_name: string,
     type_name: string,
     mut occupied: Map<string, bool>,
     mut any: bool,
-  ) -> JsPrinted {
+  ) -> Slice<Diagnostic> {
     let Some(directive) = field.accessors else {
-      return text_of("")
+      return []
     }
     let mut property = field.name.text
     let mut getter = ""
@@ -2111,58 +2439,57 @@ impl JsPrint {
     if getter.is_empty() { getter = property }
     if setter.is_empty() { setter = default_setter_selector(property) }
 
-    let mut out = text_of("")
     if !occupied[getter] {
       occupied[getter] = true
-      if any { out.text += ", " }
+      if any { let _ = im_buf.WriteString(", ") }
       any = true
-      out.text += "new objj_method(sel_getUid(\"" + getter + "\"), function $" +
-      class_name +
-      "__" +
-      getter +
-      "(self, _cmd)\n"
-      out.text += "{\n    return self." + field.name.text + ";\n}\n\n"
-      out.text += ",[\"" + type_name + "\"])"
+      let _ = im_buf.WriteString(
+        "new objj_method(sel_getUid(\"" + getter + "\"), function $" +
+        class_name +
+        "__" +
+        getter +
+        "(self, _cmd)\n",
+      )
+      let _ = im_buf.WriteString(
+        "{\n    return self." + field.name.text + ";\n}\n\n",
+      )
+      let _ = im_buf.WriteString(",[\"" + type_name + "\"])")
     }
-    if readonly { return out }
-    if occupied[setter] { return out }
+    if readonly { return [] }
+    if occupied[setter] { return [] }
     occupied[setter] = true
     if copy {
-      // The copy setter body is `if (ivar !== newValue) ivar = [newValue
-      // copy];` — a message send, tier C.  No corpus instance exists.
-      return JsPrinted { 
-        text: out.text,
-        diags: merge_diags(
-          out.diags,
-          [
-            diag_warn_at(
-              BuildPhase.Compile,
-              "codegen: @accessors(copy) setter deferred pending tier C dispatch",
-              self.file,
-              field.pos.row,
-              field.pos.col,
-            ),
-          ],
+      return [
+        diag_warn_at(
+          BuildPhase.Compile,
+          "codegen: @accessors(copy) setter deferred pending tier C dispatch",
+          self.file,
+          field.pos.row,
+          field.pos.col,
         ),
-      }
+      ]
     }
-    if any { out.text += ", " }
+    if any { let _ = im_buf.WriteString(", ") }
     let mangled = strings.ReplaceAll(setter, ":", "_")
-    out.text += "new objj_method(sel_getUid(\"" + setter + "\"), function $" +
-    class_name +
-    "__" +
-    mangled +
-    "(self, _cmd, newValue)\n"
-    out.text += "{\n    self." + field.name.text + " = newValue;\n}\n\n"
-    out.text += ",[\"void\",\"" + type_name + "\"])"
-    out
+    let _ = im_buf.WriteString(
+      "new objj_method(sel_getUid(\"" + setter + "\"), function $" + class_name +
+      "__" +
+      mangled +
+      "(self, _cmd, newValue)\n",
+    )
+    let _ = im_buf.WriteString(
+      "{\n    self." + field.name.text + " = newValue;\n}\n\n",
+    )
+    let _ = im_buf.WriteString(",[\"void\",\"" + type_name + "\"])")
+    []
   }
 
-  // objj_method_entry is one `new objj_method(...)` element of a
-  // class_addMethods list: selector, the $Class__selector function with
-  // self and _cmd prepended to the declared parameters, the body printed
-  // by the tier A block law, and the JSON type array.
-  fn objj_method_entry(self, method: ObjjMethodDefinition, class_name: string) -> JsPrinted {
+  fn objj_method_entry(
+    self,
+    buf: Ref<strings.Builder>,
+    method: ObjjMethodDefinition,
+    class_name: string,
+  ) -> Slice<Diagnostic> {
     let selector = method.selector.selector_string()
     let mut types: Slice<string> = [codegen_return_type(method.return_type)]
     let mut params: Slice<string> = []
@@ -2182,41 +2509,49 @@ impl JsPrint {
     inner.self_assigned = body_assigns_self(method.body)
     inner.locals = scope_locals([], params, block_declared_names(method.body))
 
-    let mut out = text_of("new objj_method(sel_getUid(\"" + selector + "\"), ")
-    if method.return_type.is_async { out.text += "async " }
-    out.text += "function $" + class_name + "__" +
-    strings.ReplaceAll(selector, ":", "_")
-    out.text += "(self, _cmd"
+    write(buf, "new objj_method(sel_getUid(\"" + selector + "\"), ")
+    if method.return_type.is_async { write(buf, "async ") }
+    write(
+      buf,
+      "function $" + class_name + "__" + strings.ReplaceAll(selector, ":", "_"),
+    )
+    write(buf, "(self, _cmd")
     for param in params {
-      out.text += ", " + param
+      write(buf, ", " + param)
     }
-    out.text += ")\n"
-    emit(&out, inner.block(method.body, indent_step(), false, true, true))
-    out.text += "\n,["
-    out.text += quoted_type_list(types)
-    out.text += "])"
-    out
+    write(buf, ")\n")
+    let diags = inner.block(buf, method.body, indent_step(), false, true, true)
+    write(buf, "\n,[")
+    write(buf, quoted_type_list(types))
+    write(buf, "])")
+    diags
   }
 
-  fn objj_protocol(self, declaration: ObjjProtocolDeclaration) -> JsPrinted {
+  fn objj_protocol(
+    self,
+    buf: Ref<strings.Builder>,
+    declaration: ObjjProtocolDeclaration,
+  ) -> Slice<Diagnostic> {
     let protocol_name = declaration.name.text
-    let mut out = text_of(
+    write(
+      buf,
       "{var the_protocol = objj_allocateProtocol(\"" + protocol_name + "\");",
     )
     if let Some(list) = declaration.protocols {
       for inherited in list.protocols {
-        out.text += "\nvar aProtocol = objj_getProtocol(\"" + inherited.text +
-        "\");"
-        // Verbatim legacy quirk: the throw names the declaring protocol,
-        // not the missing one.
-        out.text += "\nif (!aProtocol) throw new SyntaxError(\"*** Could not find definition for protocol \\\"" +
-        protocol_name +
-        "\\\"\");"
-        out.text += "\nprotocol_addProtocol(the_protocol, aProtocol);"
+        write(
+          buf,
+          "\nvar aProtocol = objj_getProtocol(\"" + inherited.text + "\");",
+        )
+        write(
+          buf,
+          "\nif (!aProtocol) throw new SyntaxError(\"*** Could not find definition for protocol \\\"" +
+          protocol_name +
+          "\\\"\");",
+        )
+        write(buf, "\nprotocol_addProtocol(the_protocol, aProtocol);")
       }
     }
-    // Only required methods produce descriptions; @optional methods emit
-    // nothing (corpus-confirmed, CPCacheDelegate).
     let mut im = ""
     let mut cm = ""
     let mut required = true
@@ -2240,100 +2575,97 @@ impl JsPrint {
         },
       }
     }
-    out.text += "\nobjj_registerProtocol(the_protocol);\n"
+    write(buf, "\nobjj_registerProtocol(the_protocol);\n")
     if !im.is_empty() {
-      out.text += "protocol_addMethodDescriptions(the_protocol, [" + im +
-      "], true, true);\n"
+      write(
+        buf,
+        "protocol_addMethodDescriptions(the_protocol, [" + im +
+        "], true, true);\n",
+      )
     }
     if !cm.is_empty() {
-      out.text += "protocol_addMethodDescriptions(the_protocol, [" + cm +
-      "], true, false);\n"
+      write(
+        buf,
+        "protocol_addMethodDescriptions(the_protocol, [" + cm +
+        "], true, false);\n",
+      )
     }
-    out.text += "}"
-    out
+    write(buf, "}")
+    []
   }
 
-  // ---------------------------------------------------------------------------
-  // Dispatch (tier C) — the inlined message-send ABI, transcribed from the
-  // legacy MessageSendExpression emitter (PHASE-8-BRIEF.md, "tiers C and
-  // D").  Super, simple (guarded/unguarded), and complex receiver forms;
-  // the debug dtable comma artifact; ___rN temporaries numbered by nesting
-  // depth, declared at end of function scope by block()'s hook.
-  // ---------------------------------------------------------------------------
-
-  fn objj_message(self, message: ObjjMessageExpression, ind: string) -> JsPrinted {
+  fn objj_message(
+    self,
+    buf: Ref<strings.Builder>,
+    message: ObjjMessageExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let selector = message.selector.selector_string()
     let arguments = message_arguments(message.selector)
 
-    // Super send: no guard, no temporary.
     if let Some(super_form) = self.super_receiver_text(message.receiver.*) {
-      let mut out = text_of(
+      write(
+        buf,
         "(" + super_form + ".method_dtable[\"" + selector +
         "\"] || _objj_forward)(self, \"" +
         selector +
         "\"",
       )
-      for argument in arguments {
-        out.text += ", "
-        emit(&out, self.expression(argument, ind))
-      }
-      out.text += ")"
-      return out
+      let diags = self.trailing_arguments(buf, arguments, ind)
+      write(buf, ")")
+      return diags
     }
 
-    // The dtable comma artifact uses the re-printed receiver expression
-    // and is emitted only when the source receiver is a bare Identifier
-    // (self, ivar, parameter, local, class) — never for a message-send or
-    // other complex receiver.
     let receiver_is_identifier = expression_identifier_name(message.receiver.*).is_some()
 
     if self.receiver_is_simple(message.receiver.*) {
-      let receiver = self.expression(message.receiver.*, ind)
+      let mut r_buf = strings.Builder { .. }
+      let r_diags = self.expression(&r_buf, message.receiver.*, ind)
+      let r = r_buf.String()
       let guard = self.simple_receiver_guarded(message.receiver.*)
-      let r = receiver.text
-      let mut out = JsPrinted { diags: receiver.diags, .. }
-      if guard { out.text += "(" + r + " == null ? " + r + " : " }
-      out.text += "(" + r + ".isa.method_msgSend[\"" + selector +
-      "\"] || _objj_forward)(" +
-      r +
-      ", "
-      out.text += self.selector_argument(r, receiver_is_identifier, selector)
-      emit(&out, self.trailing_arguments(arguments, ind))
-      out.text += ")"
-      if guard { out.text += ")" }
-      return out
+      if guard { write(buf, "(" + r + " == null ? " + r + " : ") }
+      write(
+        buf,
+        "(" + r + ".isa.method_msgSend[\"" + selector + "\"] || _objj_forward)(" +
+        r +
+        ", ",
+      )
+      write(buf, self.selector_argument(r, receiver_is_identifier, selector))
+      let diags = merge_diags(
+        r_diags,
+        self.trailing_arguments(buf, arguments, ind),
+      )
+      write(buf, ")")
+      if guard { write(buf, ")") }
+      return diags
     }
 
-    // Complex receiver: claim the temporary BEFORE printing the receiver,
-    // so a nested send within it nests at the next level (legacy order).
-    // The dtable artifact still uses the re-printed receiver, not the temp.
     let n = self.receiver_enter()
     let temp = f"___r{n}"
-    let receiver = self.expression(message.receiver.*, ind)
-    let mut out = JsPrinted { diags: receiver.diags, .. }
-    out.text += "((" + temp + " = " + receiver.text + "), " + temp +
-    " == null ? " +
-    temp +
-    " : "
-    out.text += "(" + temp + ".isa.method_msgSend[\"" + selector +
-    "\"] || _objj_forward)(" +
-    temp +
-    ", "
-    out.text += self.selector_argument(
-      receiver.text,
-      receiver_is_identifier,
-      selector,
+    let mut r_buf = strings.Builder { .. }
+    let r_diags = self.expression(&r_buf, message.receiver.*, ind)
+    let r_text = r_buf.String()
+    write(
+      buf,
+      "((" + temp + " = " + r_text + "), " + temp + " == null ? " + temp + " : ",
     )
-    emit(&out, self.trailing_arguments(arguments, ind))
-    out.text += "))"
+    write(
+      buf,
+      "(" + temp + ".isa.method_msgSend[\"" + selector +
+      "\"] || _objj_forward)(" +
+      temp +
+      ", ",
+    )
+    write(buf, self.selector_argument(r_text, receiver_is_identifier, selector))
+    let diags = merge_diags(
+      r_diags,
+      self.trailing_arguments(buf, arguments, ind),
+    )
+    write(buf, "))")
     self.receiver_exit()
-    out
+    diags
   }
 
-  // selector_argument is the dtable comma artifact or the bare selector
-  // string.  The artifact appears only in debug mode and only for an
-  // Identifier receiver; its dtable lookup, over the re-printed receiver,
-  // repeats once per named selector part.
   fn selector_argument(
     self,
     receiver_text: string,
@@ -2351,17 +2683,20 @@ impl JsPrint {
     "(" + lookups + "\"" + selector + "\")"
   }
 
-  fn trailing_arguments(self, arguments: Slice<Expression>, ind: string) -> JsPrinted {
-    let mut out = text_of("")
+  fn trailing_arguments(
+    self,
+    buf: Ref<strings.Builder>,
+    arguments: Slice<Expression>,
+    ind: string,
+  ) -> Slice<Diagnostic> {
+    let mut diags: Slice<Diagnostic> = []
     for argument in arguments {
-      out.text += ", "
-      emit(&out, self.expression(argument, ind))
+      write(buf, ", ")
+      diags = merge_diags(diags, self.expression(buf, argument, ind))
     }
-    out
+    diags
   }
 
-  // super_receiver_text returns the super-class lookup expression when the
-  // receiver is `super`, else None.  Class methods walk the meta-class.
   fn super_receiver_text(self, receiver: Expression) -> Option<string> {
     let is_super = match receiver {
       Primary(primary) => match primary {
@@ -2381,8 +2716,6 @@ impl JsPrint {
     }
   }
 
-  // receiver_is_simple: an Identifier receiver that will not be
-  // ivar-rewritten prints inline without a temporary.
   fn receiver_is_simple(self, receiver: Expression) -> bool {
     let Some(name) = expression_identifier_name(receiver) else {
       return false
@@ -2396,9 +2729,6 @@ impl JsPrint {
     true
   }
 
-  // simple_receiver_guarded: `self` is guarded only when the method
-  // assigns self; other identifiers are guarded when locally bound or not
-  // a known class (the legacy rule, project-world limitation recorded).
   fn simple_receiver_guarded(self, receiver: Expression) -> bool {
     let Some(name) = expression_identifier_name(receiver) else {
       return true
@@ -2420,82 +2750,110 @@ impl JsPrint {
     if let Some(state) = self.receivers { state.level -= 1 }
   }
 
-  // ---------------------------------------------------------------------------
-  // ObjJ collection literals (tier D) — @[…] and @{…} desugar to alloc +
-  // initWith… sends through the same ___rN machinery.
-  // ---------------------------------------------------------------------------
-
-  fn objj_array(self, literal: ObjjArrayLiteral, ind: string) -> JsPrinted {
+  fn objj_array(
+    self,
+    buf: Ref<strings.Builder>,
+    literal: ObjjArrayLiteral,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let elements = literal.array.elements
     let n = self.receiver_enter()
     let temp = f"___r{n}"
-    let mut out = self.alloc_head(temp, "CPArray")
-    if elements.is_empty() {
-      out.text += self.init_send(temp, "init", "")
+    self.alloc_head_write(buf, temp, "CPArray")
+    let diags = if elements.is_empty() {
+      write(buf, self.init_send(temp, "init", ""))
+      []
     } else {
-      let mut items = text_of("")
+      let mut items_buf = strings.Builder { .. }
+      let mut items_diags: Slice<Diagnostic> = []
       let mut first = true
       for element in elements {
-        if !first { items.text += ", " }
+        if !first { let _ = items_buf.WriteString(", ") }
         match element {
-          Expression(e) => emit(&items, self.expression(e.*, ind)),
+          Expression(e) => items_diags = merge_diags(
+            items_diags,
+            self.expression(&items_buf, e.*, ind),
+          ),
           Spread(spread) => {
-            items.text += "..."
-            emit(&items, self.expression(spread.argument.*, ind))
+            let _ = items_buf.WriteString("...")
+            items_diags = merge_diags(
+              items_diags,
+              self.expression(&items_buf, spread.argument.*, ind),
+            )
           },
         }
         first = false
       }
-      out.text += self.init_send(
-        temp,
-        "initWithObjects:count:",
-        "[" + items.text + "], " + f"{elements.length()}",
+      write(
+        buf,
+        self.init_send(
+          temp,
+          "initWithObjects:count:",
+          "[" + items_buf.String() + "], " + f"{elements.length()}",
+        ),
       )
-      out.diags = merge_diags(out.diags, items.diags)
+      items_diags
     }
-    out.text += ")"
+    write(buf, ")")
     self.receiver_exit()
-    out
+    diags
   }
 
-  fn objj_dictionary(self, literal: ObjjDictionaryLiteral, ind: string) -> JsPrinted {
+  fn objj_dictionary(
+    self,
+    buf: Ref<strings.Builder>,
+    literal: ObjjDictionaryLiteral,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     let n = self.receiver_enter()
     let temp = f"___r{n}"
-    let mut out = self.alloc_head(temp, "CPDictionary")
-    if literal.pairs.is_empty() {
-      out.text += self.init_send(temp, "init", "")
+    self.alloc_head_write(buf, temp, "CPDictionary")
+    let diags = if literal.pairs.is_empty() {
+      write(buf, self.init_send(temp, "init", ""))
+      []
     } else {
-      let mut values = text_of("")
-      let mut keys = text_of("")
+      let mut values_buf = strings.Builder { .. }
+      let mut keys_buf = strings.Builder { .. }
+      let mut all_diags: Slice<Diagnostic> = []
       let mut first = true
       for pair in literal.pairs {
         if !first {
-          values.text += ", "
-          keys.text += ", "
+          let _ = values_buf.WriteString(", ")
+          let _ = keys_buf.WriteString(", ")
         }
-        emit(&values, self.expression(pair.value.*, ind))
-        emit(&keys, self.expression(pair.key.*, ind))
+        all_diags = merge_diags(
+          all_diags,
+          self.expression(&values_buf, pair.value.*, ind),
+        )
+        all_diags = merge_diags(
+          all_diags,
+          self.expression(&keys_buf, pair.key.*, ind),
+        )
         first = false
       }
-      out.text += self.init_send(
-        temp,
-        "initWithObjects:forKeys:",
-        "[" + values.text + "], [" + keys.text + "]",
+      write(
+        buf,
+        self.init_send(
+          temp,
+          "initWithObjects:forKeys:",
+          "[" + values_buf.String() + "], [" + keys_buf.String() + "]",
+        ),
       )
-      out.diags = merge_diags(out.diags, merge_diags(values.diags, keys.diags))
+      all_diags
     }
-    out.text += ")"
+    write(buf, ")")
     self.receiver_exit()
-    out
+    diags
   }
 
-  // alloc_head opens the literal desugaring: `(___rN = (Class.isa.
-  // method_msgSend["alloc"] || _objj_forward)(Class, "alloc"), ___rN ==
-  // null ? ___rN : `.  Single leading paren — unlike a send's double.
-  // Collection literals carry NO dtable comma artifact in debug mode
-  // (corpus-confirmed): the selectors are always bare.
-  fn alloc_head(self, temp: string, class_name: string) -> JsPrinted {
-    text_of(
+  fn alloc_head_write(
+    self,
+    buf: Ref<strings.Builder>,
+    temp: string,
+    class_name: string,
+  ) {
+    write(
+      buf,
       "(" + temp + " = (" + class_name +
       ".isa.method_msgSend[\"alloc\"] || _objj_forward)(" +
       class_name +
@@ -2507,8 +2865,6 @@ impl JsPrint {
     )
   }
 
-  // init_send is the second send of a literal desugaring, onto ___rN —
-  // bare selector, no artifact.
   fn init_send(self, temp: string, selector: string, args: string) -> string {
     let mut out = "(" + temp + ".isa.method_msgSend[\"" + selector +
     "\"] || _objj_forward)(" +
@@ -2520,45 +2876,36 @@ impl JsPrint {
     out
   }
 
-  // deref_update rewrites ++/-- on an @deref target through the setter.
   fn deref_update(
     self,
+    buf: Ref<strings.Builder>,
     deref: ObjjDerefExpression,
     operator: UpdateOp,
     is_prefix: bool,
     ind: string,
-  ) -> JsPrinted {
-    let target = self.expression(deref.argument.*, ind)
+  ) -> Slice<Diagnostic> {
     let op = match operator {
       Increment => "+",
       Decrement => "-",
     }
     let core_open = if is_prefix { "(" } else { "((" }
-    let mut out = JsPrinted { 
-      text: core_open + "(" + target.text + ")(",
-      diags: target.diags,
-    }
-    emit(&out, self.expression(deref.argument.*, ind))
-    out.text += "() " + op + " 1)"
+    write(buf, core_open)
+    write(buf, "(")
+    let mut diags = self.expression(buf, deref.argument.*, ind)
+    write(buf, ")(")
+    diags = merge_diags(diags, self.expression(buf, deref.argument.*, ind))
+    write(buf, "() " + op + " 1)")
     if !is_prefix {
-      // Postfix returns the prior value: subtract back what was added.
       let undo = match operator {
         Increment => " - 1)",
         Decrement => " + 1)",
       }
-      out.text += undo
+      write(buf, undo)
     }
-    out
+    diags
   }
 }
 
-// ---------------------------------------------------------------------------
-// Free helpers
-// ---------------------------------------------------------------------------
-
-// statement_needs_parens is the legacy ExpressionStatement special case:
-// expressions that would be misparsed (or reinterpreted) at statement
-// position print inside parentheses.
 fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
   match e {
     Primary(primary) => match primary {
@@ -2584,7 +2931,6 @@ fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
   }
 }
 
-// arrow_body_needs_parens is the legacy arrow-body subset of the same rule.
 fn arrow_body_needs_parens(e: Expression) -> bool {
   match e {
     Primary(primary) => match primary {
@@ -2633,8 +2979,6 @@ fn module_export_name_text(name: ModuleExportName) -> string {
   }
 }
 
-// string_literal_inner reassembles the content between the quotes —
-// fragments and escapes verbatim.
 fn string_literal_inner(literal: StringLiteral) -> string {
   let mut out = ""
   for part in literal.parts {
@@ -2646,11 +2990,6 @@ fn string_literal_inner(literal: StringLiteral) -> string {
   out
 }
 
-// ---------------------------------------------------------------------------
-// Tier B free helpers
-// ---------------------------------------------------------------------------
-
-// The legacy reserved set: identifiers never rewritten to self.ivar.
 fn reserved_identifier(name: string) -> bool {
   name == "self" || name == "_cmd" || name == "__filename" ||
   name == "undefined" ||
@@ -2658,17 +2997,14 @@ fn reserved_identifier(name: string) -> bool {
   name == "arguments"
 }
 
-fn objj_typedef_text(name: string) -> JsPrinted {
-  text_of(
+fn objj_typedef_write(buf: Ref<strings.Builder>, name: string) {
+  write(
+    buf,
     "{var the_typedef = objj_allocateTypeDef(\"" + name +
     "\");\nobjj_registerTypeDef(the_typedef);\n}",
   )
 }
 
-// codegen_type is the bare-name type spelling used in objj_ivar strings
-// and method type arrays: protocol qualifiers drop (corpus-proven — no
-// `<` appears in any Foundation type string).  cst_ops's render() is the
-// diagnostic spelling and keeps them.
 fn codegen_type(objj_type: ObjjType) -> string {
   match objj_type {
     Protocol(protocol_type) => protocol_type.name.text,
@@ -2690,15 +3026,10 @@ fn codegen_param_type(parameter_type: Option<ObjjMethodType>) -> string {
   parameter_type.map_or("id", codegen_return_type)
 }
 
-// quoted_type_list renders JSON.stringify of a type-name array: no
-// spaces, double quotes (type names never contain quote characters).
 fn quoted_type_list(types: Slice<string>) -> string {
   "\"" + strings.Join(types, "\",\"") + "\""
 }
 
-// assignment_op_char is the operator character embedded in an @deref
-// compound assignment's setter form (`x() + v`); Assign is handled by the
-// caller and never reaches here.
 fn assignment_op_char(op: AssignmentOp) -> string {
   match op {
     Assign => "=",
@@ -2716,8 +3047,6 @@ fn assignment_op_char(op: AssignmentOp) -> string {
   }
 }
 
-// message_arguments flattens a message selector's argument expressions in
-// selector order (unary selectors carry none).
 fn message_arguments(selector: ObjjMessageSelector) -> Slice<Expression> {
   let mut out: Slice<Expression> = []
   if let ObjjMessageSelector.Keyword(keywords) = selector {
@@ -2730,15 +3059,11 @@ fn message_arguments(selector: ObjjMessageSelector) -> Slice<Expression> {
   out
 }
 
-// selector_part_count is the number of colon-separated keyword parts (the
-// dtable-lookup repetition count); a unary selector counts as one.
 fn selector_part_count(selector: string) -> int {
   let count = strings.Count(selector, ":")
   if count == 0 { 1 } else { count }
 }
 
-// expression_identifier_name returns the receiver's name when it is a bare
-// identifier (the simple-receiver test), else None.
 fn expression_identifier_name(e: Expression) -> Option<string> {
   if let Expression.Primary(primary) = e {
     if let PrimaryExpression.Identifier(identifier) = primary {
@@ -2748,7 +3073,6 @@ fn expression_identifier_name(e: Expression) -> Option<string> {
   None
 }
 
-// expression_as_deref unwraps an @deref primary for the update-target test.
 fn expression_as_deref(e: Expression) -> Option<ObjjDerefExpression> {
   if let Expression.Primary(primary) = e {
     if let PrimaryExpression.ObjjDeref(deref) = primary { return Some(deref) }
@@ -2756,9 +3080,6 @@ fn expression_as_deref(e: Expression) -> Option<ObjjDerefExpression> {
   None
 }
 
-// body_assigns_self pre-scans a method body for any assignment to `self`,
-// nested functions included — the legacy assignmentToSelf flag that
-// decides whether a `self` receiver is null-guarded.
 fn body_assigns_self(body: StatementBlock) -> bool {
   for st in body.body {
     if statement_assigns_self(st) { return true }
@@ -2845,11 +3166,6 @@ fn expressions_assign_self(exprs: Expressions) -> bool {
   }
 }
 
-// expression_assigns_self detects `self = …` at this expression node; it
-// does not recurse into every operand (the legacy flag is set by the
-// assignment visitor, which fires only on an actual assignment whose left
-// is the self identifier).  Assignment right-hand sides are scanned so a
-// nested `x = (self = y)` is caught.
 fn expression_assigns_self(e: Expression) -> bool {
   match e {
     Assignment(assignment) => match assignment {
@@ -2869,8 +3185,6 @@ fn expression_assigns_self(e: Expression) -> bool {
   }
 }
 
-// objj_method_description is the bodiless protocol form: Nil in place of
-// the implementation function.
 fn objj_method_description(method: ObjjMethodDeclaration) -> string {
   let selector = method.selector.selector_string()
   let mut types: Slice<string> = [codegen_return_type(method.return_type)]
@@ -2884,16 +3198,6 @@ fn objj_method_description(method: ObjjMethodDeclaration) -> string {
   "])"
 }
 
-// ---------------------------------------------------------------------------
-// Scope collection — the pre-scan equivalent of the legacy's visit-order
-// registration plus retroactive hoisting correction (PHASE-8-BRIEF.md,
-// tier B law).  One scan per function scope collects every declared name
-// at any block depth; the recorded simplification is that block-scoped
-// let/const suppress ivar capture function-wide rather than block-wide.
-// ---------------------------------------------------------------------------
-
-// scope_locals builds a fresh locals list — base copied element by
-// element so sibling scopes can never alias one another's backing array.
 fn scope_locals(
   base: Slice<string>,
   names: Slice<string>,
@@ -2961,9 +3265,6 @@ fn block_declared_names(block: StatementBlock) -> Slice<string> {
   names
 }
 
-// statement_declared_names accumulates every name declared beneath a
-// statement without descending into nested function bodies (those open
-// their own scopes).
 fn statement_declared_names(st: Statement, mut names: Slice<string>) -> Slice<string> {
   match st {
     Declaration(declaration) => match declaration {
