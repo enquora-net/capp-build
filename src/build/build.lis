@@ -23,6 +23,7 @@ import "go:fmt"
 // The compiler confirms that each operation has, in fact, an implementation
 // and that it is run in the correct order by the execution machinery.
 // Described in ARCHITECTURE.md.
+#[iterate]
 pub enum BuildPhase {
   ValidateProjectStructure, // phase 1
   WalkSourceTree, // phase 2
@@ -37,22 +38,8 @@ pub enum BuildPhase {
 
 // Adding a variant to BuildPhase without a corresponding arm in run() is a
 // compile error.  This is the binding between declaration and execution.
-// all() declares execution order; run() enforces completeness.
+// variants() is synthesised by #[iterate]; run() enforces completeness.
 impl BuildPhase {
-  fn all() -> Slice<BuildPhase> {
-    [
-      BuildPhase.ValidateProjectStructure,
-      BuildPhase.WalkSourceTree,
-      BuildPhase.ParseSources,
-      BuildPhase.ResolveImports,
-      BuildPhase.TopologicalSort,
-      BuildPhase.BuildSymbolTable,
-      BuildPhase.TypeCheck,
-      BuildPhase.Compile,
-      BuildPhase.Archive,
-    ]
-  }
-
   fn run(self, ctx: Ref<BuildContext>) -> Result<(), error> {
     match self {
       ValidateProjectStructure => {
@@ -173,14 +160,14 @@ fn error_count(diags: Slice<Diagnostic>) -> int {
 // ---------------------------------------------------------------------------
 
 // A phase returning Err halts the pipeline; Warning-level diagnostics do not.
-// The slice literal below is the single authoritative declaration of execution
-// order.  Completeness is enforced by BuildPhase.run above.
+// Declaration order in BuildPhase is the authoritative execution order;
+// #[iterate] synthesises variants() from it.  Completeness is enforced by BuildPhase.run.
 pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   let root = find_project_root(cfg.source_root)?
 
   let mut ctx = BuildContext { config: cfg, root, .. }
 
-  for phase in BuildPhase.all() {
+  for phase in BuildPhase.variants() {
     phase.run(&ctx)?
     // Gate on diagnostics: a phase that reports an Error has found the
     // project unbuildable from this point.  Halt before dependent phases
