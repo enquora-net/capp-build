@@ -161,6 +161,22 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   let cfg = build.BuildConfig { mode, delivery, source_root, grammar: "" }
   match build.build(cfg) {
     Ok(result) => {
+      if !result.ok {
+        for d in result.diags {
+          let loc = match (d.file, d.line, d.col) {
+            (Some(f), Some(l), Some(c)) => f"{f}:{l}:{c}",
+            (Some(f), Some(l), None) => f"{f}:{l}",
+            (Some(f), None, _) => f,
+            _ => "<unknown>",
+          }
+          let level = match d.level {
+            Error => "error",
+            Warning => "warning",
+            Info => "info",
+          }
+          cmd.Println(f"  {level}: {loc}: {d.message}")
+        }
+      }
       cmd.Println(result.message)
       if !result.ok { os.Exit(1) }
     },

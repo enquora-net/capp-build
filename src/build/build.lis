@@ -14,6 +14,7 @@
 //
 // **
 import "go:fmt"
+import "go:strings"
 
 // ---------------------------------------------------------------------------
 // BuildPhase
@@ -177,11 +178,7 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
     if has_error(diags) {
       let n = error_count(diags)
       return Ok(
-        BuildResult { 
-          ok: false,
-          message: f"build halted: {n} error(s) in {phase_name(phase)}",
-          diags,
-        },
+        BuildResult { ok: false, message: halt_message(phase, n, diags), diags },
       )
     }
   }
@@ -197,6 +194,51 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   )
 
   Ok(BuildResult { ok: true, message: f"build complete: {ctx.root.path}", .. })
+}
+
+// halt_message renders a phase halt with concrete Error diagnostics.  The
+// BuildResult still carries the full structured diagnostic slice; this string is
+// for callers that only surface the summary message.
+fn halt_message(phase: BuildPhase, error_total: int, diags: Slice<Diagnostic>) -> string {
+  let mut lines: Slice<string> = [
+    f"build halted: {error_total} error(s) in {phase_name(phase)}",
+  ]
+  let mut displayed = 0
+  for d in diags {
+    if let DiagLevel.Error = d.level {
+      if displayed < 5 {
+        lines = lines.append(f"  {diagnostic_line(d)}")
+        displayed += 1
+      }
+    }
+  }
+  if error_total > displayed {
+    lines = lines.append(f"  ... {error_total - displayed} more error(s)")
+  }
+  strings.Join(lines, "\n")
+}
+
+fn diagnostic_line(d: Diagnostic) -> string {
+  let loc = diagnostic_location(d)
+  let level = diagnostic_level(d)
+  f"{level}: {loc}: {d.message}"
+}
+
+fn diagnostic_location(d: Diagnostic) -> string {
+  match (d.file, d.line, d.col) {
+    (Some(f), Some(l), Some(c)) => f"{f}:{l}:{c}",
+    (Some(f), Some(l), None) => f"{f}:{l}",
+    (Some(f), None, _) => f,
+    _ => "<unknown>",
+  }
+}
+
+fn diagnostic_level(d: Diagnostic) -> string {
+  match d.level {
+    Error => "error",
+    Warning => "warning",
+    Info => "info",
+  }
 }
 
 // phase_name renders a phase for halt messages.
