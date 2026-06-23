@@ -154,12 +154,16 @@ pub struct ProjectRoot {
 // project kind comes from Info.plist, not from the sentinel.
 //
 // Sentinels:
-//   Frameworks/Foundation  — Application project root
+//   Frameworks/Foundation  — Application project root: must resolve to a
+//                            directory (symlinks are followed via os.Stat)
 //   Info.plist             — Framework or Theme project root
+//
+// os.Stat is used throughout (not os.Lstat) so that a symlinked
+// Frameworks/Foundation is recognised as a valid sentinel when its target
+// is an existing directory.
 fn is_project_root(dir: string) -> bool {
-  if let Ok(_) = os.Stat(filepath.Join(dir, "Frameworks", "Foundation")) {
-    return true
-  }
+  let fwk = filepath.Join(dir, "Frameworks", "Foundation")
+  if os.Stat(fwk).map_or(false, |info| info.IsDir()) { return true }
   os.Stat(filepath.Join(dir, "Info.plist")).is_ok()
 }
 

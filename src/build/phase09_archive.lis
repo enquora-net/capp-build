@@ -570,9 +570,13 @@ fn is_resource_file(name: string) -> bool {
 }
 
 // copy_dir_recursive copies the entire directory tree rooted at src into dst,
-// creating directories as needed.  Symlinks are followed (os.ReadDir resolves
-// them); the destination receives regular files.  Used to copy the Frameworks/
-// tree verbatim.
+// creating directories as needed.  Symlinks at any level are followed: the
+// directory-vs-file branch uses os.Stat on the resolved path rather than
+// entry.IsDir(), which reflects only the type of the link entry itself and
+// returns false for a symlink whose target is a directory.  The destination
+// always receives regular files and concrete directories, never symlinks.
+// Used to copy the Frameworks/ tree verbatim; individual frameworks may be
+// concrete directories or symlinks to directories.
 fn copy_dir_recursive(src: string, dst: string) -> Result<(), error> {
   if let Err(_) = os.Stat(src) { return Ok(()) }
   os.MkdirAll(dst, os.ModePerm)?
@@ -587,7 +591,11 @@ fn copy_dir_recursive(src: string, dst: string) -> Result<(), error> {
     let name = entry.Name()
     let src_path = filepath.Join(src, name)
     let dst_path = filepath.Join(dst, name)
-    if entry.IsDir() {
+    // entry.IsDir() is false for symlinks regardless of the target type.
+    // os.Stat follows the symlink; IsDir() on the resulting FileInfo is
+    // authoritative for the resolved target.
+    let is_dir = os.Stat(src_path).map_or(false, |info| info.IsDir())
+    if is_dir {
       copy_dir_recursive(src_path, dst_path)?
     } else {
       copy_file(src_path, dst_path)?

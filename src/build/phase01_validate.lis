@@ -213,14 +213,20 @@ fn ensure_plist_meta(content: string, root: string) -> PlistFixup {
 }
 
 // validate_framework_roots constructs FrameworkRoots for an Application project.
-// FrameworkRoots can only be constructed in the branch where both paths exist.
-// Returns Err with all missing-path messages when either is absent.
+// FrameworkRoots can only be constructed in the branch where both paths resolve
+// to directories.  Symlinks are followed (os.Stat, not os.Lstat); a symlinked
+// framework is accepted when its target is an existing directory and rejected
+// (with a descriptive error) when the target is absent, dangling, or a file.
+// Returns Err with all defect messages accumulated so the developer sees the
+// full picture in one pass.
 fn validate_framework_roots(root: string) -> Result<FrameworkRoots, Slice<string>> {
   let foundation = filepath.Join(root, "Frameworks", "Foundation")
   let app_kit = filepath.Join(root, "Frameworks", "AppKit")
 
-  let fnd_ok = os.Stat(foundation).is_ok()
-  let ak_ok = os.Stat(app_kit).is_ok()
+  // os.Stat follows symlinks; IsDir() on the resulting FileInfo reflects the
+  // resolved target, not the link entry itself.
+  let fnd_ok = os.Stat(foundation).map_or(false, |info| info.IsDir())
+  let ak_ok = os.Stat(app_kit).map_or(false, |info| info.IsDir())
 
   match (fnd_ok, ak_ok) {
     (true, true) => Ok(FrameworkRoots { foundation, app_kit }),
@@ -228,12 +234,12 @@ fn validate_framework_roots(root: string) -> Result<FrameworkRoots, Slice<string
       let mut errs: Slice<string> = []
       if !fnd_ok {
         errs = errs.append(
-          "Frameworks/Foundation not found — required for Application projects",
+          "Frameworks/Foundation not found or not a directory (check for dangling symlink) — required for Application projects",
         )
       }
       if !ak_ok {
         errs = errs.append(
-          "Frameworks/AppKit not found — required for Application projects",
+          "Frameworks/AppKit not found or not a directory (check for dangling symlink) — required for Application projects",
         )
       }
       Err(errs)
