@@ -33,6 +33,7 @@ import "go:fmt"
 import "go:github.com/enquora-net/capp-parse"
 import "go:os"
 import "go:path/filepath"
+import "go:strings"
 
 // ImportEdge represents a resolved quote-form dependency between two source
 // files within the project.  Both from and to are absolute paths.
@@ -67,6 +68,14 @@ pub struct ImportGraph {
   pub diags: Slice<Diagnostic>,
 }
 
+// LocalResolution makes import lookup outcomes explicit.  Missing carries the
+// direct relative candidate path; Ambiguous carries the matching project files.
+enum LocalResolution {
+  Resolved(string),
+  Missing(string),
+  Ambiguous(Slice<string>),
+}
+
 // path_known returns true when target already appears in the known slice.
 fn path_known(known: Slice<string>, target: string) -> bool {
   known.filter(|p| p == target).length() > 0
@@ -77,14 +86,59 @@ fn dep_known(deps: Slice<FrameworkDep>, framework: string, path: string) -> bool
   deps.filter(|d| d.framework == framework && d.path == path).length() > 0
 }
 
-// resolve_local resolves a quote-form import path relative to the importing
-// file and confirms the result exists on disk.
-fn resolve_local(path: string, from_path: string) -> Option<string> {
-  let candidate = filepath.Join(filepath.Dir(from_path), path)
-  match os.Stat(candidate) {
-    Ok(_) => Some(candidate),
-    Err(_) => None,
+// local_candidate returns the direct path searched for a quote-form import:
+// the import text relative to the importing file.
+fn local_candidate(path: string, from_path: string) -> string {
+  filepath.Join(filepath.Dir(from_path), path)
+}
+
+// resolve_local resolves a quote-form import.  Direct importer-relative paths
+// win.  If that fails, the project source tree is searched so nested code
+// directories can resolve by source-relative path or unique basename.
+fn resolve_local(
+  path: string,
+  from_path: string,
+  root_path: string,
+  tree: SourceTree,
+) -> LocalResolution {
+  let candidate = local_candidate(path, from_path)
+  if os.Stat(candidate).is_ok() { return LocalResolution.Resolved(candidate) }
+
+  let matches = source_tree_matches(path, root_path, tree)
+  if matches.length() == 1 { return LocalResolution.Resolved(matches[0]) }
+  if matches.length() > 1 { return LocalResolution.Ambiguous(matches) }
+  LocalResolution.Missing(candidate)
+}
+
+fn source_tree_matches(path: string, root_path: string, tree: SourceTree) -> Slice<string> {
+  let clean = filepath.Clean(path)
+  let single_name = filepath.Dir(clean) == "."
+  let mut matches: Slice<string> = []
+  for file in tree.files {
+    if is_parseable_source(file) {
+      let rel = filepath.Rel(root_path, file.path).unwrap_or(file.path)
+      if single_name {
+        if filepath.Base(file.path) == clean {
+          matches = matches.append(file.path)
+        }
+      } else {
+        if rel == clean { matches = matches.append(file.path) }
+      }
+    }
   }
+  matches
+}
+
+fn is_parseable_source(file: SourceFile) -> bool {
+  match file.kind {
+    SourceKind.ObjectiveJ => true,
+    SourceKind.Javascript => true,
+    _ => false,
+  }
+}
+
+fn candidate_list(paths: Slice<string>) -> string {
+  strings.Join(paths, ", ")
 }
 
 pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
@@ -97,11 +151,17 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     Some(p) => p,
     None => return Err(errors.New("resolve imports: parsed units unavailable")),
   }
+  let tree = match ctx.tree {
+    Some(t) => t,
+    None => return Err(errors.New("resolve imports: source tree unavailable")),
+  }
 
   // known tracks absolute paths already in the graph to prevent re-parsing.
   let mut known: Slice<string> = []
+  let mut all_units: Slice<ParsedUnit> = []
   for unit in parsed.units {
     known = known.append(unit.source.path)
+    all_units = all_units.append(unit)
   }
 
   // frontier holds units whose quote-form imports have not yet been followed.
@@ -118,8 +178,8 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
           // Quote-form: local dependency.  Resolve on disk, add to the
           // dependency graph, and schedule for transitive discovery.
           RawImport.Local(path, raw_line, raw_col) => {
-            match resolve_local(path, unit.source.path) {
-              Some(to_path) => {
+            match resolve_local(path, unit.source.path, ctx.root.path, tree) {
+              LocalResolution.Resolved(to_path) => {
                 edges = edges.append(
                   ImportEdge { 
                     from: unit.source.path,
@@ -133,10 +193,19 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
                   new_paths = new_paths.append(to_path)
                 }
               },
-              None => {
+              LocalResolution.Missing(candidate) => {
                 diags = diags.append(diag_error_at(
                   phase,
-                  f"unresolvable import \"{path}\"",
+                  f"unresolvable import \"{path}\"; searched {candidate}",
+                  unit.source.path,
+                  raw_line,
+                  raw_col,
+                ))
+              },
+              LocalResolution.Ambiguous(candidates) => {
+                diags = diags.append(diag_error_at(
+                  phase,
+                  f"ambiguous import \"{path}\"; candidates: {candidate_list(candidates)}",
                   unit.source.path,
                   raw_line,
                   raw_col,
@@ -191,18 +260,22 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
                 ))
               }
               // No tree to lower; the zero-filled Program is empty.
-              next_frontier = next_frontier.append(
-                ParsedUnit { source, imports: [], .. },
-              )
+              let parsed_unit = ParsedUnit { source, imports: [], .. }
+              next_frontier = next_frontier.append(parsed_unit)
+              all_units = all_units.append(parsed_unit)
             } else {
               let imports = extract_imports(file.Root())
               let lowered = lower_program(file.Root(), source)
               for d in lowered.diags {
                 diags = diags.append(d)
               }
-              next_frontier = next_frontier.append(
-                ParsedUnit { source, imports, program: lowered.program },
-              )
+              let parsed_unit = ParsedUnit { 
+                source,
+                imports,
+                program: lowered.program,
+              }
+              next_frontier = next_frontier.append(parsed_unit)
+              all_units = all_units.append(parsed_unit)
             }
           }
         }
@@ -216,6 +289,8 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
 
     frontier = next_frontier
   }
+
+  ctx.parsed = Some(ParsedUnits { units: all_units, diags: parsed.diags })
 
   fmt.Println(
     f"✓  resolve imports: {edges.length()} edges  {framework_deps.length()} framework deps",
