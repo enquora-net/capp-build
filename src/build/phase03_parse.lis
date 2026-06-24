@@ -135,15 +135,24 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
   for file_opt in pr.Files {
     if let Some(file) = file_opt {
       if file.HasError() {
-        for e in file.Errors {
-          diags = diags.append(diag_error_at(
-            phase,
-            e.Message,
-            file.Path,
-            e.Row as int,
-            e.Column as int,
-          ))
+        // file.Errors contains one entry per ERROR/MISSING token; all errors
+        // after the first are cascade artifacts of tree-sitter's error
+        // recovery, not independent defects.  Emit only the first with a
+        // suppressed-count suffix so the output is actionable.
+        let first = file.Errors[0]
+        let rest = file.Errors.length() - 1
+        let msg = if rest > 0 {
+          f"{first.Message} (+{rest} suppressed)"
+        } else {
+          first.Message
         }
+        diags = diags.append(diag_error_at(
+          phase,
+          msg,
+          file.Path,
+          first.Row as int,
+          first.Column as int,
+        ))
       } else {
         let imports = extract_imports(file.Root())
         let source = SourceFile { path: file.Path, kind: classify(file.Path) }

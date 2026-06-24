@@ -138,6 +138,11 @@ fn make_group(use: string, short: string) -> cobra.Command {
 // build command
 // ---------------------------------------------------------------------------
 
+// run_build executes the compilation pipeline using configuration parsed from
+// the command-line context. It coalesces recovery cascade artifacts to ensure
+// a maximum of one primary error is emitted per distinct source file.
+//
+// Returns a terminal exit status code (1) to the host OS on failure.
 fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   let source_root = if !args.is_empty() { args[0] } else { "." }
   let mode_str = cmd.Flags().GetString("mode").unwrap_or("debug")
@@ -159,26 +164,42 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
     build.DeliveryContext.HTTP1
   }
   let cfg = build.BuildConfig { mode, delivery, source_root, grammar: "" }
+
   match build.build(cfg) {
     Ok(result) => {
       if !result.ok {
+        let mut seen_files: Map<string, int> = Map.new<string, int>()
+        let mut suppressed = 0
+
         for d in result.diags {
-          let loc = match (d.file, d.line, d.col) {
-            (Some(f), Some(l), Some(c)) => f"{f}:{l}:{c}",
-            (Some(f), Some(l), None) => f"{f}:{l}",
-            (Some(f), None, _) => f,
-            _ => "<unknown>",
+          if let build.DiagLevel.Error = d.level {
+            let key = d.file.unwrap_or("<unknown>")
+            if seen_files[key] > 0 {
+              suppressed += 1
+            } else {
+              seen_files[key] = 1
+              let loc = match (d.file, d.line, d.col) {
+                (Some(f), Some(l), Some(c)) => f"{f}:{l}:{c}",
+                (Some(f), Some(l), None) => f"{f}:{l}",
+                (Some(f), None, _) => f,
+                _ => "<unknown>",
+              }
+              cmd.Println(f"  error: {loc}: {d.message}")
+            }
           }
-          let level = match d.level {
-            Error => "error",
-            Warning => "warning",
-            Info => "info",
-          }
-          cmd.Println(f"  {level}: {loc}: {d.message}")
         }
+
+        if suppressed > 0 {
+          cmd.Println(
+            f"  ({suppressed} further error(s) suppressed — first error per file shown)",
+          )
+        }
+
+        cmd.Println(f"build failed: {result.message}")
+        os.Exit(1)
       }
-      cmd.Println(result.message)
-      if !result.ok { os.Exit(1) }
+
+      cmd.Println(f"build success: {result.message}")
     },
     Err(e) => {
       cmd.Println(f"build error: {e}")
