@@ -6,6 +6,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## 2.0.0-beta.2 — 2026-06-29
+
+### Fixed
+
+- Tree walker: symlinked frameworks were treated as files, not directories,
+  during validation and archive copy (`context.lis`, `phase01_validate.lis`,
+  `phase09_archive.lis` all used `DirEntry.IsDir()`, which doesn't follow
+  symlinks; switched to `os.Stat`, which does)
+- Diagnostics: a single parse failure could cascade into repeated duplicate
+  errors via tree-sitter's recovery; Phase 3 now reports each file once
+- Diagnostics: Phase 2 (Walk) and Phase 4 (Imports) had overlapping,
+  inconsistent error authority; reconciled, and Phase 4 now handles
+  arbitrary-depth source trees correctly
+- Diagnostics: console errors now name the specific file and condition
+  instead of a generic phase-level failure
+
+### Changed
+
+- Synced to Lisette v0.6.0 syntax
+- Replaced hand-written `all()` enumerator with `#[iterate]`-synthesised
+  variants
+- Fixed quadratic output growth in `js_print.lis` (Phase 8)
+
+### Platforms
+
+macOS (arm64, x86_64), Linux (arm64, x86_64), Windows (arm64, x86_64).
+
+---
+
 ## 2.0.0-beta.1 — 2026-06-17
 
 First public beta of capp-build, the new Cappuccino Objective-J compiler and
