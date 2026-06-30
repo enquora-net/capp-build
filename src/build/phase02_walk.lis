@@ -41,17 +41,10 @@ pub struct SourceTree {
 // classify returns the SourceKind for a file based on its extension.
 fn classify(path: string) -> SourceKind {
   match strings.ToLower(filepath.Ext(path)) {
-    ".j" => SourceKind.ObjectiveJ,
-    ".sj" => SourceKind.ObjectiveJ,
+    ".j" | ".sj" => SourceKind.ObjectiveJ,
     ".js" => SourceKind.Javascript,
     ".xib" => SourceKind.InterfaceBuilder,
-    ".png" => SourceKind.Graphic,
-    ".jpg" => SourceKind.Graphic,
-    ".jpeg" => SourceKind.Graphic,
-    ".svg" => SourceKind.Graphic,
-    ".icns" => SourceKind.Graphic,
-    ".tiff" => SourceKind.Graphic,
-    ".gif" => SourceKind.Graphic,
+    ".png" | ".jpg" | ".jpeg" | ".svg" | ".icns" | ".tiff" | ".gif" => SourceKind.Graphic,
     _ => SourceKind.Resource,
   }
 }

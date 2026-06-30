@@ -142,7 +142,7 @@ fn phase_diags(phase: BuildPhase, ctx: Ref<BuildContext>) -> Slice<Diagnostic> {
 // has_error returns true when any diagnostic in the slice is Error-level.
 fn has_error(diags: Slice<Diagnostic>) -> bool {
   for d in diags {
-    if let DiagLevel.Error = d.level { return true }
+    if d.level == DiagLevel.Error { return true }
   }
   false
 }
@@ -151,7 +151,7 @@ fn has_error(diags: Slice<Diagnostic>) -> bool {
 fn error_count(diags: Slice<Diagnostic>) -> int {
   let mut n = 0
   for d in diags {
-    if let DiagLevel.Error = d.level { n += 1 }
+    if d.level == DiagLevel.Error { n += 1 }
   }
   n
 }
@@ -205,11 +205,9 @@ fn halt_message(phase: BuildPhase, error_total: int, diags: Slice<Diagnostic>) -
   ]
   let mut displayed = 0
   for d in diags {
-    if let DiagLevel.Error = d.level {
-      if displayed < 5 {
-        lines = lines.append(f"  {diagnostic_line(d)}")
-        displayed += 1
-      }
+    if d.level == DiagLevel.Error && displayed < 5 {
+      lines = lines.append(f"  {diagnostic_line(d)}")
+      displayed += 1
     }
   }
   if error_total > displayed {

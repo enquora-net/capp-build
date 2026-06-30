@@ -66,7 +66,7 @@ pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
   let phase = BuildPhase.Archive
   let mut diags: Slice<Diagnostic> = []
 
-  if let BuildMode.Clean = ctx.config.mode {
+  if ctx.config.mode == BuildMode.Clean {
     diags = diags.append(diag_info(phase, "clean mode: nothing to archive"))
     fmt.Println("✓  archive: clean mode, nothing to archive")
     print_archive_diags(diags)
@@ -554,16 +554,16 @@ fn copy_resources(src_dir: string, dst_dir: string) -> Result<(), error> {
 fn is_resource_file(name: string) -> bool {
   let ext = strings.ToLower(filepath.Ext(name))
   match ext {
-    ".cib" => true,
-    ".png" => true,
-    ".jpg" => true,
-    ".jpeg" => true,
-    ".gif" => true,
-    ".pdf" => true,
-    ".css" => true,
-    ".ttf" => true,
-    ".otf" => true,
-    ".woff" => true,
+    ".cib" |
+    ".png" |
+    ".jpg" |
+    ".jpeg" |
+    ".gif" |
+    ".pdf" |
+    ".css" |
+    ".ttf" |
+    ".otf" |
+    ".woff" |
     ".woff2" => true,
     _ => false,
   }

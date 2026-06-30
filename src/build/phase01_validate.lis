@@ -400,7 +400,7 @@ fn finish_validation(root: string, diags: Slice<Diagnostic>) -> Result<Validatio
   let mut errors = 0
   for d in diags {
     print_validation_diag(d)
-    if let DiagLevel.Error = d.level { errors += 1 }
+    if d.level == DiagLevel.Error { errors += 1 }
   }
   if errors == 0 {
     fmt.Println(f"✓  validate: {root}")

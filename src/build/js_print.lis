@@ -327,10 +327,7 @@ fn directive_prologue_len(body: Slice<Statement>) -> int {
 
 fn expression_is_string(e: Expression) -> bool {
   match e {
-    Primary(primary) => match primary {
-      String(_) => true,
-      _ => false,
-    },
+    Primary(String(_)) => true,
     _ => false,
   }
 }
@@ -1388,10 +1385,7 @@ impl JsPrint {
       PrivateProperty(private) => write(buf, f"#{private.text}"),
       Expression(left) => {
         let left_is_arrow = match left.* {
-          Primary(primary) => match primary {
-            Arrow(_) => true,
-            _ => false,
-          },
+          Primary(Arrow(_)) => true,
           _ => false,
         }
         if nullish || exponent || left_is_arrow {
@@ -1447,7 +1441,7 @@ impl JsPrint {
         write(buf, "(")
         let mut diags = self.expression(buf, deref.left.argument.*, ind)
         write(buf, ")(")
-        if let AssignmentOp.Assign = deref.operator {
+        if deref.operator == AssignmentOp.Assign {
           diags = merge_diags(diags, self.expression(buf, deref.right.*, ind))
         } else {
           diags = merge_diags(
@@ -2222,7 +2216,7 @@ impl JsPrint {
     let mut occupied = Map.new<string, bool>()
     for member in implementation.members {
       if let ObjjImplementationMember.Method(method) = member {
-        if let ObjjMethodScope.Instance = method.scope {
+        if method.scope == ObjjMethodScope.Instance {
           occupied[method.selector.selector_string()] = true
         }
       }
@@ -2366,10 +2360,8 @@ impl JsPrint {
     let mut ivars = Map.new<string, bool>()
     if let Some(instance_variables) = implementation.ivars {
       for member in instance_variables.members {
-        if let ObjjIvarMember.Variable(variable) = member {
-          if let ObjjInstanceVariable.Field(field) = variable {
-            ivars[field.name.text] = true
-          }
+        if let ObjjIvarMember.Variable(ObjjInstanceVariable.Field(field)) = member {
+          ivars[field.name.text] = true
         }
       }
     }
@@ -2699,10 +2691,7 @@ impl JsPrint {
 
   fn super_receiver_text(self, receiver: Expression) -> Option<string> {
     let is_super = match receiver {
-      Primary(primary) => match primary {
-        Super(_) => true,
-        _ => false,
-      },
+      Primary(Super(_)) => true,
       _ => false,
     }
     if !is_super { return None }
@@ -2919,10 +2908,7 @@ fn statement_needs_parens(e: Expression, is_directive: bool) -> bool {
     },
     Binary(binary) => match binary.left {
       Expression(left) => match left.* {
-        Primary(primary) => match primary {
-          Function(_) | Generator(_) => true,
-          _ => false,
-        },
+        Primary(Function(_)) | Primary(Generator(_)) => true,
         _ => false,
       },
       PrivateProperty(_) => false,
@@ -3065,17 +3051,15 @@ fn selector_part_count(selector: string) -> int {
 }
 
 fn expression_identifier_name(e: Expression) -> Option<string> {
-  if let Expression.Primary(primary) = e {
-    if let PrimaryExpression.Identifier(identifier) = primary {
-      return Some(identifier.text)
-    }
+  if let Expression.Primary(PrimaryExpression.Identifier(identifier)) = e {
+    return Some(identifier.text)
   }
   None
 }
 
 fn expression_as_deref(e: Expression) -> Option<ObjjDerefExpression> {
-  if let Expression.Primary(primary) = e {
-    if let PrimaryExpression.ObjjDeref(deref) = primary { return Some(deref) }
+  if let Expression.Primary(PrimaryExpression.ObjjDeref(deref)) = e {
+    return Some(deref)
   }
   None
 }

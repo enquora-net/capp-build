@@ -121,9 +121,7 @@ fn source_tree_matches(path: string, root_path: string, tree: SourceTree) -> Sli
         if filepath.Base(file.path) == clean {
           matches = matches.append(file.path)
         }
-      } else {
-        if rel == clean { matches = matches.append(file.path) }
-      }
+      } else if rel == clean { matches = matches.append(file.path) }
     }
   }
   matches
@@ -131,8 +129,7 @@ fn source_tree_matches(path: string, root_path: string, tree: SourceTree) -> Sli
 
 fn is_parseable_source(file: SourceFile) -> bool {
   match file.kind {
-    SourceKind.ObjectiveJ => true,
-    SourceKind.Javascript => true,
+    SourceKind.ObjectiveJ | SourceKind.Javascript => true,
     _ => false,
   }
 }

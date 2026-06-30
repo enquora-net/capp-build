@@ -172,7 +172,7 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
         let mut suppressed = 0
 
         for d in result.diags {
-          if let build.DiagLevel.Error = d.level {
+          if d.level == build.DiagLevel.Error {
             let key = d.file.unwrap_or("<unknown>")
             if seen_files[key] > 0 {
               suppressed += 1

@@ -57,7 +57,7 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   let phase = BuildPhase.Compile
   let mut diags: Slice<Diagnostic> = []
 
-  if let BuildMode.Clean = ctx.config.mode {
+  if ctx.config.mode == BuildMode.Clean {
     diags = diags.append(diag_info(
       phase,
       "clean mode: artefact-directory removal deferred",
@@ -82,8 +82,7 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
   // prologue stays; release payloads have none.
   let prologue = match ctx.config.mode {
     Debug => "\n\n",
-    Release => "",
-    Clean => "",
+    Release | Clean => "",
   }
 
   let mut records: Slice<CompiledRecord> = []
@@ -102,8 +101,7 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
 
     let debug_dispatch = match ctx.config.mode {
       Debug => true,
-      Release => false,
-      Clean => false,
+      Release | Clean => false,
     }
     let printed = print_js_program(
       unit.program,
