@@ -25,6 +25,11 @@
 #   Lisette has no mutable package-level vars, so ldflags injection is not
 #   viable. VERSION is written into src/version_generated.lis before each
 #   build and reset to "dev" afterwards.
+#
+#   VERSION.txt is the single source of truth for the project version.
+#   lisette.toml's [project] version field is a derived artifact, rewritten
+#   from VERSION.txt by `sync-version` before every build. Do not edit it
+#   by hand — changes will be overwritten on the next build.
 
 BINARY       := capp-build
 BUILD_DIR    := build
@@ -34,15 +39,22 @@ COMMIT       := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown"
 VERSION_FILE := src/version_generated.lis
 MACOS_SDK    := $(shell xcrun --sdk macosx --show-sdk-path 2>/dev/null)
 
-.PHONY: all build run build-all checksums release clean
+.PHONY: all build run build-all checksums release clean sync-version
 
 all: build
+
+# ---------------------------------------------------------------------------
+# Version sync — lisette.toml is derived from VERSION.txt
+# ---------------------------------------------------------------------------
+
+sync-version:
+	@sed -i.bak 's/^version = ".*"/version = "$(VERSION)"/' lisette.toml && rm -f lisette.toml.bak
 
 # ---------------------------------------------------------------------------
 # Development
 # ---------------------------------------------------------------------------
 
-build:
+build: sync-version
 	lis format
 	@printf '//**\n// version_generated.lis\n// capp-build\n//\n// Generated — do not edit by hand.\n// **\n\npub const VERSION: string = "$(VERSION) ($(COMMIT))"\n' \
 		> "$(VERSION_FILE)"
@@ -61,7 +73,7 @@ clean:
 # Release builds — all six platform targets via Zig CC
 # ---------------------------------------------------------------------------
 
-build-all:
+build-all: sync-version
 	lis format
 	@printf '//**\n// version_generated.lis\n// capp-build\n//\n// Generated — do not edit by hand.\n// **\n\npub const VERSION: string = "$(VERSION) ($(COMMIT))"\n' \
 		> "$(VERSION_FILE)"
