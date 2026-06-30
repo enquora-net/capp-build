@@ -79,6 +79,7 @@ build-all: sync-version
 		> "$(VERSION_FILE)"
 	lis emit
 	cd "$(TARGET)" && go mod tidy
+	@rm -rf "$(BUILD_DIR)"
 	@mkdir -p "$(BUILD_DIR)"
 	@tmp=$$(mktemp -d); \
 	trap 'rm -rf "$$tmp"' EXIT; \
@@ -117,6 +118,7 @@ build-all: sync-version
 checksums:
 	@echo "computing checksums ..."
 	@cd "$(BUILD_DIR)" && for f in $(BINARY)_*; do \
+		case "$$f" in *.sha256) continue ;; esac; \
 		[ -f "$$f" ] && shasum -a 256 "$$f" | awk '{print $$1}' > "$$f.sha256" \
 		&& echo "  $$f.sha256"; \
 	done || true
@@ -141,7 +143,7 @@ release: build-all checksums
 		--notes "$$notes" \
 		$$prerelease; \
 	echo "uploading artifacts ..."; \
-	for f in "$(BUILD_DIR)"/$(BINARY)_* "$(BUILD_DIR)"/*.sha256; do \
+	for f in "$(BUILD_DIR)"/*; do \
 		[ -f "$$f" ] || continue; \
 		gh release upload "$$tag" "$$f"; \
 		echo "  uploaded: $$(basename $$f)"; \
