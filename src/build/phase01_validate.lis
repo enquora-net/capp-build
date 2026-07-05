@@ -194,7 +194,7 @@ fn resolve_package_type(content: string) -> (PackageTypeResolution, Slice<PlistP
 // records what it filled.
 fn ensure_plist_meta(content: string, root: string) -> PlistFixup {
   let (kind, kind_filled) = resolve_package_type(content)
-  let mut filled = kind_filled
+  let mut filled = kind_filled.clone()
 
   let name = plist_string(content, "CPBundleName").unwrap_or_else(|| {
     let derived = derived_name(root)

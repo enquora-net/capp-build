@@ -952,7 +952,7 @@ impl JsPrint {
     write(buf, "(")
     let diags = self.formal_parameters(buf, parameters, ind)
     write(buf, ")\n")
-    let mut inner = self
+    let mut inner = &self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
     inner.locals = function_scope_locals(self.locals, name, parameters, body)
@@ -1061,7 +1061,7 @@ impl JsPrint {
       self.formal_parameters(buf, method.parameters, ind),
     )
     write(buf, ")\n")
-    let mut inner = self
+    let mut inner = &self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
     inner.locals = function_scope_locals(
@@ -1821,7 +1821,7 @@ impl JsPrint {
       self.formal_parameters(buf, method.parameters, ind),
     )
     write(buf, ")\n")
-    let mut inner = self
+    let mut inner = &self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
     inner.locals = function_scope_locals(
@@ -1921,7 +1921,7 @@ impl JsPrint {
       },
     }
     write(buf, " => ")
-    let mut inner = self
+    let mut inner = &self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
     inner.locals = arrow_scope_locals(self.locals, arrow.parameters, arrow.body)
@@ -2157,13 +2157,15 @@ impl JsPrint {
     implementation: ObjjClassImplementation,
   ) -> Slice<Diagnostic> {
     let class_name = implementation.name.text
-    let mut p = self
-    p.current_class = Some(
-      ClassContext { 
-        name: class_name,
-        ivars: self.class_ivar_universe(implementation),
-      },
-    )
+    let p = JsPrint { 
+      current_class: Some(
+        ClassContext { 
+          name: class_name,
+          ivars: self.class_ivar_universe(implementation),
+        },
+      ),
+      ..self,
+    }
     let mut diags: Slice<Diagnostic> = []
 
     match implementation.category {
@@ -2491,7 +2493,7 @@ impl JsPrint {
         params = params.append(part.parameter_name.text)
       }
     }
-    let mut inner = self
+    let mut inner = &self
     let mut dispatch_state = ReceiverState { .. }
     inner.receivers = Some(&dispatch_state)
     inner.in_instance_method = match method.scope {

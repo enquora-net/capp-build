@@ -162,7 +162,10 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
   }
 
   // frontier holds units whose quote-form imports have not yet been followed.
-  let mut frontier: Slice<ParsedUnit> = parsed.units
+  let mut frontier: Slice<ParsedUnit> = []
+  for u in parsed.units {
+    frontier = frontier.append(ParsedUnit { imports: u.imports.clone(), ..u })
+  }
 
   loop {
     if frontier.is_empty() { break }
@@ -172,8 +175,6 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
     for unit in frontier {
       for imp in unit.imports {
         match imp {
-          // Quote-form: local dependency.  Resolve on disk, add to the
-          // dependency graph, and schedule for transitive discovery.
           RawImport.Local(path, raw_line, raw_col) => {
             match resolve_local(path, unit.source.path, ctx.root.path, tree) {
               LocalResolution.Resolved(to_path) => {
@@ -211,9 +212,6 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
             }
           },
 
-          // Angle-bracket form: external framework dependency.  Record for
-          // phase 8; do not resolve to source or enter the parse frontier.
-          // Position fields are present in the RawImport but not needed here.
           RawImport.Framework(framework, path, _, _) => {
             if !dep_known(framework_deps, framework, path) {
               framework_deps = framework_deps.append(
@@ -256,7 +254,6 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
                   e.Column as int,
                 ))
               }
-              // No tree to lower; the zero-filled Program is empty.
               let parsed_unit = ParsedUnit { source, imports: [], .. }
               next_frontier = next_frontier.append(parsed_unit)
               all_units = all_units.append(parsed_unit)
@@ -284,9 +281,11 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
       },
     }
 
-    frontier = next_frontier
+    frontier = []
+    for u in next_frontier {
+      frontier = frontier.append(ParsedUnit { imports: u.imports.clone(), ..u })
+    }
   }
-
   ctx.parsed = Some(ParsedUnits { units: all_units, diags: parsed.diags })
 
   fmt.Println(

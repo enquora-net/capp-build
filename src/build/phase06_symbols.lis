@@ -200,7 +200,7 @@ fn empty_harvest() -> Harvest {
 }
 
 fn merge_harvest(into: Harvest, from: Harvest) -> Harvest {
-  let mut out = into
+  let mut out = Harvest { classes: into.classes.clone(), ..into }
   for class_symbol in from.classes {
     out.classes = out.classes.append(class_symbol)
   }
@@ -538,13 +538,15 @@ fn harvest_class(
         ),
       }
     }
-    ivars = harvested.ivars
+    ivars = []
+    for iv in harvested.ivars {
+      ivars = ivars.append(iv)
+    }
     for accessor in harvested.accessors {
       methods = methods.append(accessor)
     }
     out.diags = merge_diags(out.diags, harvested.diags)
   }
-
   out.classes = out.classes.append(
     ClassSymbol { 
       name: implementation.name.text,
@@ -598,7 +600,11 @@ fn instance_variable_harvest(
     Visibility(_) => into,
     Field(field) => {
       let phase = BuildPhase.BuildSymbolTable
-      let mut out = into
+      let mut out = IvarHarvest { 
+        ivars: into.ivars.clone(),
+        accessors: into.accessors.clone(),
+        ..into,
+      }
       if guards.is_empty() {
         if seen[field.name.text] > 0 {
           out.diags = out.diags.append(diag_error_at(
@@ -640,7 +646,11 @@ fn preproc_ivar_harvest(
   class_name: string,
   file: string,
 ) -> IvarHarvest {
-  let mut out = into
+  let mut out = IvarHarvest { 
+    ivars: into.ivars.clone(),
+    accessors: into.accessors.clone(),
+    ..into,
+  }
   let body_guards = extend_guards(guards, block.if_line.condition, false)
   for item in block.body {
     out = ivar_item_harvest(

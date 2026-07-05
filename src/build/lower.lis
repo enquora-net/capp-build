@@ -109,7 +109,7 @@ fn skippable(kind: string) -> bool {
 }
 
 fn merge_diags(into: Slice<Diagnostic>, from: Slice<Diagnostic>) -> Slice<Diagnostic> {
-  let mut out = into
+  let mut out = into.clone()
   for d in from {
     out = out.append(d)
   }
@@ -345,7 +345,7 @@ impl Lowering {
       if skippable(child.Kind()) { continue }
       let (exprs_opt, ds) = self.expressions(child)
       diags = merge_diags(diags, ds)
-      value = exprs_opt
+      if let Some(v) = exprs_opt { value = Some(v) } else { value = None }
       break
     }
     (Some(Statement.Return(ReturnStatement { value, pos })), diags)
@@ -612,8 +612,8 @@ impl Lowering {
       if kind == capp.NodeKindSwitchCase {
         let (case_opt, ds) = self.switch_case(child)
         diags = merge_diags(diags, ds)
-        if let Some(case_entry) = case_opt {
-          entries = entries.append(SwitchEntry.Case(case_entry))
+        if let Some(c) = case_opt {
+          entries = entries.append(SwitchEntry.Case(c))
         }
       } else if kind == capp.NodeKindSwitchDefault {
         let (default_entry, ds) = self.switch_default(child)
@@ -721,7 +721,12 @@ impl Lowering {
     if let Some(increment_node) = node.ChildByFieldName(capp.FieldIncrement) {
       let (exprs_opt, ds) = self.expressions(increment_node)
       diags = merge_diags(diags, ds)
-      increment = exprs_opt
+
+      if let Some(v) = exprs_opt {
+        increment = Some(v)
+      } else {
+        increment = None
+      }
     }
 
     let (body_opt, body_diags) = self.statement_field(
@@ -924,14 +929,18 @@ impl Lowering {
     if let Some(handler_node) = node.ChildByFieldName(capp.FieldHandler) {
       let (handler_opt, ds) = self.catch_clause(handler_node)
       diags = merge_diags(diags, ds)
-      handler = handler_opt
+      if let Some(v) = handler_opt { handler = Some(v) } else { handler = None }
     }
 
     let mut finalizer: Option<FinallyClause> = None
     if let Some(finalizer_node) = node.ChildByFieldName(capp.FieldFinalizer) {
       let (finalizer_opt, ds) = self.finally_clause(finalizer_node)
       diags = merge_diags(diags, ds)
-      finalizer = finalizer_opt
+      if let Some(v) = finalizer_opt {
+        finalizer = Some(v)
+      } else {
+        finalizer = None
+      }
     }
 
     let lowered = TryStatement { body, handler, finalizer, pos }
@@ -2366,7 +2375,7 @@ impl Lowering {
       ),
     }
     let (parameters, param_diags) = self.formal_parameters(parameters_node)
-    let mut diags = param_diags
+    let mut diags = param_diags.clone()
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -2508,7 +2517,7 @@ impl Lowering {
       ),
     }
     let (parameters, param_diags) = self.formal_parameters(parameters_node)
-    let mut diags = param_diags
+    let mut diags = param_diags.clone()
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -2546,7 +2555,7 @@ impl Lowering {
       ),
     }
     let (parameters, param_diags) = self.formal_parameters(parameters_node)
-    let mut diags = param_diags
+    let mut diags = param_diags.clone()
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -3481,7 +3490,7 @@ impl Lowering {
     }
 
     let (receiver_opt, receiver_diags) = self.expression(receiver_node)
-    let mut diags = receiver_diags
+    let mut diags = receiver_diags.clone()
     let receiver = match receiver_opt {
       Some(receiver_expr) => receiver_expr,
       None => return (None, diags),
@@ -3801,7 +3810,7 @@ impl Lowering {
       if child.Kind() == capp.NodeKindObjjIvarModifiers {
         let (mods, ds) = self.ivar_modifiers(child)
         diags = merge_diags(diags, ds)
-        modifiers = mods
+        modifiers = mods.clone()
       }
     }
 
@@ -3831,7 +3840,12 @@ impl Lowering {
     if let Some(accessors_node) = node.ChildByFieldName(capp.FieldAccessors) {
       let (accessors_opt, ds) = self.accessors_directive(accessors_node)
       diags = merge_diags(diags, ds)
-      accessors = accessors_opt
+
+      if let Some(v) = accessors_opt {
+        accessors = Some(v)
+      } else {
+        accessors = None
+      }
     }
 
     let field = ObjjFieldDefinition { 
