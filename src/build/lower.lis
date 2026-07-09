@@ -43,9 +43,13 @@
 // dispatch that meets a node kind it does not implement records a named
 // unhandled diagnostic rather than dropping it.
 //
-// Deferred behind visible diagnostics: the destructuring tier (object and
-// array patterns in declarators, parameters, for-in bindings, and catch
-// parameters), and template / optional-chain calls.
+// Deferred behind visible diagnostics: template / optional-chain calls.
+// The destructuring tier (object and array patterns in declarators,
+// parameters, for-in bindings, catch parameters, and rest/default
+// elements throughout) is implemented; see "Patterns" below.  js_print.lis
+// (phase 8) already had full destructuring emission and declared-name
+// collection before this tier was wired up here, so no downstream change
+// was needed to light it up.
 //
 // **
 import "go:github.com/enquora-net/capp-parse"
@@ -826,14 +830,12 @@ impl Lowering {
         let left = if left_kind == capp.NodeKindIdentifier {
           ForDeclaredLeft.Identifier(ident_of(left_node))
         } else {
-          // Destructuring bindings are deferred.
-          return (
-            None,
-            merge_diags(
-              diags,
-              self.unhandled(left_node, "for-in declared binding", left_kind),
-            ),
-          )
+          let (destructuring_opt, ds) = self.destructuring_pattern(left_node)
+          diags = merge_diags(diags, ds)
+          match destructuring_opt {
+            Some(destructuring) => ForDeclaredLeft.Destructuring(destructuring),
+            None => return (None, diags),
+          }
         }
         // The legacy `for (var x = init in y)` initializer arrives in the
         // optional `value` field; Initializer.pos anchors at the value
@@ -858,23 +860,18 @@ impl Lowering {
         )
       },
       None => {
-        let left = if left_kind == capp.NodeKindIdentifier {
-          ForLeft.Lhs(LhsExpression.Identifier(ident_of(left_node)))
-        } else if left_kind == capp.NodeKindUndefined {
-          ForLeft.Lhs(LhsExpression.Undefined(
-            UndefinedLiteral { pos: node_pos(left_node) },
-          ))
-        } else {
-          // member/subscript/parenthesized/destructuring bindings wait on
-          // the expression tier's bare-struct helpers.
-          return (
-            None,
-            merge_diags(
-              diags,
-              self.unhandled(left_node, "for-in binding", left_kind),
-            ),
-          )
+        // Undeclared for-in/for-of left sides admit the same lhs surface as
+        // an assignment target — identifier, member, subscript, or
+        // destructuring — so this routes through lhs_expression rather than
+        // re-deriving the same dispatch here.  (Parenthesized left sides
+        // are ForLeft.Parenthesized, a distinct grammar alternative not
+        // reachable through lhs_expression; the corpus has none.)
+        let (lhs_opt, ds) = self.lhs_expression(left_node)
+        diags = merge_diags(diags, ds)
+        let Some(lhs) = lhs_opt else {
+          return (None, diags)
         }
+        let left = ForLeft.Lhs(lhs)
         ForBinding.Plain(ForPlainBinding { left, pos: node_pos(left_node) })
       },
     }
@@ -956,16 +953,14 @@ impl Lowering {
       if parameter_node.Kind() == capp.NodeKindIdentifier {
         parameter = Some(CatchParameter.Identifier(ident_of(parameter_node)))
       } else {
-        // Destructuring catch parameters are deferred; the clause itself
-        // still lowers.
-        diags = merge_diags(
-          diags,
-          self.unhandled(
-            parameter_node,
-            "catch parameter",
-            parameter_node.Kind(),
-          ),
-        )
+        let (destructuring_opt, ds) = self.destructuring_pattern(parameter_node)
+        diags = merge_diags(diags, ds)
+        if let Some(destructuring) = destructuring_opt {
+          parameter = Some(CatchParameter.Destructuring(destructuring))
+        }
+        // An unrecognised parameter kind leaves `parameter` at None; the
+        // clause itself still lowers, per destructuring_pattern's own
+        // diagnostic.
       }
     }
 
@@ -1029,6 +1024,11 @@ impl Lowering {
     (Some(decl), diags)
   }
 
+  // formal_parameters: a bare identifier is the overwhelmingly common case
+  // and is kept as a direct arm to avoid a pattern()/lhs_expression() round
+  // trip on the hot path; everything else — rest, object/array destructuring
+  // — goes through pattern(), and a default value (`= expr`) goes through
+  // assignment_pattern_struct.
   fn formal_parameters(self, node: capp.CSTNode) -> (FormalParameters, Slice<Diagnostic>) {
     let mut parameters: Slice<FormalParameter> = []
     let mut diags: Slice<Diagnostic> = []
@@ -1041,12 +1041,18 @@ impl Lowering {
           child,
         ))))
         parameters = parameters.append(parameter)
+      } else if kind == capp.NodeKindAssignmentPattern {
+        let (assignment_opt, ds) = self.assignment_pattern_struct(child)
+        diags = merge_diags(diags, ds)
+        if let Some(assignment) = assignment_opt {
+          parameters = parameters.append(FormalParameter.Assignment(assignment))
+        }
       } else {
-        // Destructuring, rest, and default parameters are deferred.
-        diags = merge_diags(
-          diags,
-          self.unhandled(child, "formal parameter", kind),
-        )
+        let (pattern_opt, ds) = self.pattern(child)
+        diags = merge_diags(diags, ds)
+        if let Some(value_pattern) = pattern_opt {
+          parameters = parameters.append(FormalParameter.Pattern(value_pattern))
+        }
       }
     }
     (FormalParameters { parameters, pos: node_pos(node) }, diags)
@@ -1129,14 +1135,18 @@ impl Lowering {
       Some(n) => n,
       None => return (None, self.malformed(node, "declarator without name")),
     }
-    if name_node.Kind() != capp.NodeKindIdentifier {
-      // object_pattern / array_pattern — destructuring declarators deferred.
-      return (
-        None,
-        self.unhandled(name_node, "declarator name", name_node.Kind()),
-      )
+    let name = if name_node.Kind() == capp.NodeKindIdentifier {
+      VariableDeclaratorName.Identifier(ident_of(name_node))
+    } else {
+      let (destructuring_opt, ds) = self.destructuring_pattern(name_node)
+      diags = merge_diags(diags, ds)
+      match destructuring_opt {
+        Some(destructuring) => VariableDeclaratorName.Destructuring(
+          destructuring,
+        ),
+        None => return (None, diags),
+      }
     }
-    let name = VariableDeclaratorName.Identifier(ident_of(name_node))
 
     let mut initializer: Option<Initializer> = None
     if let Some(value_node) = node.ChildByFieldName(capp.FieldValue) {
@@ -2027,8 +2037,11 @@ impl Lowering {
 
   // lhs_expression lowers an assignment / binding target to LhsExpression.
   // Member and subscript draw on the bare-struct producers.  Destructuring
-  // patterns (object_pattern / array_pattern) are deferred behind the
-  // unhandled catch-all.
+  // patterns (object_pattern / array_pattern) route through
+  // destructuring_pattern and wrap as LhsExpression.Destructuring; this is
+  // the single point through which every destructuring binding site (plain
+  // for-in, formal parameters, array pattern elements, rest arguments)
+  // ultimately passes.
   fn lhs_expression(self, node: capp.CSTNode) -> (Option<LhsExpression>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindIdentifier {
@@ -2054,7 +2067,274 @@ impl Lowering {
       }
       return (Some(LhsExpression.Subscript(&subscript)), diags)
     }
+    if kind == capp.NodeKindObjectPattern || kind == capp.NodeKindArrayPattern {
+      let (destructuring_opt, diags) = self.destructuring_pattern(node)
+      let Some(destructuring) = destructuring_opt else {
+        return (None, diags)
+      }
+      return (Some(LhsExpression.Destructuring(&destructuring)), diags)
+    }
     (None, self.unhandled(node, "assignment target", kind))
+  }
+
+  // -------------------------------------------------------------------------
+  // Patterns — destructuring
+  // -------------------------------------------------------------------------
+
+  // pattern lowers the grammar's `pattern` supertype: a rest element, or any
+  // other binding target routed through lhs_expression (identifier / member /
+  // subscript / destructuring).  Used wherever the grammar admits `$.pattern`
+  // directly — array pattern elements and non-default formal parameters.
+  fn pattern(self, node: capp.CSTNode) -> (Option<Pattern>, Slice<Diagnostic>) {
+    if node.Kind() == capp.NodeKindRestPattern {
+      let (rest_opt, diags) = self.rest_pattern_struct(node)
+      let Some(rest) = rest_opt else {
+        return (None, diags)
+      }
+      return (Some(Pattern.Rest(rest)), diags)
+    }
+    let (lhs_opt, diags) = self.lhs_expression(node)
+    let Some(lhs) = lhs_opt else {
+      return (None, diags)
+    }
+    (Some(Pattern.Lhs(lhs)), diags)
+  }
+
+  // rest_pattern_struct lowers `...pattern`.  The grammar restricts a rest
+  // element's own binding to an lhs (no nested rest, no default), so this
+  // descends through lhs_expression rather than pattern.
+  fn rest_pattern_struct(self, node: capp.CSTNode) -> (Option<RestPattern>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      if skippable(child.Kind()) { continue }
+      let (lhs_opt, diags) = self.lhs_expression(child)
+      let Some(lhs) = lhs_opt else {
+        return (None, diags)
+      }
+      return (Some(RestPattern { argument: &lhs, pos }), diags)
+    }
+    (None, self.malformed(node, "rest pattern without argument"))
+  }
+
+  // assignment_pattern_struct lowers `pattern = expression`, a defaulted
+  // binding.  Appears as a formal parameter, an array pattern element, and
+  // (nested, nameless) as an object pair pattern's value.
+  fn assignment_pattern_struct(self, node: capp.CSTNode) -> (Option<AssignmentPattern>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let left_node = match node.ChildByFieldName(capp.FieldLeft) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "assignment pattern without left side"),
+      ),
+    }
+    let (left_opt, left_diags) = self.pattern(left_node)
+    diags = merge_diags(diags, left_diags)
+    let Some(left) = left_opt else {
+      return (None, diags)
+    }
+
+    let right_node = match node.ChildByFieldName(capp.FieldRight) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(node, "assignment pattern without default value"),
+        ),
+      ),
+    }
+    let (right_opt, right_diags) = self.expression(right_node)
+    diags = merge_diags(diags, right_diags)
+    let Some(right) = right_opt else {
+      return (None, diags)
+    }
+
+    (Some(AssignmentPattern { left: &left, right: &right, pos }), diags)
+  }
+
+  // destructuring_pattern dispatches the two _destructuring_pattern forms.
+  fn destructuring_pattern(self, node: capp.CSTNode) -> (Option<DestructuringPattern>, Slice<Diagnostic>) {
+    let kind = node.Kind()
+    if kind == capp.NodeKindObjectPattern {
+      let (object_opt, diags) = self.object_pattern_struct(node)
+      let Some(object) = object_opt else {
+        return (None, diags)
+      }
+      return (Some(DestructuringPattern.Object(object)), diags)
+    }
+    if kind == capp.NodeKindArrayPattern {
+      let (array_opt, diags) = self.array_pattern_struct(node)
+      let Some(array) = array_opt else {
+        return (None, diags)
+      }
+      return (Some(DestructuringPattern.Array(array)), diags)
+    }
+    (None, self.unhandled(node, "destructuring pattern", kind))
+  }
+
+  // object_pattern_struct: named children are pair_pattern, rest_pattern,
+  // object_assignment_pattern (shorthand-with-default), or a
+  // shorthand_property_identifier_pattern (bare shorthand, no default) —
+  // a distinct node kind from object-literal shorthand, so the two never
+  // collide in dispatch.
+  fn object_pattern_struct(self, node: capp.CSTNode) -> (Option<ObjectPattern>, Slice<Diagnostic>) {
+    let mut members: Slice<ObjectPatternMember> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindPairPattern {
+        let (pair_opt, ds) = self.pair_pattern_struct(child)
+        diags = merge_diags(diags, ds)
+        if let Some(pair) = pair_opt {
+          members = members.append(ObjectPatternMember.Pair(pair))
+        }
+      } else if kind == capp.NodeKindRestPattern {
+        let (rest_opt, ds) = self.rest_pattern_struct(child)
+        diags = merge_diags(diags, ds)
+        if let Some(rest) = rest_opt {
+          members = members.append(ObjectPatternMember.Rest(rest))
+        }
+      } else if kind == capp.NodeKindObjectAssignmentPattern {
+        let (assignment_opt, ds) = self.object_assignment_pattern_struct(child)
+        diags = merge_diags(diags, ds)
+        if let Some(assignment) = assignment_opt {
+          members = members.append(ObjectPatternMember.Assignment(assignment))
+        }
+      } else if kind == capp.NodeKindShorthandPropertyIdentifierPattern {
+        members = members.append(ObjectPatternMember.Shorthand(ident_of(child)))
+      } else {
+        diags = merge_diags(
+          diags,
+          self.unhandled(child, "object pattern member", kind),
+        )
+      }
+    }
+    (Some(ObjectPattern { members, pos: node_pos(node) }), diags)
+  }
+
+  // pair_pattern_struct lowers `key: value` inside an object pattern.  The
+  // value is a pattern in the common case, or an assignment_pattern for
+  // `{key: value = default}`.
+  fn pair_pattern_struct(self, node: capp.CSTNode) -> (Option<PairPattern>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let key_node = match node.ChildByFieldName(capp.FieldKey) {
+      Some(n) => n,
+      None => return (None, self.malformed(node, "pair pattern without key")),
+    }
+    let (key_opt, key_diags) = self.property_name(key_node)
+    diags = merge_diags(diags, key_diags)
+    let Some(key) = key_opt else {
+      return (None, diags)
+    }
+
+    let value_node = match node.ChildByFieldName(capp.FieldValue) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(diags, self.malformed(node, "pair pattern without value")),
+      ),
+    }
+    let value = if value_node.Kind() == capp.NodeKindAssignmentPattern {
+      let (assignment_opt, ds) = self.assignment_pattern_struct(value_node)
+      diags = merge_diags(diags, ds)
+      match assignment_opt {
+        Some(assignment) => PairPatternValue.Assignment(&assignment),
+        None => return (None, diags),
+      }
+    } else {
+      let (pattern_opt, ds) = self.pattern(value_node)
+      diags = merge_diags(diags, ds)
+      match pattern_opt {
+        Some(value_pattern) => PairPatternValue.Pattern(&value_pattern),
+        None => return (None, diags),
+      }
+    }
+
+    (Some(PairPattern { key, value, pos }), diags)
+  }
+
+  // object_assignment_pattern_struct lowers `{name = default}` (shorthand)
+  // and `{...} = default`-shaped destructuring-with-default members.
+  fn object_assignment_pattern_struct(self, node: capp.CSTNode) -> (Option<ObjectAssignmentPattern>, Slice<Diagnostic>) {
+    let pos = node_pos(node)
+    let mut diags: Slice<Diagnostic> = []
+
+    let left_node = match node.ChildByFieldName(capp.FieldLeft) {
+      Some(n) => n,
+      None => return (
+        None,
+        self.malformed(node, "object assignment pattern without left side"),
+      ),
+    }
+    let left = if left_node.Kind() ==
+    capp.NodeKindShorthandPropertyIdentifierPattern {
+      ObjectAssignmentLeft.Shorthand(ident_of(left_node))
+    } else {
+      let (destructuring_opt, ds) = self.destructuring_pattern(left_node)
+      diags = merge_diags(diags, ds)
+      match destructuring_opt {
+        Some(destructuring) => ObjectAssignmentLeft.Destructuring(
+          &destructuring,
+        ),
+        None => return (None, diags),
+      }
+    }
+
+    let right_node = match node.ChildByFieldName(capp.FieldRight) {
+      Some(n) => n,
+      None => return (
+        None,
+        merge_diags(
+          diags,
+          self.malformed(
+            node,
+            "object assignment pattern without default value",
+          ),
+        ),
+      ),
+    }
+    let (right_opt, right_diags) = self.expression(right_node)
+    diags = merge_diags(diags, right_diags)
+    let Some(right) = right_opt else {
+      return (None, diags)
+    }
+
+    (Some(ObjectAssignmentPattern { left, right: &right, pos }), diags)
+  }
+
+  // array_pattern_struct: named children are patterns or assignment_pattern
+  // (defaulted) elements.  Elisions (sparse holes) are unnamed and therefore
+  // invisible to NamedChild iteration, consistent with native_array.
+  fn array_pattern_struct(self, node: capp.CSTNode) -> (Option<ArrayPattern>, Slice<Diagnostic>) {
+    let mut elements: Slice<ArrayPatternElement> = []
+    let mut diags: Slice<Diagnostic> = []
+    for i in 0..node.NamedChildCount() {
+      let child = node.NamedChild(i)
+      let kind = child.Kind()
+      if skippable(kind) { continue }
+      if kind == capp.NodeKindAssignmentPattern {
+        let (assignment_opt, ds) = self.assignment_pattern_struct(child)
+        diags = merge_diags(diags, ds)
+        if let Some(assignment) = assignment_opt {
+          elements = elements.append(ArrayPatternElement.Assignment(&assignment))
+        }
+      } else {
+        let (pattern_opt, ds) = self.pattern(child)
+        diags = merge_diags(diags, ds)
+        if let Some(value_pattern) = pattern_opt {
+          elements = elements.append(ArrayPatternElement.Pattern(&value_pattern))
+        }
+      }
+    }
+    (Some(ArrayPattern { elements, pos: node_pos(node) }), diags)
   }
 
   fn augmented_assignment_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
