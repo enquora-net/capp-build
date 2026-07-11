@@ -1,15 +1,15 @@
 //**
-// build/phase05_sort.lis
+// build/phase06_sort.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 5: TopologicalSort
+// Phase 6: TopologicalSort
 //
-// Kahn's BFS algorithm over the local import edge set produced by phase 4.
+// Kahn's BFS algorithm over the local import edge set produced by phase 5.
 // Produces a total ordering of source files in which every file appears after
-// all files it imports locally — the required input order for phases 6, 7, and 8.
+// all files it imports locally — the required input order for phases 7, 8, and 9.
 //
 // Only quote-form import edges participate.  Angle-bracket (framework) deps
 // are already recorded in ImportGraph.framework_deps and are not constraints
@@ -27,7 +27,7 @@
 //
 // Validation oracle: the file ordering embedded in Foundation.sj (produced by
 // the jake toolchain) is a correct topological sort of Foundation's source.
-// Phase 5 must produce an ordering consistent with it: for every pair (A, B)
+// Phase 6 must produce an ordering consistent with it: for every pair (A, B)
 // where A precedes B in Foundation.sj, A must precede B in our output.
 // Identical orderings are not required; any valid topological sort passes.
 //
@@ -72,7 +72,7 @@ impl CycleError {
 // Output type
 // ---------------------------------------------------------------------------
 
-// SortedUnits is the output of phase 5 and the input to phases 6, 7, and 8.
+// SortedUnits is the output of phase 6 and the input to phases 7, 8, and 9.
 //
 // order contains the absolute paths of all project source files in the order
 // they must be compiled: every file appears after all files it imports locally.

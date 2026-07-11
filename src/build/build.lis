@@ -10,7 +10,7 @@
 //
 // Root discovery and build context live in context.lis.
 // Diagnostic infrastructure lives in diagnostics.lis.
-// Phase implementations live in phase01_validate.lis through phase09_archive.lis.
+// Phase implementations live in phase01_validate.lis through phase10_archive.lis.
 //
 // **
 import "go:fmt"
@@ -29,12 +29,13 @@ pub enum BuildPhase {
   ValidateProjectStructure, // phase 1
   WalkSourceTree, // phase 2
   ParseSources, // phase 3
-  ResolveImports, // phase 4
-  TopologicalSort, // phase 5
-  BuildSymbolTable, // phase 6
-  TypeCheck, // phase 7
-  Compile, // phase 8
-  Archive, // phase 9
+  PreprocessSources, // phase 4
+  ResolveImports, // phase 5
+  TopologicalSort, // phase 6
+  BuildSymbolTable, // phase 7
+  TypeCheck, // phase 8
+  Compile, // phase 9
+  Archive, // phase 10
 }
 
 // Adding a variant to BuildPhase without a corresponding arm in run() is a
@@ -53,6 +54,10 @@ impl BuildPhase {
       },
       ParseSources => {
         ctx.parsed = Some(run_parse_sources(ctx)?)
+        Ok(())
+      },
+      PreprocessSources => {
+        ctx.preprocessed = Some(run_preprocess_sources(ctx)?)
         Ok(())
       },
       ResolveImports => {
@@ -97,7 +102,7 @@ pub enum BuildMode {
 }
 
 // The delivery context is a property of the target environment, not the
-// compilation mode.  It governs phase 8 output structure independently of
+// compilation mode.  It governs phase 9 output structure independently of
 // whether the build is Debug, Release, or any future mode.
 //
 // HTTP1: concatenated, minified output — default; works on any server
@@ -130,6 +135,7 @@ fn phase_diags(phase: BuildPhase, ctx: Ref<BuildContext>) -> Slice<Diagnostic> {
     ValidateProjectStructure => ctx.validation.map_or([], |r| r.diags),
     WalkSourceTree => ctx.tree.map_or([], |r| r.diags),
     ParseSources => ctx.parsed.map_or([], |r| r.diags),
+    PreprocessSources => ctx.preprocessed.map_or([], |r| r.diags),
     ResolveImports => ctx.imports.map_or([], |r| r.diags),
     TopologicalSort => ctx.sorted.map_or([], |r| r.diags),
     BuildSymbolTable => ctx.symbols.map_or([], |r| r.diags),
@@ -245,6 +251,7 @@ fn phase_name(phase: BuildPhase) -> string {
     ValidateProjectStructure => "validate project structure",
     WalkSourceTree => "walk source tree",
     ParseSources => "parse sources",
+    PreprocessSources => "preprocess sources",
     ResolveImports => "resolve imports",
     TopologicalSort => "topological sort",
     BuildSymbolTable => "build symbol table",

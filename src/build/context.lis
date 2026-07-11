@@ -31,7 +31,7 @@ import "go:path/filepath"
 //
 // Downstream phases pattern match on project.details to branch on project kind
 // and extract the structural evidence they need — ApplicationDetails for phase
-// 8's application assembly path, nothing additional for framework archive paths.
+// 9's application assembly path, nothing additional for framework archive paths.
 pub struct ValidatedProject {
   pub meta: PlistMeta,
   pub details: ProjectDetails,
@@ -66,7 +66,7 @@ pub enum ProjectDetails {
 // bundle; only Application requires pre-built bundles to be present.
 //
 // This distinction is the central architectural fact of the Cappuccino build
-// model and the primary driver of phase 8 branching.
+// model and the primary driver of phase 9 branching.
 pub struct ApplicationDetails {
   pub frameworks: FrameworkRoots,
 }
@@ -79,7 +79,7 @@ pub struct ApplicationDetails {
 // bundles required by Application projects.  Constructed only when both
 // directories exist on disk; their absence is a phase 1 error.
 //
-// Phase 9 (Archive) reads these paths to locate Foundation.sj and AppKit.sj,
+// Phase 10 (Archive) reads these paths to locate Foundation.sj and AppKit.sj,
 // which are assembled into the application deliverable in dependency load order.
 pub struct FrameworkRoots {
   pub foundation: string, // absolute path to Frameworks/Foundation
@@ -202,6 +202,7 @@ pub struct BuildContext {
   pub validation: Option<ValidationResult>,
   pub tree: Option<SourceTree>,
   pub parsed: Option<ParsedUnits>,
+  pub preprocessed: Option<PreprocessResult>,
   pub imports: Option<ImportGraph>,
   pub sorted: Option<SortedUnits>,
   pub symbols: Option<SymbolTable>,

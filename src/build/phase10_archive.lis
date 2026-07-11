@@ -1,14 +1,14 @@
 //**
-// build/phase09_archive.lis
+// build/phase10_archive.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 9: Archive
+// Phase 10: Archive
 //
 // Produces the build output artifact from the compiled records delivered
-// by phase 8.  The form of the artifact depends on the project type:
+// by phase 9.  The form of the artifact depends on the project type:
 //
 //   Framework:   a .sj bundle in the static blob format, written to the
 //                appropriate environment subdirectory
@@ -27,14 +27,14 @@
 //   HTTP1: the per-file records are concatenated into a single .sj bundle
 //          (the @STATIC;1.0; <p;t>… e; framing), written to both
 //          Browser.environment/ and CommonJS.environment/.
-//   HTTP2: the per-file records phase 8 wrote under
+//   HTTP2: the per-file records phase 9 wrote under
 //          Build/capp-build.build/<Mode>/Sources/ are themselves the
 //          deliverable; multiplexing serves them individually, so no
 //          concatenation occurs.  Not yet implemented; carried as an Info
 //          diagnostic until the serving infrastructure exists to verify it.
 //
 // Record framing follows STATIC-BLOB-FORMAT.md: p/t lengths are UTF-16
-// code units (bundle_length), matching phase 8's per-file framing.
+// code units (bundle_length), matching phase 9's per-file framing.
 //
 // Application output layout (HTTP1, matches legacy jake verbatim):
 //
@@ -647,7 +647,7 @@ fn assemble_bundle(records: Slice<CompiledRecord>) -> string {
 // bundle_length is the record-framing length: UTF-16 code units, counted as
 // code points (exact across the BMP; supplementary-plane characters would
 // each need one more unit, none exist in any observed corpus, and
-// payload_oracle.py check exposes the case).  Mirrors phase 8's
+// payload_oracle.py check exposes the case).  Mirrors phase 9's
 // record_length so the two framing levels agree.
 fn bundle_length(content: string) -> int {
   utf8.RuneCountInString(content)
@@ -655,7 +655,7 @@ fn bundle_length(content: string) -> int {
 
 // write_bundle materialises the assembled bundle.  WriteString returns a
 // partial result; a short write is an error, and a write error takes
-// precedence over a close error (the phase 8 write_record_file convention).
+// precedence over a close error (the phase 9 write_record_file convention).
 fn write_bundle(out_path: string, bundle: string) -> Result<(), error> {
   os.MkdirAll(filepath.Dir(out_path), os.ModePerm)?
   let file = os.Create(out_path)?

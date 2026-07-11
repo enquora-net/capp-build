@@ -1,14 +1,14 @@
 //**
-// build/phase08_compile.lis
+// build/phase09_compile.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 8: Compile
+// Phase 9: Compile
 //
 // Transforms each dependency-ordered Objective-J source file into a
-// per-file static record: the @STATIC;1.0; format consumed by phase 9.
+// per-file static record: the @STATIC;1.0; format consumed by phase 10.
 // Each record encodes the file's import declarations followed by its
 // compiled JavaScript payload, produced by the printer in js_print.lis.
 //
@@ -39,7 +39,7 @@ import "go:os"
 import "go:path/filepath"
 import "go:unicode/utf8"
 
-// CompileOutput is the input to phase 9 (Archive).
+// CompileOutput is the input to phase 10 (Archive).
 // Each entry in `records` is a complete per-file static record string
 // in @STATIC;1.0; format, paired with the source-relative filename
 // used as the `p` record in the enclosing bundle.

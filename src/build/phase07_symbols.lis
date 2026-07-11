@@ -1,19 +1,19 @@
 //**
-// build/phase06_symbols.lis
+// build/phase07_symbols.lis
 // capp-build
 //
 // Created by David Richardson on Thursday, May 29, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 6: BuildSymbolTable
+// Phase 7: BuildSymbolTable
 //
 // Walks the typed Programs of the parsed units in ctx.sorted.order and
 // constructs a complete symbol table for the project.  This is the first
 // consumer of the typed AST: no CSTNode, no string-keyed node kind, and no
 // capp-parse constant appears below this comment.
 //
-// The symbol table is the shared foundation for phase 7 (TypeCheck) and
-// phase 8 (Compile).  Phase 7 checks against it; phase 8 drives code
+// The symbol table is the shared foundation for phase 8 (TypeCheck) and
+// phase 9 (Compile).  Phase 8 checks against it; phase 9 drives code
 // generation from it.  Neither pass rebuilds it; both receive it read-only
 // via ctx.symbols.
 //
@@ -28,7 +28,7 @@
 // Settled decisions:
 //
 //   Frontier units — transitively discovered units contribute edges only
-//   (phase 4) and therefore no symbols.  AppKit, Foundation, and the other
+//   (phase 5) and therefore no symbols.  AppKit, Foundation, and the other
 //   contents of ./Frameworks are produced by the legacy toolchain until the
 //   normal application project structure is fully handled; resolution of
 //   symbols against framework bundles is a later, separate mechanism.
@@ -44,7 +44,7 @@
 //   table-build time, mirroring the legacy preprocessor (Preprocessor.js:
 //   property defaults to the ivar name; the default setter preserves a
 //   leading underscore as a prefix: _name → _setName:).  Synthesized symbols
-//   carry is_synthesized so phase 8 knows to generate bodies.  One deliberate
+//   carry is_synthesized so phase 9 knows to generate bodies.  One deliberate
 //   deviation: the legacy preprocessor typed both accessors `(id)`; the
 //   symbols carry the declared ivar type, which is strictly more informative
 //   and identical at runtime.  An explicit method with the same selector
@@ -78,7 +78,7 @@ pub struct PreprocGuard {
   pub negated: bool,
 }
 
-// SymbolTable is the output of phase 6 and a read-only input to phases 7 and 8.
+// SymbolTable is the output of phase 7 and a read-only input to phases 8 and 9.
 pub struct SymbolTable {
   pub classes: Slice<ClassSymbol>,
   pub protocols: Slice<ProtocolSymbol>,
@@ -116,7 +116,7 @@ pub struct IvarSymbol {
 
 // MethodSymbol records a single method definition or declaration.
 // is_class_method distinguishes + (class) from - (instance) methods.
-// is_synthesized marks @accessors getters/setters, whose bodies phase 8
+// is_synthesized marks @accessors getters/setters, whose bodies phase 9
 // generates; their position is that of the originating field definition.
 pub struct MethodSymbol {
   pub selector: string, // full selector, e.g. "setFrame:display:"
@@ -258,7 +258,7 @@ pub fn run_build_symbol_table(ctx: Ref<BuildContext>) -> Result<SymbolTable, err
   }
 
   // path → index+1 into parsed.units; the Go zero value 0 means absent.
-  // sorted.order and parsed.units name the same file set (phase 5 seeds its
+  // sorted.order and parsed.units name the same file set (phase 6 seeds its
   // node set from parsed.units), so a miss indicates a pipeline defect and is
   // surfaced as a warning rather than silently skipped.
   let mut unit_index: Map<string, int> = Map.new<string, int>()
@@ -325,7 +325,7 @@ pub fn run_build_symbol_table(ctx: Ref<BuildContext>) -> Result<SymbolTable, err
   )
 }
 
-// print_symbol_diag surfaces one phase-6 diagnostic in the build output.
+// print_symbol_diag surfaces one phase-7 diagnostic in the build output.
 // Table-level diagnostics (pipeline defects) carry no position and print
 // without a location suffix.
 fn print_symbol_diag(d: Diagnostic) {
@@ -345,7 +345,7 @@ fn print_symbol_diag(d: Diagnostic) {
 // extend_guards returns a fresh guard stack extended by one condition.
 // The copy is built from empty deliberately: append on a shared backing
 // array would let the #if and #else branches of one block overwrite each
-// other's extension (the aliasing hazard documented at phase05 dfs_cycle).
+// other's extension (the aliasing hazard documented at phase06 dfs_cycle).
 fn extend_guards(
   guards: Slice<PreprocGuard>,
   condition: PreprocCondition,

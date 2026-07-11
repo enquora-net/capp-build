@@ -1,13 +1,13 @@
 //**
-// build/phase07_typecheck.lis
+// build/phase08_typecheck.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 7: TypeCheck
+// Phase 8: TypeCheck
 //
-// Verifies the consistency of the symbol table constructed by phase 6.
+// Verifies the consistency of the symbol table constructed by phase 7.
 // Operates entirely on ctx.symbols; no AST or CST is consulted.
 //
 // Scope is governed by decidability.  During bootstrap the symbol table
@@ -37,11 +37,11 @@
 // signature verification at call sites, and variable scope/usage analysis.
 // All three require the full framework symbol surface to avoid systematic
 // false positives, and the last requires AST dataflow that belongs with
-// phase 8 design.
+// phase 9 design.
 //
 // Positions on symbols are stored 1-based; the diag_*_at constructors
 // expect 0-based and normalise, so positions convert back at call sites
-// here, as in phase 6.
+// here, as in phase 7.
 //
 // **
 import "go:errors"
@@ -62,7 +62,7 @@ pub struct TypeCheckResult {
 // ClassGroup unifies every ClassSymbol sharing one name: the primary
 // implementation, its categories, and any #if-guarded variants.  selectors
 // is the union of their scope-keyed selector universes (selector_key from
-// phase 6).  has_primary distinguishes a class defined in-project from a
+// phase 7).  has_primary distinguishes a class defined in-project from a
 // group induced solely by categories on an external class; the latter has
 // no knowable ancestry.  Site fields anchor diagnostics at the first
 // primary (or are empty when none exists).
@@ -166,7 +166,7 @@ pub fn run_type_check(ctx: Ref<BuildContext>) -> Result<TypeCheckResult, error> 
   Ok(TypeCheckResult { diags })
 }
 
-// print_check_diag surfaces one phase-7 diagnostic in the build output.
+// print_check_diag surfaces one phase-8 diagnostic in the build output.
 fn print_check_diag(d: Diagnostic) {
   let Some(file) = d.file else {
     fmt.Println(f"   {d.message}")
@@ -349,7 +349,7 @@ fn cycle_error(
 
 // protocol_cycle_diags runs DFS over the project-known protocol-inheritance
 // graph (multi-parent, unlike class inheritance).  Structure follows
-// phase05's dfs_cycle: visited spans the scan, on_stack tracks the active
+// phase06's dfs_cycle: visited spans the scan, on_stack tracks the active
 // recursion, and a back edge identifies a cycle exactly.  Members of an
 // emitted cycle are visited, so each cycle reports once.
 fn protocol_cycle_diags(world: ProtoWorld) -> Slice<Diagnostic> {
@@ -392,7 +392,7 @@ fn protocol_cycle_diags(world: ProtoWorld) -> Slice<Diagnostic> {
 
 // proto_cycle_dfs performs one DFS step.  path is rebuilt from scratch at
 // each call rather than extended via append — the same backing-array
-// aliasing hazard documented at phase05 dfs_cycle applies here.
+// aliasing hazard documented at phase06 dfs_cycle applies here.
 fn proto_cycle_dfs(
   name: string,
   path: Slice<string>,

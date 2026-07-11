@@ -8,10 +8,9 @@
 // Phase 3: ParseSources
 //
 // Invokes capp-parse over every ObjectiveJ and Javascript file in the source
-// tree, collecting import directives from each CST.  Trees are held live only
-// for the duration of extraction; ParsedUnit retains the typed RawImport
-// values, not the tree itself.  Parse failures are accumulated as diagnostics
-// rather than aborting on the first error.
+// tree, lowers each successfully parsed file's CST into typed AST, and
+// extracts its @import directives.  Parse failures are accumulated as
+// diagnostics rather than aborting on the first error.
 //
 // **
 import "go:errors"
@@ -32,12 +31,95 @@ pub enum RawImport {
 pub struct ParsedUnit {
   pub source: SourceFile,
   pub imports: Slice<RawImport>,
-  pub program: Program, // typed AST from the lowering pass; possibly partial
+  pub program: Program,
 }
 
 pub struct ParsedUnits {
   pub units: Slice<ParsedUnit>,
   pub diags: Slice<Diagnostic>,
+}
+
+pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
+  let phase = BuildPhase.ParseSources
+  let mut diags: Slice<Diagnostic> = []
+
+  let tree = match ctx.tree {
+    Some(t) => t,
+    None => return Err(errors.New("parse sources: source tree unavailable")),
+  }
+
+  let mut paths: Slice<string> = []
+  for file in tree.files {
+    match file.kind {
+      SourceKind.ObjectiveJ => paths = paths.append(file.path),
+      SourceKind.Javascript => paths = paths.append(file.path),
+      _ => (),
+    }
+  }
+
+  if paths.is_empty() { return Ok(ParsedUnits { units: [], diags }) }
+
+  let cfg = capp.ProjectConfig { 
+    Root: "",
+    Paths: paths,
+    Mode: capp.ModeAuto,
+    GrammarPath: ctx.config.grammar,
+    Workers: 0,
+    ..,
+  }
+
+  let pr = capp.ParseProject(cfg)?
+  defer pr.Close()
+
+  let mut units: Slice<ParsedUnit> = []
+
+  for file_opt in pr.Files {
+    if let Some(file) = file_opt {
+      if file.HasError() {
+        // file.Errors contains one entry per ERROR/MISSING token; all errors
+        // after the first are cascade artifacts of tree-sitter's error
+        // recovery, not independent defects.  Emit only the first with a
+        // suppressed-count suffix so the output is actionable.
+        let first = file.Errors[0]
+        let rest = file.Errors.length() - 1
+        let msg = if rest > 0 {
+          f"{first.Message} (+{rest} suppressed)"
+        } else {
+          first.Message
+        }
+        diags = diags.append(diag_error_at(
+          phase,
+          msg,
+          file.Path,
+          first.Row as int,
+          first.Column as int,
+        ))
+      } else {
+        let source = SourceFile { path: file.Path, kind: classify(file.Path) }
+        let lowered = lower_program(file.Root(), source)
+        for d in lowered.diags {
+          print_lowering_diag(d)
+        }
+        diags = merge_diags(diags, lowered.diags)
+        let imports = extract_imports(file.Root())
+        units = units.append(
+          ParsedUnit { source, imports, program: lowered.program },
+        )
+      }
+    }
+  }
+
+  fmt.Println(f"✓  parse sources: {units.length()} units")
+
+  Ok(ParsedUnits { units, diags })
+}
+
+// print_lowering_diag surfaces one phase-3 diagnostic in the build output.
+fn print_lowering_diag(d: Diagnostic) {
+  let file = d.file.unwrap_or("")
+  let line = d.line.unwrap_or(0)
+  let col = d.col.unwrap_or(0)
+  fmt.Println(f"   {d.message}  {file}:{line}:{col}")
 }
 
 // extract_imports walks a CSTNode depth-first and returns all @import
@@ -87,103 +169,4 @@ pub fn extract_imports(node: capp.CSTNode) -> Slice<RawImport> {
     }
   }
   result
-}
-
-// run_parse_sources parses every ObjectiveJ and Javascript file in the source
-// tree in a single parallel batch, extracts @import directives from each CST,
-// and lowers each CST into its typed Program while the trees are live.  The
-// CSTs are released before returning; downstream phases consume only the
-// typed AST.  Lowering diagnostics (unhandled node kinds, malformed nodes)
-// are printed here — they drive the breadth-first arm-filling loop — and
-// merged into the returned diagnostics.
-pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
-  let phase = BuildPhase.ParseSources
-  let mut diags: Slice<Diagnostic> = []
-
-  let tree = match ctx.tree {
-    Some(t) => t,
-    None => return Err(errors.New("parse sources: source tree unavailable")),
-  }
-
-  let mut paths: Slice<string> = []
-  for file in tree.files {
-    match file.kind {
-      SourceKind.ObjectiveJ => paths = paths.append(file.path),
-      SourceKind.Javascript => paths = paths.append(file.path),
-      _ => (),
-    }
-  }
-
-  if paths.is_empty() { return Ok(ParsedUnits { units: [], diags }) }
-
-  let cfg = capp.ProjectConfig { 
-    Root: "",
-    Paths: paths,
-    Mode: capp.ModeAuto,
-    GrammarPath: ctx.config.grammar,
-    Workers: 0,
-    ..,
-  }
-
-  let pr = capp.ParseProject(cfg)?
-  defer pr.Close()
-
-  let mut units: Slice<ParsedUnit> = []
-  let mut lower_diag_count = 0
-  let mut statement_count = 0
-
-  for file_opt in pr.Files {
-    if let Some(file) = file_opt {
-      if file.HasError() {
-        // file.Errors contains one entry per ERROR/MISSING token; all errors
-        // after the first are cascade artifacts of tree-sitter's error
-        // recovery, not independent defects.  Emit only the first with a
-        // suppressed-count suffix so the output is actionable.
-        let first = file.Errors[0]
-        let rest = file.Errors.length() - 1
-        let msg = if rest > 0 {
-          f"{first.Message} (+{rest} suppressed)"
-        } else {
-          first.Message
-        }
-        diags = diags.append(diag_error_at(
-          phase,
-          msg,
-          file.Path,
-          first.Row as int,
-          first.Column as int,
-        ))
-      } else {
-        let imports = extract_imports(file.Root())
-        let source = SourceFile { path: file.Path, kind: classify(file.Path) }
-        let lowered = lower_program(file.Root(), source)
-        for d in lowered.diags {
-          diags = diags.append(d)
-          print_lowering_diag(d)
-        }
-        lower_diag_count += lowered.diags.length()
-        statement_count += lowered.program.body.length()
-        units = units.append(
-          ParsedUnit { source, imports, program: lowered.program },
-        )
-      }
-    }
-  }
-
-  fmt.Println(f"✓  parse sources: {units.length()} units")
-  fmt.Println(
-    f"✓  lower sources: {statement_count} top-level statements, {lower_diag_count} diagnostics",
-  )
-
-  Ok(ParsedUnits { units, diags })
-}
-
-// print_lowering_diag surfaces one lowering diagnostic in the build output.
-// Lowering diagnostics carry file and position by construction; absent values
-// indicate a defect in the diagnostic itself and print as 0.
-fn print_lowering_diag(d: Diagnostic) {
-  let file = d.file.unwrap_or("")
-  let line = d.line.unwrap_or(0)
-  let col = d.col.unwrap_or(0)
-  fmt.Println(f"   {d.message}  {file}:{line}:{col}")
 }

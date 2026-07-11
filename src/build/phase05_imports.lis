@@ -1,11 +1,11 @@
 //**
-// build/phase04_imports.lis
+// build/phase05_imports.lis
 // capp-build
 //
 // Created by David Richardson on Monday, May 25, 2026.
 // Copyright (c) 2026 David Richardson. All rights reserved.
 //
-// Phase 4: ResolveImports
+// Phase 5: ResolveImports
 //
 // Classifies every @import directive by its syntactic form and builds the
 // intra-project dependency graph through fixed-point iteration over
@@ -20,10 +20,10 @@
 // Quote-form imports resolve to absolute paths within the source tree and
 // are added to the dependency graph as ImportEdges.  Fixed-point iteration
 // follows them transitively until no new files are discovered.  The resulting
-// edge set is the sole input to phase 5 (TopologicalSort).
+// edge set is the sole input to phase 6 (TopologicalSort).
 //
 // Angle-bracket imports are recorded as FrameworkDeps without any attempt at
-// source resolution.  They are passed forward to phase 8 (Archive), which
+// source resolution.  They are passed forward to phase 9 (Archive), which
 // locates the corresponding pre-built .sj bundles and incorporates them into
 // the output.  They never enter the dependency graph or the parse frontier.
 //
@@ -40,7 +40,7 @@ import "go:strings"
 // line and col are the 1-based source position of the @import directive in
 // from — the location an editor should open when reporting this dependency
 // as the site of a build error (unresolvable import, cycle entry).
-// The edge set feeds phase 5 (TopologicalSort).
+// The edge set feeds phase 6 (TopologicalSort).
 pub struct ImportEdge {
   pub from: string,
   pub to: string,
@@ -49,16 +49,16 @@ pub struct ImportEdge {
 }
 
 // FrameworkDep records a single angle-bracket import.  The framework name
-// and intra-framework path are preserved separately to allow phase 8 to
+// and intra-framework path are preserved separately to allow phase 9 to
 // locate the correct .sj bundle and, in future, to support type checking
 // against framework headers.
-// The dep set feeds phase 8 (Archive).
+// The dep set feeds phase 9 (Archive).
 pub struct FrameworkDep {
   pub framework: string, // e.g. "Foundation"
   pub path: string, // e.g. "CPObject.j" or "Foundation.j"
 }
 
-// ImportGraph is the output of phase 4 and the input to phases 5 and 8.
+// ImportGraph is the output of phase 5 and the input to phases 6 and 9.
 //
 //   edges         — quote-form dependencies; define compilation order
 //   framework_deps — angle-bracket dependencies; define link-time inputs
