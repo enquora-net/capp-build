@@ -200,7 +200,7 @@ fn empty_harvest() -> Harvest {
 }
 
 fn merge_harvest(into: Harvest, from: Harvest) -> Harvest {
-  let mut out = Harvest { classes: into.classes.clone(), ..into }
+  let mut out = Harvest { classes: into.classes.map(|c| c), ..into }
   for class_symbol in from.classes {
     out.classes = out.classes.append(class_symbol)
   }
@@ -601,8 +601,8 @@ fn instance_variable_harvest(
     Field(field) => {
       let phase = BuildPhase.BuildSymbolTable
       let mut out = IvarHarvest { 
-        ivars: into.ivars.clone(),
-        accessors: into.accessors.clone(),
+        ivars: into.ivars.map(|x| x),
+        accessors: into.accessors.map(|x| x),
         ..into,
       }
       if guards.is_empty() {
@@ -647,8 +647,8 @@ fn preproc_ivar_harvest(
   file: string,
 ) -> IvarHarvest {
   let mut out = IvarHarvest { 
-    ivars: into.ivars.clone(),
-    accessors: into.accessors.clone(),
+    ivars: into.ivars.map(|x| x),
+    accessors: into.accessors.map(|x| x),
     ..into,
   }
   let body_guards = extend_guards(guards, block.if_line.condition, false)
