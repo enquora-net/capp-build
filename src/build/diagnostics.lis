@@ -52,7 +52,7 @@ pub fn diag_error_at(
   line: int,
   col: int,
 ) -> Diagnostic {
-  Diagnostic { 
+  Diagnostic {
     phase,
     level: DiagLevel.Error,
     message,
@@ -71,7 +71,7 @@ pub fn diag_warn_at(
   line: int,
   col: int,
 ) -> Diagnostic {
-  Diagnostic { 
+  Diagnostic {
     phase,
     level: DiagLevel.Warning,
     message,

@@ -322,32 +322,32 @@ fn write_app_info_plist(
 
   let mut pairs: Slice<Plist280NPair> = []
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundlePackageType",
       value: Plist280NValue.PString(meta.package_type),
     },
   )
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleIdentifier",
       value: Plist280NValue.PString(meta.identifier),
     },
   )
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleName",
       value: Plist280NValue.PString(meta.name),
     },
   )
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleVersion",
       value: Plist280NValue.PString(version),
     },
   )
   if !copyright.is_empty() {
     pairs = pairs.append(
-      Plist280NPair { 
+      Plist280NPair {
         key: "CPHumanReadableCopyright",
         value: Plist280NValue.PString(copyright),
       },
@@ -355,7 +355,7 @@ fn write_app_info_plist(
   }
   if !cib_name.is_empty() {
     pairs = pairs.append(
-      Plist280NPair { 
+      Plist280NPair {
         key: "Main cib file base name",
         value: Plist280NValue.PString(cib_name),
       },
@@ -364,13 +364,13 @@ fn write_app_info_plist(
   // CPBundleInfoDictionaryVersion is always the integer 6; the runtime
   // expects this key to be present.
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleInfoDictionaryVersion",
       value: Plist280NValue.PInteger(6),
     },
   )
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleEnvironments",
       value: Plist280NValue.PArray([
         Plist280NValue.PString("Browser"),
@@ -379,7 +379,7 @@ fn write_app_info_plist(
     },
   )
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleExecutable",
       value: Plist280NValue.PString(executable),
     },
@@ -388,7 +388,7 @@ fn write_app_info_plist(
   // bundle itself has no sprites.  Framework sprite entries live in the
   // respective framework Info.plists, which are copied verbatim.
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPBundleEnvironmentsWithImageSprites",
       value: Plist280NValue.PArray([]),
     },
@@ -397,7 +397,7 @@ fn write_app_info_plist(
   // is the assembled .sj byte count; data and mhtml are zero for this bundle
   // (sprites belong to the frameworks, not the application bundle itself).
   let size_pairs: Slice<Plist280NPair> = [
-    Plist280NPair { 
+    Plist280NPair {
       key: "executable",
       value: Plist280NValue.PInteger(sj_byte_size),
     },
@@ -405,7 +405,7 @@ fn write_app_info_plist(
     Plist280NPair { key: "mhtml", value: Plist280NValue.PInteger(0) },
   ]
   pairs = pairs.append(
-    Plist280NPair { 
+    Plist280NPair {
       key: "CPApplicationSize",
       value: Plist280NValue.PDict(size_pairs),
     },

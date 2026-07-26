@@ -189,7 +189,7 @@ struct Harvest {
 }
 
 fn empty_harvest() -> Harvest {
-  Harvest { 
+  Harvest {
     classes: [],
     protocols: [],
     forwards: [],
@@ -314,7 +314,7 @@ pub fn run_build_symbol_table(ctx: Ref<BuildContext>) -> Result<SymbolTable, err
   )
 
   Ok(
-    SymbolTable { 
+    SymbolTable {
       classes: total.classes,
       protocols: total.protocols,
       forwards: total.forwards,
@@ -372,7 +372,7 @@ fn harvest_statement(
     ObjjClassForward(forward) => {
       let mut out = empty_harvest()
       out.forwards = out.forwards.append(
-        ForwardSymbol { 
+        ForwardSymbol {
           name: forward.name.text,
           guards,
           file,
@@ -385,7 +385,7 @@ fn harvest_statement(
     ObjjTypedef(typedef) => {
       let mut out = empty_harvest()
       out.typedefs = out.typedefs.append(
-        TypedefSymbol { 
+        TypedefSymbol {
           name: typedef.name.text,
           guards,
           file,
@@ -443,7 +443,7 @@ fn global_symbol(
   guards: Slice<PreprocGuard>,
   file: string,
 ) -> GlobalSymbol {
-  GlobalSymbol { 
+  GlobalSymbol {
     name: global.name.text,
     guards,
     file,
@@ -548,7 +548,7 @@ fn harvest_class(
     out.diags = merge_diags(out.diags, harvested.diags)
   }
   out.classes = out.classes.append(
-    ClassSymbol { 
+    ClassSymbol {
       name: implementation.name.text,
       superclass: implementation.superclass.map(identifier_text),
       category: implementation.category.map(identifier_text),
@@ -600,7 +600,7 @@ fn instance_variable_harvest(
     Visibility(_) => into,
     Field(field) => {
       let phase = BuildPhase.BuildSymbolTable
-      let mut out = IvarHarvest { 
+      let mut out = IvarHarvest {
         ivars: into.ivars.map(|x| x),
         accessors: into.accessors.map(|x| x),
         ..into,
@@ -618,7 +618,7 @@ fn instance_variable_harvest(
         seen[field.name.text] = seen[field.name.text] + 1
       }
       out.ivars = out.ivars.append(
-        IvarSymbol { 
+        IvarSymbol {
           name: field.name.text,
           type_name: field.field_type.render(),
           guards,
@@ -646,7 +646,7 @@ fn preproc_ivar_harvest(
   class_name: string,
   file: string,
 ) -> IvarHarvest {
-  let mut out = IvarHarvest { 
+  let mut out = IvarHarvest {
     ivars: into.ivars.map(|x| x),
     accessors: into.accessors.map(|x| x),
     ..into,
@@ -800,7 +800,7 @@ fn synthesize_accessors(
   if occupied[getter_key] == 0 {
     if unguarded { occupied[getter_key] = 1 }
     out = out.append(
-      MethodSymbol { 
+      MethodSymbol {
         selector: getter_selector,
         is_class_method: false,
         return_type: field.field_type.render(),
@@ -824,7 +824,7 @@ fn synthesize_accessors(
   if occupied[setter_key] == 0 {
     if unguarded { occupied[setter_key] = 1 }
     out = out.append(
-      MethodSymbol { 
+      MethodSymbol {
         selector: setter_selector,
         is_class_method: false,
         return_type: "void",
@@ -889,7 +889,7 @@ fn method_symbol(
     Class => true,
     Instance => false,
   }
-  MethodSymbol { 
+  MethodSymbol {
     selector: selector.selector_string(),
     is_class_method,
     return_type: return_type.render(),
@@ -943,7 +943,7 @@ fn harvest_protocol(
 
   let mut out = empty_harvest()
   out.protocols = out.protocols.append(
-    ProtocolSymbol { 
+    ProtocolSymbol {
       name: declaration.name.text,
       protocols: protocol_names(declaration.protocols),
       required,

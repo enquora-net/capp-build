@@ -173,7 +173,7 @@ fn resolve_package_type(content: string) -> (PackageTypeResolution, Slice<PlistP
   plist_string(content, "CPBundlePackageType").map_or_else(
     || {
       let kind = infer_package_type()
-      let pair = PlistPair { 
+      let pair = PlistPair {
         key: "CPBundlePackageType",
         value: package_type_string(kind),
       }
@@ -201,13 +201,15 @@ fn ensure_plist_meta(content: string, root: string) -> PlistFixup {
     filled = filled.append(PlistPair { key: "CPBundleName", value: derived })
     derived
   })
-  let identifier = plist_string(content, "CPBundleIdentifier").unwrap_or_else(|| {
-    let derived = derived_identifier(root)
-    filled = filled.append(
-      PlistPair { key: "CPBundleIdentifier", value: derived },
-    )
-    derived
-  })
+  let identifier = plist_string(content, "CPBundleIdentifier").unwrap_or_else(
+    || {
+      let derived = derived_identifier(root)
+      filled = filled.append(
+        PlistPair { key: "CPBundleIdentifier", value: derived },
+      )
+      derived
+    },
+  )
 
   PlistFixup { kind, name, identifier, filled }
 }
@@ -335,7 +337,7 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
     },
   }
 
-  let meta = PlistMeta { 
+  let meta = PlistMeta {
     package_type: package_type_string(kind),
     name: fixup.name,
     identifier: fixup.identifier,
@@ -405,7 +407,9 @@ fn finish_validation(root: string, diags: Slice<Diagnostic>) -> Result<Validatio
   if error_count == 0 {
     fmt.Println(f"✓  validate: {root}")
   } else {
-    fmt.Println(f"✗  validate: {error_count} error(s) — project structure invalid")
+    fmt.Println(
+      f"✗  validate: {error_count} error(s) — project structure invalid",
+    )
   }
   Ok(ValidationResult { diags })
 }

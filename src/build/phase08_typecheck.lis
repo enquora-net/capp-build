@@ -251,7 +251,7 @@ fn proto_world(table: SymbolTable) -> ProtoWorld {
         }
         for method in protocol.required {
           requirements = requirements.append(
-            Requirement { 
+            Requirement {
               key: selector_key(method.is_class_method, method.selector),
               protocol: name,
             },
@@ -488,14 +488,14 @@ fn resolve_ancestry(name: string, world: ClassWorld) -> AncestryChain {
   loop {
     let idx = world.index[current]
     if idx == 0 {
-      return AncestryChain { 
+      return AncestryChain {
         ancestors,
         terminal: AncestryTerminal.External(current),
       }
     }
     let group = world.groups[idx - 1]
     if !group.has_primary {
-      return AncestryChain { 
+      return AncestryChain {
         ancestors,
         terminal: AncestryTerminal.External(current),
       }

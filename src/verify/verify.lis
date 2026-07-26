@@ -27,7 +27,7 @@ pub struct VerifyResult {
 // start may be relative or absolute; "." means the invocation directory.
 pub fn verify_root(start: string) -> VerifyResult {
   match build.find_project_root(start) {
-    Ok(root) => VerifyResult { 
+    Ok(root) => VerifyResult {
       ok: true,
       label: "project root",
       detail: root.path,

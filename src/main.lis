@@ -43,7 +43,7 @@ fn no_args(cmd: Ref<cobra.Command>, args: Slice<string>) -> Result<(), error> {
 fn noop_run(_cmd: Ref<cobra.Command>, _args: Slice<string>) {}
 
 fn completion_options() -> cobra.CompletionOptions {
-  cobra.CompletionOptions { 
+  cobra.CompletionOptions {
     DisableDefaultCmd: false,
     DisableNoDescFlag: false,
     DisableDescriptions: false,
@@ -58,7 +58,7 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
 }
 
 fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
-  cobra.Command { 
+  cobra.Command {
     Use: use,
     Short: short,
     Args: Some(no_args as cobra.PositionalArgs),
@@ -84,7 +84,7 @@ fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
 }
 
 fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Command {
-  cobra.Command { 
+  cobra.Command {
     Use: use,
     Short: short,
     Annotations: Map.new<string, string>(),
@@ -109,7 +109,7 @@ fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Comma
 }
 
 fn make_group(use: string, short: string) -> cobra.Command {
-  cobra.Command { 
+  cobra.Command {
     Use: use,
     Short: short,
     Args: Some(no_args as cobra.PositionalArgs),

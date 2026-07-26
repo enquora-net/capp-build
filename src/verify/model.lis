@@ -35,7 +35,7 @@ fn sel_ident(text: string) -> build.ObjjSelectorIdentifier {
 
 // named_part builds a keyword-selector part with a name: `name:(type)param`.
 fn named_part(name: string) -> build.ObjjMethodParameterPart {
-  build.ObjjMethodParameterPart { 
+  build.ObjjMethodParameterPart {
     name_part: Some(sel_ident(name)),
     parameter_name: ident("parameter"),
     pos: at(0, 0),
@@ -45,7 +45,7 @@ fn named_part(name: string) -> build.ObjjMethodParameterPart {
 
 // anonymous_part builds a keyword-selector part with no name: `:(type)param`.
 fn anonymous_part() -> build.ObjjMethodParameterPart {
-  build.ObjjMethodParameterPart { 
+  build.ObjjMethodParameterPart {
     parameter_name: ident("parameter"),
     pos: at(0, 0),
     ..,
@@ -57,7 +57,7 @@ fn identifier_expression(name: build.Identifier) -> build.Expression {
 }
 
 fn message_argument(keyword: Option<build.ObjjSelectorIdentifier>) -> build.ObjjMessageKeywordArgument {
-  build.ObjjMessageKeywordArgument { 
+  build.ObjjMessageKeywordArgument {
     keyword,
     arguments: [identifier_expression(ident("x"))],
     pos: at(0, 0),
@@ -85,7 +85,7 @@ fn expect_position(
   if got.row == want_row && got.col == want_col {
     VerifyResult { ok: true, label, detail: f"({got.row}, {got.col})" }
   } else {
-    VerifyResult { 
+    VerifyResult {
       ok: false,
       label,
       detail: f"expected ({want_row}, {want_col}), got ({got.row}, {got.col})",
@@ -155,10 +155,9 @@ fn check_named_type() -> VerifyResult {
 }
 
 fn check_multi_word_type() -> VerifyResult {
-  let objj_type = build.ObjjType.MultiWord(build.ObjjMultiWordType.UnsignedLongLong(at(
-    0,
-    0,
-  )))
+  let objj_type = build.ObjjType.MultiWord(
+    build.ObjjMultiWordType.UnsignedLongLong(at(0, 0)),
+  )
   expect_string("type: multi-word", objj_type.render(), "unsigned long long")
 }
 
@@ -168,7 +167,7 @@ fn check_bare_id_type() -> VerifyResult {
 }
 
 fn check_id_protocol_type() -> VerifyResult {
-  let list = build.ObjjProtocolReferenceList { 
+  let list = build.ObjjProtocolReferenceList {
     protocols: [ident("CPCoding"), ident("CPCopying")],
     pos: at(0, 0),
   }
@@ -183,12 +182,12 @@ fn check_id_protocol_type() -> VerifyResult {
 }
 
 fn check_protocol_qualified_type() -> VerifyResult {
-  let list = build.ObjjProtocolReferenceList { 
+  let list = build.ObjjProtocolReferenceList {
     protocols: [ident("CPCoding")],
     pos: at(0, 0),
   }
   let objj_type = build.ObjjType.Protocol(
-    build.ObjjProtocolType { 
+    build.ObjjProtocolType {
       name: ident("CPView"),
       protocols: list,
       pos: at(0, 0),
@@ -202,7 +201,7 @@ fn check_protocol_qualified_type() -> VerifyResult {
 }
 
 fn check_action_method_type() -> VerifyResult {
-  let method_type = build.ObjjMethodType { 
+  let method_type = build.ObjjMethodType {
     return_kind: build.ObjjMethodTypeKind.Action(at(0, 0)),
     pos: at(0, 0),
     ..,
@@ -211,7 +210,7 @@ fn check_action_method_type() -> VerifyResult {
 }
 
 fn check_async_method_type() -> VerifyResult {
-  let method_type = build.ObjjMethodType { 
+  let method_type = build.ObjjMethodType {
     is_async: true,
     return_kind: build.ObjjMethodTypeKind.Type(build.ObjjType.Named(ident(
       "CPString",
@@ -237,17 +236,16 @@ fn check_statement_position() -> VerifyResult {
 // the position surfaces from four enum levels down.
 fn check_recursive_position() -> VerifyResult {
   let target = build.Identifier { text: "x", pos: at(7, 12) }
-  let statement = build.Statement.Export(build.ExportStatement.DefaultValue(identifier_expression(
-    target,
-  )))
+  let statement = build.Statement.Export(build.ExportStatement.DefaultValue(
+    identifier_expression(target),
+  ))
   expect_position("position: recursive descent", statement.position(), 7, 12)
 }
 
 fn check_position_payload_variant() -> VerifyResult {
-  let expression = build.Expression.Primary(build.PrimaryExpression.MetaProperty(build.MetaProperty.NewTarget(at(
-    9,
-    0,
-  ))))
+  let expression = build.Expression.Primary(
+    build.PrimaryExpression.MetaProperty(build.MetaProperty.NewTarget(at(9, 0))),
+  )
   expect_position(
     "position: bare Position payload",
     expression.position(),
@@ -257,10 +255,9 @@ fn check_position_payload_variant() -> VerifyResult {
 }
 
 fn check_objj_type_position() -> VerifyResult {
-  let objj_type = build.ObjjType.MultiWord(build.ObjjMultiWordType.LongDouble(at(
-    3,
-    8,
-  )))
+  let objj_type = build.ObjjType.MultiWord(build.ObjjMultiWordType.LongDouble(
+    at(3, 8),
+  ))
   expect_position("position: objj type", objj_type.position(), 3, 8)
 }
 

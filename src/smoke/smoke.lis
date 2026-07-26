@@ -25,7 +25,7 @@ pub struct SmokeResult {
 // smoke_cobra verifies the cobra interop boundary.
 // Proves that cobra.Command can be constructed and executed from Lisette.
 pub fn smoke_cobra() -> SmokeResult {
-  let mut cmd = cobra.Command { 
+  let mut cmd = cobra.Command {
     Use: "smoke-cobra",
     Short: "cobra interop smoke test",
     ..,
@@ -38,7 +38,7 @@ pub fn smoke_cobra() -> SmokeResult {
 // smoke_capp verifies the capp-parse interop boundary.
 // Proves that capp.Parse can be called and returns a result.
 pub fn smoke_capp(grammar_path: string) -> SmokeResult {
-  let cfg = capp.ParseConfig { 
+  let cfg = capp.ParseConfig {
     Path: "",
     Src: [],
     GrammarPath: grammar_path,
@@ -46,12 +46,12 @@ pub fn smoke_capp(grammar_path: string) -> SmokeResult {
     ..,
   }
   match capp.Parse(cfg) {
-    Ok(result) => SmokeResult { 
+    Ok(result) => SmokeResult {
       name: "capp",
       ok: true,
       note: f"capp.Parse ok: node_count={result.NodeCount}",
     },
-    Err(e) => SmokeResult { 
+    Err(e) => SmokeResult {
       name: "capp",
       ok: false,
       note: f"capp.Parse error: {e}",
@@ -68,7 +68,7 @@ pub fn smoke_capp(grammar_path: string) -> SmokeResult {
 // processes and ParseFile has no owning ProjectResult to close.
 pub fn smoke_boundary(grammar_path: string) -> SmokeResult {
   if capp.BoundaryVersion != 2 {
-    return SmokeResult { 
+    return SmokeResult {
       name: "boundary",
       ok: false,
       note: f"BoundaryVersion = {capp.BoundaryVersion}, expected 2 — stale capp-parse pin or typedefs",
@@ -76,7 +76,7 @@ pub fn smoke_boundary(grammar_path: string) -> SmokeResult {
   }
 
   // A single newline: minimal non-nil source parsing to an empty program.
-  let cfg = capp.ParseConfig { 
+  let cfg = capp.ParseConfig {
     Path: "",
     Src: [10],
     GrammarPath: grammar_path,
@@ -91,13 +91,13 @@ pub fn smoke_boundary(grammar_path: string) -> SmokeResult {
       let named_children = root.NamedChildCount()
       let is_named = root.IsNamed()
       let ok = kind == capp.NodeKindProgram && named_children == 0 && is_named
-      SmokeResult { 
+      SmokeResult {
         name: "boundary",
         ok,
         note: f"BoundaryVersion={capp.BoundaryVersion} root kind={kind} named_children={named_children}",
       }
     },
-    Err(e) => SmokeResult { 
+    Err(e) => SmokeResult {
       name: "boundary",
       ok: false,
       note: f"capp.ParseFile error: {e}",

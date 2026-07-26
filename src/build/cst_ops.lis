@@ -181,13 +181,10 @@ impl ObjjType {
         f"{protocol_type.name.text}{protocols}"
       },
       MultiWord(multi_word) => multi_word.render(),
-      Id(id_type) => id_type.protocols.map_or(
-        "id",
-        |list| {
-          let protocols = list.render()
-          f"id{protocols}"
-        },
-      ),
+      Id(id_type) => id_type.protocols.map_or("id", |list| {
+        let protocols = list.render()
+        f"id{protocols}"
+      }),
       Named(name) => name.text,
     }
   }

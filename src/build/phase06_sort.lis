@@ -195,7 +195,7 @@ fn kahn(nodes: Slice<string>, edges: Slice<ImportEdge>) -> Result<Slice<string>,
     }
 
     return Err(
-      &CycleError { 
+      &CycleError {
         path: cycle_path,
         file: cycle_path[0],
         line: entry_line,

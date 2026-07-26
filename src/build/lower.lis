@@ -149,7 +149,7 @@ pub fn lower_program(root: capp.CSTNode, source: SourceFile) -> LoweredUnit {
     }
   }
 
-  LoweredUnit { 
+  LoweredUnit {
     source,
     program: Program { hash_bang, body, pos: node_pos(root) },
     diags,
@@ -302,7 +302,7 @@ impl Lowering {
       Some(path_node) => {
         let path_kind = path_node.Kind()
         if path_kind == capp.NodeKindSystemLibString {
-          let lib = SystemLibString { 
+          let lib = SystemLibString {
             text: path_node.Text(),
             pos: node_pos(path_node),
           }
@@ -426,7 +426,7 @@ impl Lowering {
       alternative = else_opt
     }
 
-    let lowered = IfStatement { 
+    let lowered = IfStatement {
       condition,
       consequence: &consequence,
       alternative,
@@ -554,7 +554,7 @@ impl Lowering {
       return (None, diags)
     }
 
-    let lowered = LabeledStatement { 
+    let lowered = LabeledStatement {
       label: ident_of(label_node),
       body: &body,
       pos,
@@ -743,7 +743,7 @@ impl Lowering {
       return (None, diags)
     }
 
-    let lowered = ForStatement { 
+    let lowered = ForStatement {
       initializer,
       condition,
       increment,
@@ -851,7 +851,7 @@ impl Lowering {
           }
         }
         ForBinding.Declared(
-          ForDeclaredBinding { 
+          ForDeclaredBinding {
             kind,
             left,
             initializer,
@@ -901,7 +901,7 @@ impl Lowering {
 
     // ForHeader spans binding through right side; its pos anchors at the
     // binding.
-    let header = ForHeader { 
+    let header = ForHeader {
       binding,
       operator,
       right: &right,
@@ -1014,7 +1014,7 @@ impl Lowering {
     let (body, body_diags) = self.statement_block(body_node)
     let diags = merge_diags(param_diags, body_diags)
 
-    let decl = FunctionDeclaration { 
+    let decl = FunctionDeclaration {
       is_async,
       name: ident_of(name_node),
       parameters,
@@ -1037,9 +1037,9 @@ impl Lowering {
       let kind = child.Kind()
       if skippable(kind) { continue }
       if kind == capp.NodeKindIdentifier {
-        let parameter = FormalParameter.Pattern(Pattern.Lhs(LhsExpression.Identifier(ident_of(
-          child,
-        ))))
+        let parameter = FormalParameter.Pattern(Pattern.Lhs(
+          LhsExpression.Identifier(ident_of(child)),
+        ))
         parameters = parameters.append(parameter)
       } else if kind == capp.NodeKindAssignmentPattern {
         let (assignment_opt, ds) = self.assignment_pattern_struct(child)
@@ -1443,7 +1443,7 @@ impl Lowering {
       let child = node.NamedChild(i)
       let kind = child.Kind()
       if kind == capp.NodeKindStringFragment {
-        let fragment = StringFragment { 
+        let fragment = StringFragment {
           text: child.Text(),
           pos: node_pos(child),
         }
@@ -1589,7 +1589,7 @@ impl Lowering {
     let property = if property_node.Kind() ==
     capp.NodeKindPrivatePropertyIdentifier {
       MemberProperty.Private(
-        PrivatePropertyIdentifier { 
+        PrivatePropertyIdentifier {
           text: property_node.Text(),
           pos: node_pos(property_node),
         },
@@ -1636,7 +1636,7 @@ impl Lowering {
 
     (
       Some(
-        SubscriptExpression { 
+        SubscriptExpression {
           object: &object,
           optional_chain,
           index: &index,
@@ -1751,7 +1751,7 @@ impl Lowering {
     // brand check), which is not an expression.
     let left = if left_node.Kind() == capp.NodeKindPrivatePropertyIdentifier {
       BinaryLeft.PrivateProperty(
-        PrivatePropertyIdentifier { 
+        PrivatePropertyIdentifier {
           text: left_node.Text(),
           pos: node_pos(left_node),
         },
@@ -1866,7 +1866,7 @@ impl Lowering {
       return (None, diags)
     }
 
-    let lowered = TernaryExpression { 
+    let lowered = TernaryExpression {
       condition: &condition,
       consequence: &consequence,
       alternative: &alternative,
@@ -1907,7 +1907,7 @@ impl Lowering {
       return (None, diags)
     }
 
-    let lowered = UpdateExpression { 
+    let lowered = UpdateExpression {
       operator,
       argument: &argument,
       is_prefix,
@@ -1985,7 +1985,7 @@ impl Lowering {
       // The @deref assignment operator is an unfielded anonymous choice; it is
       // recovered by scanning for the operator token between target and value.
       let operator = self.scan_assignment_op(node)
-      let lowered = ObjjDerefAssignment { 
+      let lowered = ObjjDerefAssignment {
         left: deref,
         operator,
         right: &right,
@@ -2394,7 +2394,7 @@ impl Lowering {
       return (None, diags)
     }
 
-    let lowered = AugmentedAssignmentExpression { 
+    let lowered = AugmentedAssignmentExpression {
       left: target,
       operator,
       right: &right,
@@ -2680,7 +2680,7 @@ impl Lowering {
       Some(n) => n,
       None => return (None, self.malformed(node, "regex without pattern")),
     }
-    let pattern = RegexPattern { 
+    let pattern = RegexPattern {
       text: pattern_node.Text(),
       pos: node_pos(pattern_node),
     }
@@ -2700,7 +2700,7 @@ impl Lowering {
       let child = node.NamedChild(i)
       let kind = child.Kind()
       if kind == capp.NodeKindStringFragment {
-        let fragment = StringFragment { 
+        let fragment = StringFragment {
           text: child.Text(),
           pos: node_pos(child),
         }
@@ -2850,7 +2850,7 @@ impl Lowering {
     let (body, body_diags) = self.statement_block(body_node)
     diags = merge_diags(diags, body_diags)
 
-    let declaration = GeneratorFunctionDeclaration { 
+    let declaration = GeneratorFunctionDeclaration {
       is_async,
       name: ident_of(name_node),
       parameters,
@@ -2935,7 +2935,7 @@ impl Lowering {
       for i in 0..node.NamedChildCount() {
         let child = node.NamedChild(i)
         if child.Kind() != capp.NodeKindObjjSelectorIdentifier { continue }
-        let part = ObjjSelectorNamePart { 
+        let part = ObjjSelectorNamePart {
           name: selector_ident_of(child),
           pos: node_pos(child),
         }
@@ -3052,7 +3052,7 @@ impl Lowering {
       Some(n) => n,
       None => return (None, self.malformed(node, "@class without name")),
     }
-    let declaration = ObjjClassForwardDeclaration { 
+    let declaration = ObjjClassForwardDeclaration {
       name: ident_of(name_node),
       pos: node_pos(node),
     }
@@ -3064,7 +3064,7 @@ impl Lowering {
       Some(n) => n,
       None => return (None, self.malformed(node, "@global without name")),
     }
-    let declaration = ObjjGlobalDeclaration { 
+    let declaration = ObjjGlobalDeclaration {
       name: ident_of(name_node),
       pos: node_pos(node),
     }
@@ -3084,7 +3084,7 @@ impl Lowering {
       Some(n) => n,
       None => return (None, self.malformed(node, "@typedef without name")),
     }
-    let declaration = ObjjTypedef { 
+    let declaration = ObjjTypedef {
       name: ident_of(name_node),
       pos: node_pos(node),
     }
@@ -3128,7 +3128,7 @@ impl Lowering {
       }
     }
 
-    let declaration = ObjjProtocolDeclaration { 
+    let declaration = ObjjProtocolDeclaration {
       name: ident_of(name_node),
       protocols,
       members,
@@ -3199,7 +3199,7 @@ impl Lowering {
       },
     }
 
-    let declaration = ObjjMethodDeclaration { 
+    let declaration = ObjjMethodDeclaration {
       scope,
       return_type,
       selector,
@@ -3347,7 +3347,7 @@ impl Lowering {
         merge_diags(diags, self.malformed(node, "#if block without #endif")),
       ),
     }
-    let endif = PreprocEndifLine { 
+    let endif = PreprocEndifLine {
       text: endif_node.Text(),
       pos: node_pos(endif_node),
     }
@@ -3385,12 +3385,12 @@ impl Lowering {
 
     let mut else_branch: Option<PreprocElseBranch> = None
     if let Some(line_node) = else_node {
-      let else_line = PreprocElseLine { 
+      let else_line = PreprocElseLine {
         text: line_node.Text(),
         pos: node_pos(line_node),
       }
       else_branch = Some(
-        PreprocElseBranch { 
+        PreprocElseBranch {
           else_line,
           body: else_body,
           pos: node_pos(line_node),
@@ -3412,7 +3412,7 @@ impl Lowering {
       return (Some(PreprocBlockItem.Nested(nested)), diags)
     }
     if kind == capp.NodeKindPreprocDirective {
-      let directive = PreprocDirective { 
+      let directive = PreprocDirective {
         text: node.Text(),
         pos: node_pos(node),
       }
@@ -3454,7 +3454,7 @@ impl Lowering {
         ),
       ),
     }
-    let endif = PreprocEndifLine { 
+    let endif = PreprocEndifLine {
       text: endif_node.Text(),
       pos: node_pos(endif_node),
     }
@@ -3487,12 +3487,12 @@ impl Lowering {
 
     let mut else_branch: Option<PreprocIvarElseBranch> = None
     if let Some(line_node) = else_node {
-      let else_line = PreprocElseLine { 
+      let else_line = PreprocElseLine {
         text: line_node.Text(),
         pos: node_pos(line_node),
       }
       else_branch = Some(
-        PreprocIvarElseBranch { 
+        PreprocIvarElseBranch {
           else_line,
           body: else_body,
           pos: node_pos(line_node),
@@ -3521,7 +3521,7 @@ impl Lowering {
       return (Some(PreprocIvarItem.Nested(nested)), diags)
     }
     if kind == capp.NodeKindPreprocDirective {
-      let directive = PreprocDirective { 
+      let directive = PreprocDirective {
         text: node.Text(),
         pos: node_pos(node),
       }
@@ -3717,7 +3717,7 @@ impl Lowering {
           continue
         }
         if kind == capp.NodeKindNumber && right.is_none() {
-          let number = NumberLiteral { 
+          let number = NumberLiteral {
             text: child.Text(),
             pos: node_pos(child),
           }
@@ -3736,7 +3736,7 @@ impl Lowering {
           self.malformed(node, "preprocessor comparison without right side"),
         )
       }
-      let comparison = PreprocComparison { 
+      let comparison = PreprocComparison {
         left: compare_left,
         operator,
         right: compare_right,
@@ -3919,7 +3919,7 @@ impl Lowering {
       }
     }
 
-    let class_impl = ObjjClassImplementation { 
+    let class_impl = ObjjClassImplementation {
       name: ident_of(name_node),
       superclass,
       category,
@@ -3966,7 +3966,7 @@ impl Lowering {
       )
     }
     if kind == capp.NodeKindPreprocDirective {
-      let directive = PreprocDirective { 
+      let directive = PreprocDirective {
         text: child.Text(),
         pos: node_pos(child),
       }
@@ -4128,7 +4128,7 @@ impl Lowering {
       }
     }
 
-    let field = ObjjFieldDefinition { 
+    let field = ObjjFieldDefinition {
       modifiers,
       field_type,
       name: ident_of(name_node),
@@ -4228,7 +4228,7 @@ impl Lowering {
     let (body, body_diags) = self.statement_block(body_node)
     diags = merge_diags(diags, body_diags)
 
-    let method = ObjjMethodDefinition { 
+    let method = ObjjMethodDefinition {
       scope,
       return_type,
       selector,
@@ -4268,7 +4268,7 @@ impl Lowering {
       },
     }
 
-    let part = ObjjMethodParameterPart { 
+    let part = ObjjMethodParameterPart {
       name_part,
       parameter_type,
       parameter_name,
@@ -4291,7 +4291,7 @@ impl Lowering {
 
     let kind_text = kind_node.Kind()
     if kind_text == "@action" {
-      let method_type = ObjjMethodType { 
+      let method_type = ObjjMethodType {
         is_async,
         return_kind: ObjjMethodTypeKind.Action(node_pos(kind_node)),
         pos,
@@ -4299,7 +4299,7 @@ impl Lowering {
       return (Some(method_type), [])
     }
     if kind_text == "void" {
-      let method_type = ObjjMethodType { 
+      let method_type = ObjjMethodType {
         is_async,
         return_kind: ObjjMethodTypeKind.Void(node_pos(kind_node)),
         pos,
@@ -4313,7 +4313,7 @@ impl Lowering {
       }
       return (
         Some(
-          ObjjMethodType { 
+          ObjjMethodType {
             is_async,
             return_kind: ObjjMethodTypeKind.Type(objj_type),
             pos,

@@ -95,7 +95,7 @@ pub fn print_js_program(
     }
   }
   let mut top_receivers = ReceiverState { .. }
-  let p = JsPrint { 
+  let p = JsPrint {
     file,
     symbols,
     known_classes,
@@ -1134,18 +1134,15 @@ impl JsPrint {
     write(buf, st.source.text)
     write(buf, "\n")
     if let Some(attribute) = st.attribute {
-      diags = merge_diags(
-        diags,
-        [
-          diag_warn_at(
-            BuildPhase.Compile,
-            "codegen: import attribute deferred -- no legacy emitter",
-            self.file,
-            attribute.pos.row,
-            attribute.pos.col,
-          ),
-        ],
-      )
+      diags = merge_diags(diags, [
+        diag_warn_at(
+          BuildPhase.Compile,
+          "codegen: import attribute deferred -- no legacy emitter",
+          self.file,
+          attribute.pos.row,
+          attribute.pos.col,
+        ),
+      ])
     }
     diags
   }
@@ -2157,9 +2154,9 @@ impl JsPrint {
     implementation: ObjjClassImplementation,
   ) -> Slice<Diagnostic> {
     let class_name = implementation.name.text
-    let p = JsPrint { 
+    let p = JsPrint {
       current_class: Some(
-        ClassContext { 
+        ClassContext {
           name: class_name,
           ivars: self.class_ivar_universe(implementation),
         },
@@ -3086,10 +3083,9 @@ fn statement_assigns_self(st: Statement) -> bool {
     If(if_st) => {
       if expressions_assign_self(if_st.condition.expression.*) { return true }
       if statement_assigns_self(if_st.consequence.*) { return true }
-      if_st.alternative.map_or(
-        false,
-        |alternative| statement_assigns_self(alternative.body.*),
-      )
+      if_st.alternative.map_or(false, |alternative| statement_assigns_self(
+        alternative.body.*,
+      ))
     },
     For(for_st) => statement_assigns_self(for_st.body.*),
     ForIn(for_in) => statement_assigns_self(for_in.body.*),
@@ -3114,10 +3110,9 @@ fn statement_assigns_self(st: Statement) -> bool {
       if let Some(handler) = try_st.handler {
         if block_assigns_self(handler.body) { return true }
       }
-      try_st.finalizer.map_or(
-        false,
-        |finalizer| block_assigns_self(finalizer.body),
-      )
+      try_st.finalizer.map_or(false, |finalizer| block_assigns_self(
+        finalizer.body,
+      ))
     },
     Throw(throw_st) => expressions_assign_self(throw_st.value.*),
     _ => false,

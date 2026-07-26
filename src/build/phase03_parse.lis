@@ -59,7 +59,7 @@ pub fn run_parse_sources(ctx: Ref<BuildContext>) -> Result<ParsedUnits, error> {
 
   if paths.is_empty() { return Ok(ParsedUnits { units: [], diags }) }
 
-  let cfg = capp.ProjectConfig { 
+  let cfg = capp.ProjectConfig {
     Root: "",
     Paths: paths,
     Mode: capp.ModeAuto,

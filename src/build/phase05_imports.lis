@@ -179,7 +179,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
             match resolve_local(path, unit.source.path, ctx.root.path, tree) {
               LocalResolution.Resolved(to_path) => {
                 edges = edges.append(
-                  ImportEdge { 
+                  ImportEdge {
                     from: unit.source.path,
                     to: to_path,
                     line: raw_line + 1,
@@ -225,7 +225,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
 
     if new_paths.is_empty() { break }
 
-    let cfg = capp.ProjectConfig { 
+    let cfg = capp.ProjectConfig {
       Root: "",
       Paths: new_paths,
       Mode: capp.ModeAuto,
@@ -240,7 +240,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
       Ok(pr) => {
         for file_opt in pr.Files {
           if let Some(file) = file_opt {
-            let source = SourceFile { 
+            let source = SourceFile {
               path: file.Path,
               kind: classify(file.Path),
             }
@@ -263,7 +263,7 @@ pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error>
               for d in lowered.diags {
                 diags = diags.append(d)
               }
-              let parsed_unit = ParsedUnit { 
+              let parsed_unit = ParsedUnit {
                 source,
                 imports,
                 program: lowered.program,
