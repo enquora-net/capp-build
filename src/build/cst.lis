@@ -11,8 +11,8 @@
 // (tree-sitter-objj/grammar.js, a superset of tree-sitter-javascript) into
 // algebraic data types.  It is the durable, typed representation of parsed
 // source.  A single lowering pass (lower.lis) converts capp-parse's untyped
-// CSTNode into this tree; every downstream consumer — symbol table (phase 6),
-// type check (phase 7), compile (phase 8) — pattern matches over these types
+// CSTNode into this tree; every downstream consumer — symbol table (phase 7),
+// type check (phase 8), compile (phase 9) — pattern matches over these types
 // and never touches the untyped CST again.  String-keyed, position-fragile
 // node access is thereby confined to exactly one module.
 //

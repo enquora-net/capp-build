@@ -7,34 +7,29 @@
 //
 // Phase 4: PreprocessSources
 //
-// STUB.  Identity pass-through: copies ctx.parsed into ctx.preprocessed
-// unchanged.  No directive handling, no condition evaluation, no branch
-// selection.
+// Identity pass-through: copies ctx.parsed into ctx.preprocessed unchanged.
+// No directive handling, no condition evaluation, no branch selection.
 //
-// The real implementation is a call into the standalone capp-preprocess
-// module, per the agreed architecture: capp-ast holds the canonical AST
-// typedefs (extracted from cst.lis/cst_ops.lis), capp-preprocess is an
-// independent Lisette module consuming a raw capp-ast graph and emitting a
-// normalized one with all directives resolved and pruned, and this phase
-// becomes nothing more than a call to it. Sequencing: (1) this stub,
-// validated for parity — this step; (2) extract capp-ast, re-link
-// capp-build to it, re-validate parity; (3) implement and unit-test
-// capp-preprocess standalone; (4) replace this stub's body with the call.
+// This is not a stub awaiting a future implementation. C-style preprocessing
+// is being sunset: an audit of the AppKit/Foundation source tree found no
+// live use of conditional compilation, and every #define resolved to either
+// a class constant, a class or instance method reaching state it already
+// owns, or a call site rewritten by hand. That source is being migrated
+// accordingly. This phase remains in the pipeline as a deliberate, permanent
+// placeholder for the rare, genuinely unrewritable site found on a
+// site-specific basis in the future — not as an incomplete feature.
 //
-// ResolveImports (phase 5) and every phase after it still read ctx.parsed
-// directly, unchanged from before this phase existed.  ctx.preprocessed
-// exists so the pipeline shape and phase count are correct now, and so step
-// 4 is a content swap in this file plus a downstream rewire, not a second
-// renumbering.
+// ResolveImports (phase 5) and every phase after it read ctx.parsed
+// directly; ctx.preprocessed exists so the pipeline's phase count and shape
+// are correct, but nothing downstream currently consumes it.
 //
 // **
 import "go:errors"
 import "go:fmt"
 
-// PreprocessResult is the output of phase 4.  Until capp-preprocess is
-// integrated, units is a verbatim copy of ctx.parsed.units and diags is
-// always empty; the shape exists so downstream phases can be migrated to
-// consume it without a further pipeline change.
+// PreprocessResult is the output of phase 4.  units is a verbatim copy of
+// ctx.parsed.units and diags is always empty — see the file header for why
+// this is permanent, not provisional.
 pub struct PreprocessResult {
   pub units: Slice<ParsedUnit>,
   pub diags: Slice<Diagnostic>,

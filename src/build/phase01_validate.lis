@@ -397,15 +397,15 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
 // diagnostics (the orchestrator gates on them but does not print them); a
 // validation Error here halts the pipeline via build()'s diagnostic gate.
 fn finish_validation(root: string, diags: Slice<Diagnostic>) -> Result<ValidationResult, error> {
-  let mut errors = 0
+  let mut error_count = 0
   for d in diags {
     print_validation_diag(d)
-    if d.level == DiagLevel.Error { errors += 1 }
+    if d.level == DiagLevel.Error { error_count += 1 }
   }
-  if errors == 0 {
+  if error_count == 0 {
     fmt.Println(f"✓  validate: {root}")
   } else {
-    fmt.Println(f"✗  validate: {errors} error(s) — project structure invalid")
+    fmt.Println(f"✗  validate: {error_count} error(s) — project structure invalid")
   }
   Ok(ValidationResult { diags })
 }
