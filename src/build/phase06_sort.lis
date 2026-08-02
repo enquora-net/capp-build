@@ -288,14 +288,9 @@ fn dfs_cycle(
   visited[node] = true
   on_stack[node] = true
 
-  // Rebuild path as a fresh allocation extended by node.
-  // Iterating from empty ensures no shared backing array with the caller's
-  // path slice regardless of Go's append capacity decisions.
-  let mut fresh: Slice<string> = []
-  for p in path {
-    fresh = fresh.append(p)
-  }
-  let path = fresh.append(node)
+  // Lisette 0.9.0 (#1017) fixed unintended mutation from append aliasing,
+  // so append no longer risks writing through the caller's backing array.
+  let path = path.append(node)
 
   for neighbor in residual_adj[node] {
     if on_stack[neighbor] {

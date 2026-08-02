@@ -44,7 +44,6 @@
 // Info.plist is mandatory for all supported project types.
 //
 // **
-import "go:errors"
 import "go:fmt"
 import "go:os"
 import "go:path/filepath"

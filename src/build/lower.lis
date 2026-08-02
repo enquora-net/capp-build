@@ -1586,8 +1586,7 @@ impl Lowering {
       .ChildByFieldName(capp.FieldOptionalChain)
       .is_some()
 
-    let property = if property_node.Kind() ==
-    capp.NodeKindPrivatePropertyIdentifier {
+    let property = if property_node.Kind() == capp.NodeKindPrivatePropertyIdentifier {
       MemberProperty.Private(
         PrivatePropertyIdentifier {
           text: property_node.Text(),
@@ -2274,8 +2273,7 @@ impl Lowering {
         self.malformed(node, "object assignment pattern without left side"),
       ),
     }
-    let left = if left_node.Kind() ==
-    capp.NodeKindShorthandPropertyIdentifierPattern {
+    let left = if left_node.Kind() == capp.NodeKindShorthandPropertyIdentifierPattern {
       ObjectAssignmentLeft.Shorthand(ident_of(left_node))
     } else {
       let (destructuring_opt, ds) = self.destructuring_pattern(left_node)
@@ -3651,8 +3649,7 @@ impl Lowering {
       for i in 0..node.NamedChildCount() {
         let child = node.NamedChild(i)
         if child.Kind() != capp.NodeKindIdentifier { continue }
-        if child.StartRow() == callee_row &&
-        child.StartColumn() == callee_column {
+        if child.StartRow() == callee_row && child.StartColumn() == callee_column {
           continue
         }
         arguments = arguments.append(ident_of(child))
@@ -3898,9 +3895,9 @@ impl Lowering {
       let kind = child.Kind()
       // Fielded children (name, superclass, category, protocols) also appear
       // in named-child iteration; they are captured above and skipped here.
-      if kind == capp.NodeKindIdentifier ||
-      kind == capp.NodeKindObjjProtocolReferenceList ||
-      skippable(kind) {
+      if kind == capp.NodeKindIdentifier || kind == capp.NodeKindObjjProtocolReferenceList || skippable(
+        kind,
+      ) {
         continue
       }
       if kind == capp.NodeKindObjjInstanceVariables {

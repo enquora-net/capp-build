@@ -390,9 +390,8 @@ fn protocol_cycle_diags(world: ProtoWorld) -> Slice<Diagnostic> {
   diags
 }
 
-// proto_cycle_dfs performs one DFS step.  path is rebuilt from scratch at
-// each call rather than extended via append — the same backing-array
-// aliasing hazard documented at phase06 dfs_cycle applies here.
+// proto_cycle_dfs performs one DFS step.  Lisette 0.9.0 (#1017) fixed
+// unintended mutation from append aliasing, so path can extend directly.
 fn proto_cycle_dfs(
   name: string,
   path: Slice<string>,
@@ -403,11 +402,7 @@ fn proto_cycle_dfs(
   visited[name] = true
   on_stack[name] = true
 
-  let mut fresh: Slice<string> = []
-  for p in path {
-    fresh = fresh.append(p)
-  }
-  let path = fresh.append(name)
+  let path = path.append(name)
 
   let idx = world.index[name]
   if idx != 0 {

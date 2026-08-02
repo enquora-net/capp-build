@@ -343,19 +343,15 @@ fn print_symbol_diag(d: Diagnostic) {
 // ---------------------------------------------------------------------------
 
 // extend_guards returns a fresh guard stack extended by one condition.
-// The copy is built from empty deliberately: append on a shared backing
-// array would let the #if and #else branches of one block overwrite each
-// other's extension (the aliasing hazard documented at phase06 dfs_cycle).
+// Lisette 0.9.0 (#1017) fixed unintended mutation from append aliasing, so
+// the #if and #else branches of one block no longer risk overwriting each
+// other's extension through a shared backing array.
 fn extend_guards(
   guards: Slice<PreprocGuard>,
   condition: PreprocCondition,
   negated: bool,
 ) -> Slice<PreprocGuard> {
-  let mut fresh: Slice<PreprocGuard> = []
-  for guard in guards {
-    fresh = fresh.append(guard)
-  }
-  fresh.append(PreprocGuard { condition, negated })
+  guards.append(PreprocGuard { condition, negated })
 }
 
 // harvest_statement extracts the symbols declared by one top-level statement.

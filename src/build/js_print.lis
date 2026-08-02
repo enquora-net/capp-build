@@ -1483,8 +1483,9 @@ impl JsPrint {
   }
 
   fn identifier(self, buf: Ref<strings.Builder>, identifier: Identifier) -> Slice<Diagnostic> {
-    if self.in_instance_method && !reserved_identifier(identifier.text) &&
-    !self.is_local(identifier.text) {
+    if self.in_instance_method && !reserved_identifier(identifier.text) && !self.is_local(
+      identifier.text,
+    ) {
       if let Some(context) = self.current_class {
         if context.ivars[identifier.text] {
           write(buf, f"self.{identifier.text}")
@@ -2708,8 +2709,9 @@ impl JsPrint {
     let Some(name) = expression_identifier_name(receiver) else {
       return false
     }
-    if self.in_instance_method && !reserved_identifier(name) &&
-    !self.is_local(name) {
+    if self.in_instance_method && !reserved_identifier(name) && !self.is_local(
+      name,
+    ) {
       if let Some(context) = self.current_class {
         if context.ivars[name] { return false }
       }
@@ -3185,15 +3187,9 @@ fn scope_locals(
   hoisted: Slice<string>,
 ) -> Slice<string> {
   let mut out: Slice<string> = []
-  for name in base {
-    out = out.append(name)
-  }
-  for name in names {
-    out = out.append(name)
-  }
-  for name in hoisted {
-    out = out.append(name)
-  }
+  out = out.append(base...)
+  out = out.append(names...)
+  out = out.append(hoisted...)
   out
 }
 
