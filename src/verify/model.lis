@@ -56,7 +56,9 @@ fn identifier_expression(name: build.Identifier) -> build.Expression {
   build.Expression.Primary(build.PrimaryExpression.Identifier(name))
 }
 
-fn message_argument(keyword: Option<build.ObjjSelectorIdentifier>) -> build.ObjjMessageKeywordArgument {
+fn message_argument(
+  keyword: Option<build.ObjjSelectorIdentifier>,
+) -> build.ObjjMessageKeywordArgument {
   build.ObjjMessageKeywordArgument {
     keyword,
     arguments: [identifier_expression(ident("x"))],

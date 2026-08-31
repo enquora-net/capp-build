@@ -110,7 +110,11 @@ fn resolve_local(
   LocalResolution.Missing(candidate)
 }
 
-fn source_tree_matches(path: string, root_path: string, tree: SourceTree) -> Slice<string> {
+fn source_tree_matches(
+  path: string,
+  root_path: string,
+  tree: SourceTree,
+) -> Slice<string> {
   let clean = filepath.Clean(path)
   let single_name = filepath.Dir(clean) == "."
   let mut matches: Slice<string> = []
@@ -138,7 +142,9 @@ fn candidate_list(paths: Slice<string>) -> string {
   strings.Join(paths, ", ")
 }
 
-pub fn run_resolve_imports(ctx: Ref<BuildContext>) -> Result<ImportGraph, error> {
+pub fn run_resolve_imports(
+  ctx: mut Ref<BuildContext>,
+) -> Result<ImportGraph, error> {
   let phase = BuildPhase.ResolveImports
   let mut diags: Slice<Diagnostic> = []
   let mut edges: Slice<ImportEdge> = []

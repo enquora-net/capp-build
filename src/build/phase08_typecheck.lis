@@ -185,7 +185,7 @@ fn print_check_diag(d: Diagnostic) {
 // quadratic in the symbol count (names × symbols); the corpora put this in
 // the hundreds-squared range, well below concern.
 fn class_world(table: SymbolTable) -> ClassWorld {
-  let mut index: Map<string, int> = Map.new<string, int>()
+  let mut index: mut Map<string, int> = Map.new<string, int>()
   let mut names: Slice<string> = []
   for symbol in table.classes {
     if index[symbol.name] == 0 {
@@ -196,7 +196,7 @@ fn class_world(table: SymbolTable) -> ClassWorld {
 
   let mut groups: Slice<ClassGroup> = []
   for name in names {
-    let mut selectors: Map<string, bool> = Map.new<string, bool>()
+    let mut selectors: mut Map<string, bool> = Map.new<string, bool>()
     let mut superclass: Option<string> = None
     let mut has_primary = false
     let mut file = ""
@@ -227,7 +227,7 @@ fn class_world(table: SymbolTable) -> ClassWorld {
 // Only required methods become Requirements; optional methods impose no
 // conformance obligation.
 fn proto_world(table: SymbolTable) -> ProtoWorld {
-  let mut index: Map<string, int> = Map.new<string, int>()
+  let mut index: mut Map<string, int> = Map.new<string, int>()
   let mut names: Slice<string> = []
   for protocol in table.protocols {
     if index[protocol.name] == 0 {
@@ -283,10 +283,10 @@ fn proto_world(table: SymbolTable) -> ProtoWorld {
 // of its members seed a walk.
 fn inheritance_cycle_diags(world: ClassWorld) -> Slice<Diagnostic> {
   let mut diags: Slice<Diagnostic> = []
-  let mut reported: Map<string, bool> = Map.new<string, bool>()
+  let mut reported: mut Map<string, bool> = Map.new<string, bool>()
 
   for group in world.groups {
-    let mut on_walk: Map<string, bool> = Map.new<string, bool>()
+    let mut on_walk: mut Map<string, bool> = Map.new<string, bool>()
     let mut path: Slice<string> = []
     let mut current = group.name
     loop {
@@ -316,7 +316,7 @@ fn cycle_error(
   entry: string,
   path: Slice<string>,
   world: ClassWorld,
-  mut reported: Map<string, bool>,
+  reported: mut Map<string, bool>,
 ) -> Diagnostic {
   let phase = BuildPhase.TypeCheck
   let mut members: Slice<string> = []
@@ -355,8 +355,8 @@ fn cycle_error(
 fn protocol_cycle_diags(world: ProtoWorld) -> Slice<Diagnostic> {
   let phase = BuildPhase.TypeCheck
   let mut diags: Slice<Diagnostic> = []
-  let mut visited: Map<string, bool> = Map.new<string, bool>()
-  let mut on_stack: Map<string, bool> = Map.new<string, bool>()
+  let mut visited: mut Map<string, bool> = Map.new<string, bool>()
+  let mut on_stack: mut Map<string, bool> = Map.new<string, bool>()
 
   for group in world.groups {
     if !visited[group.name] {
@@ -396,8 +396,8 @@ fn proto_cycle_dfs(
   name: string,
   path: Slice<string>,
   world: ProtoWorld,
-  mut visited: Map<string, bool>,
-  mut on_stack: Map<string, bool>,
+  visited: mut Map<string, bool>,
+  on_stack: mut Map<string, bool>,
 ) -> Option<Slice<string>> {
   visited[name] = true
   on_stack[name] = true
@@ -446,7 +446,7 @@ fn proto_cycle_dfs(
 fn collect_requirements(
   name: string,
   world: ProtoWorld,
-  mut visited: Map<string, bool>,
+  visited: mut Map<string, bool>,
 ) -> RequirementSet {
   if visited[name] {
     return RequirementSet { requirements: [], complete: true }
@@ -478,7 +478,7 @@ fn collect_requirements(
 // definition, and therefore its method surface, lives outside the project.
 fn resolve_ancestry(name: string, world: ClassWorld) -> AncestryChain {
   let mut ancestors: Slice<string> = []
-  let mut on_walk: Map<string, bool> = Map.new<string, bool>()
+  let mut on_walk: mut Map<string, bool> = Map.new<string, bool>()
   let mut current = name
   loop {
     let idx = world.index[current]
@@ -551,7 +551,7 @@ fn conformance_outcome(
       if pidx == 0 {
         out.indeterminate += 1
       } else {
-        let mut visited: Map<string, bool> = Map.new<string, bool>()
+        let mut visited: mut Map<string, bool> = Map.new<string, bool>()
         let set = collect_requirements(protocol_name, protocols, visited)
         let chain = resolve_ancestry(symbol.name, classes)
 
@@ -566,7 +566,7 @@ fn conformance_outcome(
             symbol.name,
             |category| f"{symbol.name}({category})",
           )
-          let mut checked: Map<string, bool> = Map.new<string, bool>()
+          let mut checked: mut Map<string, bool> = Map.new<string, bool>()
           let mut missing_here = 0
           for requirement in set.requirements {
             if !checked[requirement.key] {

@@ -88,7 +88,9 @@ pub struct SortedUnits {
 // Phase entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_topological_sort(ctx: Ref<BuildContext>) -> Result<SortedUnits, error> {
+pub fn run_topological_sort(
+  ctx: Ref<BuildContext>,
+) -> Result<SortedUnits, error> {
   let imports = match ctx.imports {
     Some(g) => g,
     None => return Err(errors.New("topological sort: import graph unavailable")),
@@ -128,7 +130,10 @@ pub fn run_topological_sort(ctx: Ref<BuildContext>) -> Result<SortedUnits, error
 // crosses capacity thresholds.  Provisioning to nodes.length() would
 // eliminate reallocations; Lisette's syntax for make([]string, 0, cap) is not
 // yet confirmed, so this is deferred as a future hardening step.
-fn kahn(nodes: Slice<string>, edges: Slice<ImportEdge>) -> Result<Slice<string>, error> {
+fn kahn(
+  nodes: Slice<string>,
+  edges: Slice<ImportEdge>,
+) -> Result<Slice<string>, error> {
   // in_degree[f]  = number of local prerequisites of f not yet emitted.
   // adjacency[f]  = files that import f; consulted when f is emitted to
   //                 unblock dependents in O(degree(f)) rather than O(|E|).
@@ -136,8 +141,8 @@ fn kahn(nodes: Slice<string>, edges: Slice<ImportEdge>) -> Result<Slice<string>,
   // Go maps return the zero value for absent keys: in_degree reads of
   // unimported files return 0 correctly; adjacency reads return nil, and
   // append(nil, item) is valid Go, so no initialisation pass is needed.
-  let mut in_degree: Map<string, int> = Map.new<string, int>()
-  let mut adjacency: Map<string, Slice<string>> = Map.new<string, Slice<string>>()
+  let mut in_degree: mut Map<string, int> = Map.new<string, int>()
+  let mut adjacency: mut Map<string, Slice<string>> = Map.new<string, Slice<string>>()
 
   for edge in edges {
     in_degree[edge.from] = in_degree[edge.from] + 1
@@ -227,9 +232,12 @@ fn kahn(nodes: Slice<string>, edges: Slice<ImportEdge>) -> Result<Slice<string>,
 //
 // visited and on_stack are Go maps (reference types); mutations are shared
 // across all recursive calls without Ref<> wrapping.
-fn find_cycle(residual: Slice<string>, edges: Slice<ImportEdge>) -> Slice<string> {
+fn find_cycle(
+  residual: Slice<string>,
+  edges: Slice<ImportEdge>,
+) -> Slice<string> {
   // Build a membership set for O(1) residual lookup during edge filtering.
-  let mut residual_set: Map<string, bool> = Map.new<string, bool>()
+  let mut residual_set: mut Map<string, bool> = Map.new<string, bool>()
   for path in residual {
     residual_set[path] = true
   }
@@ -237,15 +245,15 @@ fn find_cycle(residual: Slice<string>, edges: Slice<ImportEdge>) -> Slice<string
   // Filter edges once: retain only edges where both endpoints are residual.
   // The resulting adjacency map is the sole input to the DFS; the global
   // edge slice and residual slice are not consulted again after this point.
-  let mut residual_adj: Map<string, Slice<string>> = Map.new<string, Slice<string>>()
+  let mut residual_adj: mut Map<string, Slice<string>> = Map.new<string, Slice<string>>()
   for edge in edges {
     if residual_set[edge.from] && residual_set[edge.to] {
       residual_adj[edge.from] = residual_adj[edge.from].append(edge.to)
     }
   }
 
-  let mut visited: Map<string, bool> = Map.new<string, bool>()
-  let mut on_stack: Map<string, bool> = Map.new<string, bool>()
+  let mut visited: mut Map<string, bool> = Map.new<string, bool>()
+  let mut on_stack: mut Map<string, bool> = Map.new<string, bool>()
 
   for start in residual {
     if !visited[start] {
@@ -282,8 +290,8 @@ fn dfs_cycle(
   node: string,
   path: Slice<string>,
   residual_adj: Map<string, Slice<string>>,
-  mut visited: Map<string, bool>,
-  mut on_stack: Map<string, bool>,
+  visited: mut Map<string, bool>,
+  on_stack: mut Map<string, bool>,
 ) -> Option<Slice<string>> {
   visited[node] = true
   on_stack[node] = true

@@ -42,7 +42,7 @@ pub enum BuildPhase {
 // compile error.  This is the binding between declaration and execution.
 // variants() is synthesised by #[iterate]; run() enforces completeness.
 impl BuildPhase {
-  fn run(self, ctx: Ref<BuildContext>) -> Result<(), error> {
+  fn run(self, ctx: mut Ref<BuildContext>) -> Result<(), error> {
     match self {
       ValidateProjectStructure => {
         ctx.validation = Some(run_validate_project_structure(ctx)?)
@@ -205,7 +205,11 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
 // halt_message renders a phase halt with concrete Error diagnostics.  The
 // BuildResult still carries the full structured diagnostic slice; this string is
 // for callers that only surface the summary message.
-fn halt_message(phase: BuildPhase, error_total: int, diags: Slice<Diagnostic>) -> string {
+fn halt_message(
+  phase: BuildPhase,
+  error_total: int,
+  diags: Slice<Diagnostic>,
+) -> string {
   let mut lines: Slice<string> = [
     f"build halted: {error_total} error(s) in {phase_name(phase)}",
   ]

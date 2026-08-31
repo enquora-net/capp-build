@@ -241,7 +241,9 @@ struct AccessorSpec {
 // Phase entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_build_symbol_table(ctx: Ref<BuildContext>) -> Result<SymbolTable, error> {
+pub fn run_build_symbol_table(
+  ctx: Ref<BuildContext>,
+) -> Result<SymbolTable, error> {
   let phase = BuildPhase.BuildSymbolTable
 
   let parsed = match ctx.parsed {
@@ -261,7 +263,7 @@ pub fn run_build_symbol_table(ctx: Ref<BuildContext>) -> Result<SymbolTable, err
   // sorted.order and parsed.units name the same file set (phase 6 seeds its
   // node set from parsed.units), so a miss indicates a pipeline defect and is
   // surfaced as a warning rather than silently skipped.
-  let mut unit_index: Map<string, int> = Map.new<string, int>()
+  let mut unit_index: mut Map<string, int> = Map.new<string, int>()
   let mut slot = 0
   for unit in parsed.units {
     unit_index[unit.source.path] = slot + 1
@@ -475,7 +477,7 @@ fn harvest_class(
   let mut out = empty_harvest()
 
   let mut methods: Slice<MethodSymbol> = []
-  let mut occupied: Map<string, int> = Map.new<string, int>()
+  let mut occupied: mut Map<string, int> = Map.new<string, int>()
 
   for member in implementation.members {
     match member {
@@ -510,7 +512,7 @@ fn harvest_class(
 
   let mut ivars: Slice<IvarSymbol> = []
   if let Some(block) = implementation.ivars {
-    let mut seen: Map<string, int> = Map.new<string, int>()
+    let mut seen: mut Map<string, int> = Map.new<string, int>()
     let mut harvested = IvarHarvest { ivars: [], accessors: [], diags: [] }
     for member in block.members {
       harvested = match member {
@@ -587,8 +589,8 @@ fn instance_variable_harvest(
   into: IvarHarvest,
   variable: ObjjInstanceVariable,
   guards: Slice<PreprocGuard>,
-  mut occupied: Map<string, int>,
-  mut seen: Map<string, int>,
+  occupied: mut Map<string, int>,
+  seen: mut Map<string, int>,
   class_name: string,
   file: string,
 ) -> IvarHarvest {
@@ -637,8 +639,8 @@ fn preproc_ivar_harvest(
   into: IvarHarvest,
   block: PreprocIvarIfBlock,
   guards: Slice<PreprocGuard>,
-  mut occupied: Map<string, int>,
-  mut seen: Map<string, int>,
+  occupied: mut Map<string, int>,
+  seen: mut Map<string, int>,
   class_name: string,
   file: string,
 ) -> IvarHarvest {
@@ -680,8 +682,8 @@ fn ivar_item_harvest(
   into: IvarHarvest,
   item: PreprocIvarItem,
   guards: Slice<PreprocGuard>,
-  mut occupied: Map<string, int>,
-  mut seen: Map<string, int>,
+  occupied: mut Map<string, int>,
+  seen: mut Map<string, int>,
   class_name: string,
   file: string,
 ) -> IvarHarvest {
@@ -733,7 +735,10 @@ fn flag_into_spec(into: AccessorSpec, name: string) -> AccessorSpec {
   out
 }
 
-fn key_value_into_spec(into: AccessorSpec, pair: ObjjAccessorKeyValue) -> AccessorSpec {
+fn key_value_into_spec(
+  into: AccessorSpec,
+  pair: ObjjAccessorKeyValue,
+) -> AccessorSpec {
   let mut out = into
   match pair.key.text {
     "property" => out.property = accessor_name_string(pair.value),
@@ -770,7 +775,7 @@ fn default_setter_selector(property: string) -> string {
 // accessor pair, consistent with both-branches-recorded guard semantics.
 fn synthesize_accessors(
   field: ObjjFieldDefinition,
-  mut occupied: Map<string, int>,
+  occupied: mut Map<string, int>,
   guards: Slice<PreprocGuard>,
   file: string,
 ) -> Slice<MethodSymbol> {
@@ -972,7 +977,7 @@ fn duplicate_diags(harvest: Harvest) -> Slice<Diagnostic> {
   let phase = BuildPhase.BuildSymbolTable
   let mut diags: Slice<Diagnostic> = []
 
-  let mut class_site: Map<string, string> = Map.new<string, string>()
+  let mut class_site: mut Map<string, string> = Map.new<string, string>()
   for class_symbol in harvest.classes {
     if class_symbol.guards.is_empty() {
       let key = class_symbol.category.map_or(
@@ -1004,7 +1009,7 @@ fn duplicate_diags(harvest: Harvest) -> Slice<Diagnostic> {
     }
   }
 
-  let mut protocol_site: Map<string, string> = Map.new<string, string>()
+  let mut protocol_site: mut Map<string, string> = Map.new<string, string>()
   for protocol in harvest.protocols {
     if protocol.guards.is_empty() {
       let site = protocol_site[protocol.name]

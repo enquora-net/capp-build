@@ -168,7 +168,9 @@ enum PackageTypeResolution {
 // for fill, an unrecognised declaration is Unknown.  The plist stays ground
 // truth wherever it declares a recognised kind — inference fills only an
 // absent key, never overrides a declaration.
-fn resolve_package_type(content: string) -> (PackageTypeResolution, Slice<PlistPair>) {
+fn resolve_package_type(
+  content: string,
+) -> (PackageTypeResolution, Slice<PlistPair>) {
   plist_string(content, "CPBundlePackageType").map_or_else(
     || {
       let kind = infer_package_type()
@@ -220,7 +222,9 @@ fn ensure_plist_meta(content: string, root: string) -> PlistFixup {
 // (with a descriptive error) when the target is absent, dangling, or a file.
 // Returns Err with all defect messages accumulated so the developer sees the
 // full picture in one pass.
-fn validate_framework_roots(root: string) -> Result<FrameworkRoots, Slice<string>> {
+fn validate_framework_roots(
+  root: string,
+) -> Result<FrameworkRoots, Slice<string>> {
   let foundation = filepath.Join(root, "Frameworks", "Foundation")
   let app_kit = filepath.Join(root, "Frameworks", "AppKit")
 
@@ -253,7 +257,9 @@ fn validate_framework_roots(root: string) -> Result<FrameworkRoots, Slice<string
 // the required entry points exist.  All defects are accumulated before
 // returning so the developer sees the full picture.
 // Returns Err with all missing-element messages when any are absent.
-fn validate_application(root: string) -> Result<ApplicationDetails, Slice<string>> {
+fn validate_application(
+  root: string,
+) -> Result<ApplicationDetails, Slice<string>> {
   let mut errs: Slice<string> = []
 
   let fwk = match validate_framework_roots(root) {
@@ -293,7 +299,9 @@ fn validate_application(root: string) -> Result<ApplicationDetails, Slice<string
 // Phase entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<ValidationResult, error> {
+pub fn run_validate_project_structure(
+  ctx: mut Ref<BuildContext>,
+) -> Result<ValidationResult, error> {
   let phase = BuildPhase.ValidateProjectStructure
   let mut diags: Slice<Diagnostic> = []
   let root = ctx.root.path
@@ -397,7 +405,10 @@ pub fn run_validate_project_structure(ctx: Ref<BuildContext>) -> Result<Validati
 // only when no Error diagnostic is present.  Phases surface their own
 // diagnostics (the orchestrator gates on them but does not print them); a
 // validation Error here halts the pipeline via build()'s diagnostic gate.
-fn finish_validation(root: string, diags: Slice<Diagnostic>) -> Result<ValidationResult, error> {
+fn finish_validation(
+  root: string,
+  diags: Slice<Diagnostic>,
+) -> Result<ValidationResult, error> {
   let mut error_count = 0
   for d in diags {
     print_validation_diag(d)

@@ -25,7 +25,7 @@ pub struct SmokeResult {
 // smoke_cobra verifies the cobra interop boundary.
 // Proves that cobra.Command can be constructed and executed from Lisette.
 pub fn smoke_cobra() -> SmokeResult {
-  let mut cmd = cobra.Command {
+  let cmd = cobra.Command {
     Use: "smoke-cobra",
     Short: "cobra interop smoke test",
     ..,

@@ -55,7 +55,7 @@
 // emits no text, so payloads for files containing them are incomplete by
 // construction; the diagnostics say exactly what is missing.
 //
-// Text accumulation: every printer method takes a buf: Ref<strings.Builder>
+// Text accumulation: every printer method takes a buf: mut Ref<strings.Builder>
 // and writes directly to it, returning only Slice<Diagnostic>.  A single
 // Builder threads from print_js_program through every recursive call;
 // strings.Builder.String() is called once at the top to produce the payload.
@@ -85,7 +85,7 @@ pub fn print_js_program(
   symbols: Option<SymbolTable>,
   debug_dispatch: bool,
 ) -> JsPrinted {
-  let mut known_classes = Map.new<string, bool>()
+  let mut known_classes: mut Map<string, bool> = Map.new<string, bool>()
   if let Some(table) = symbols {
     for class_symbol in table.classes {
       known_classes[class_symbol.name] = true
@@ -94,15 +94,10 @@ pub fn print_js_program(
       known_classes[forward.name] = true
     }
   }
-  let mut top_receivers = ReceiverState { .. }
-  let p = JsPrint {
-    file,
-    symbols,
-    known_classes,
-    debug_dispatch,
-    receivers: Some(&top_receivers),
-    ..,
-  }
+  let mut top_receivers: mut Map<string, int> = Map.new<string, int>()
+  top_receivers["level"] = 0
+  top_receivers["max"] = 0
+  let p = JsPrint { file, symbols, known_classes, debug_dispatch, .. }
   let mut buf = strings.Builder { .. }
   if let Some(hash_bang) = program.hash_bang {
     write(&buf, hash_bang.text)
@@ -113,7 +108,7 @@ pub fn print_js_program(
   for i in 0..program.body.length() {
     diags = merge_diags(
       diags,
-      p.statement(&buf, program.body[i], "", i < prologue),
+      p.statement(&buf, top_receivers, program.body[i], "", i < prologue),
     )
   }
   JsPrinted { text: buf.String(), diags }
@@ -128,17 +123,36 @@ struct JsPrint {
   in_instance_method: bool,
   self_assigned: bool,
   locals: Slice<string>,
-  receivers: Option<Ref<ReceiverState>>,
 }
 
 struct ClassContext { name: string, ivars: Map<string, bool> }
 
-struct ReceiverState { level: int, max: int }
-
 // write appends s to buf, discarding the Partial return that
 // strings.Builder.WriteString always resolves to Ok.
-fn write(buf: Ref<strings.Builder>, s: string) {
+fn write(buf: mut Ref<strings.Builder>, s: string) {
   let _ = buf.WriteString(s)
+}
+
+// receiver_enter/receiver_exit track the live nesting depth of complex
+// (non-simple-receiver) ObjJ message/array/dictionary literals within one
+// function scope, so nested temp vars (___r1, ___r2, ...) don't collide.
+// receivers is owned by the function scope that is currently printing --
+// created fresh at print_js_program (top level) or at each new function
+// body (function_like/class_method/object_method/arrow/objj_method_entry)
+// -- and threaded as an ordinary parameter alongside buf, exactly as buf
+// itself threads the output Builder. It is never stored on JsPrint: a
+// mutable handle reached back out through a struct field loses its write
+// permission on read, so it must be passed, not stored.
+fn receiver_enter(receivers: mut Map<string, int>) -> int {
+  receivers["level"] = receivers["level"] + 1
+  if receivers["level"] > receivers["max"] {
+    receivers["max"] = receivers["level"]
+  }
+  receivers["level"]
+}
+
+fn receiver_exit(receivers: mut Map<string, int>) {
+  receivers["level"] = receivers["level"] - 1
 }
 
 fn indent_step() -> string {
@@ -339,23 +353,43 @@ fn is_use_strict(literal: StringLiteral) -> bool {
 impl JsPrint {
   fn statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: Statement,
     ind: string,
     is_directive: bool,
   ) -> Slice<Diagnostic> {
     match st {
-      Expression(es) => self.expression_statement(buf, es, ind, is_directive),
-      Declaration(declaration) => self.declaration(buf, declaration, ind),
-      BlockScope(block) => self.block(buf, block, ind, false, true, false),
-      If(if_st) => self.if_statement(buf, if_st, ind, false),
-      Switch(switch_st) => self.switch_statement(buf, switch_st, ind),
-      For(for_st) => self.for_statement(buf, for_st, ind),
-      ForIn(for_in) => self.for_in_statement(buf, for_in, ind),
-      While(while_st) => self.while_statement(buf, while_st, ind),
-      Do(do_st) => self.do_statement(buf, do_st, ind),
-      Try(try_st) => self.try_statement(buf, try_st, ind),
-      With(with_st) => self.with_statement(buf, with_st, ind),
+      Expression(es) => self.expression_statement(
+        buf,
+        receivers,
+        es,
+        ind,
+        is_directive,
+      ),
+      Declaration(declaration) => self.declaration(
+        buf,
+        receivers,
+        declaration,
+        ind,
+      ),
+      BlockScope(block) => self.block(
+        buf,
+        receivers,
+        block,
+        ind,
+        false,
+        true,
+        false,
+      ),
+      If(if_st) => self.if_statement(buf, receivers, if_st, ind, false),
+      Switch(switch_st) => self.switch_statement(buf, receivers, switch_st, ind),
+      For(for_st) => self.for_statement(buf, receivers, for_st, ind),
+      ForIn(for_in) => self.for_in_statement(buf, receivers, for_in, ind),
+      While(while_st) => self.while_statement(buf, receivers, while_st, ind),
+      Do(do_st) => self.do_statement(buf, receivers, do_st, ind),
+      Try(try_st) => self.try_statement(buf, receivers, try_st, ind),
+      With(with_st) => self.with_statement(buf, receivers, with_st, ind),
       Break(break_st) => {
         let label = break_st.label.map_or(
           "",
@@ -377,14 +411,14 @@ impl JsPrint {
         let mut diags: Slice<Diagnostic> = []
         if let Some(value) = return_st.value {
           write(buf, " ")
-          diags = self.expressions(buf, value, ind)
+          diags = self.expressions(buf, receivers, value, ind)
         }
         write(buf, ";\n")
         diags
       },
       Throw(throw_st) => {
         write(buf, ind + "throw ")
-        let diags = self.expressions(buf, throw_st.value.*, ind)
+        let diags = self.expressions(buf, receivers, throw_st.value.*, ind)
         write(buf, ";\n")
         diags
       },
@@ -394,14 +428,14 @@ impl JsPrint {
       },
       Labeled(labeled) => {
         write(buf, labeled.label.text + ": ")
-        self.statement(buf, labeled.body.*, ind, false)
+        self.statement(buf, receivers, labeled.body.*, ind, false)
       },
       Debugger(_) => {
         write(buf, ind + "debugger;\n")
         []
       },
       Import(import_st) => self.es_import(buf, import_st),
-      Export(export_st) => self.es_export(buf, export_st, ind),
+      Export(export_st) => self.es_export(buf, receivers, export_st, ind),
       ObjjImport(import_directive) => self.objj_import(buf, import_directive),
       ObjjGlobal(_) => [],
       ObjjClassForward(_) => [],
@@ -412,6 +446,7 @@ impl JsPrint {
       ObjjProtocol(protocol) => self.objj_protocol(buf, protocol),
       ObjjClassImpl(implementation) => self.objj_class_implementation(
         buf,
+        receivers,
         implementation,
       ),
       PreprocIf(preproc) => self.deferred(
@@ -427,7 +462,12 @@ impl JsPrint {
     }
   }
 
-  fn deferred(self, what: string, pending: string, pos: Position) -> Slice<Diagnostic> {
+  fn deferred(
+    self,
+    what: string,
+    pending: string,
+    pos: Position,
+  ) -> Slice<Diagnostic> {
     [
       diag_warn_at(
         BuildPhase.Compile,
@@ -441,19 +481,20 @@ impl JsPrint {
 
   fn expression_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: ExpressionStatement,
     ind: string,
     is_directive: bool,
   ) -> Slice<Diagnostic> {
     write(buf, ind)
     let diags = match st.expression.* {
-      Sequence(sequence) => self.sequence(buf, sequence, ind),
+      Sequence(sequence) => self.sequence(buf, receivers, sequence, ind),
       Single(e) => {
         if statement_needs_parens(e, is_directive) {
-          self.wrapped(buf, e, ind)
+          self.wrapped(buf, receivers, e, ind)
         } else {
-          self.expression(buf, e, ind)
+          self.expression(buf, receivers, e, ind)
         }
       },
     }
@@ -463,7 +504,8 @@ impl JsPrint {
 
   fn block(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     block: StatementBlock,
     content_ind: string,
     skip_indent: bool,
@@ -481,6 +523,7 @@ impl JsPrint {
           diags,
           self.block(
             buf,
+            receivers,
             inner,
             content_ind + indent_step(),
             false,
@@ -490,21 +533,17 @@ impl JsPrint {
         ),
         _ => diags = merge_diags(
           diags,
-          self.statement(buf, st, content_ind, i < prologue),
+          self.statement(buf, receivers, st, content_ind, i < prologue),
         ),
       }
     }
-    if end_of_scope {
-      if let Some(state) = self.receivers {
-        if state.max > 0 {
-          write(buf, content_ind + "var ")
-          for i in 0..state.max {
-            if i > 0 { write(buf, ", ") }
-            write(buf, f"___r{i + 1}")
-          }
-          write(buf, ";\n")
-        }
+    if end_of_scope && receivers["max"] > 0 {
+      write(buf, content_ind + "var ")
+      for i in 0..receivers["max"] {
+        if i > 0 { write(buf, ", ") }
+        write(buf, f"___r{i + 1}")
       }
+      write(buf, ";\n")
     }
     write(buf, outdent(content_ind))
     write(buf, "}")
@@ -514,14 +553,20 @@ impl JsPrint {
 
   fn if_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: IfStatement,
     ind: string,
     as_else: bool,
   ) -> Slice<Diagnostic> {
     if !as_else { write(buf, ind) }
     write(buf, "if (")
-    let mut diags = self.expressions(buf, st.condition.expression.*, ind)
+    let mut diags = self.expressions(
+      buf,
+      receivers,
+      st.condition.expression.*,
+      ind,
+    )
     write(buf, ")")
     let consequent_empty = match st.consequence.* {
       Empty(_) => true,
@@ -530,20 +575,35 @@ impl JsPrint {
     if !consequent_empty { write(buf, "\n") }
     diags = merge_diags(
       diags,
-      self.statement(buf, st.consequence.*, ind + indent_step(), false),
+      self.statement(
+        buf,
+        receivers,
+        st.consequence.*,
+        ind + indent_step(),
+        false,
+      ),
     )
     if let Some(alternative) = st.alternative {
       match alternative.body.* {
         If(nested) => {
           write(buf, ind + "else ")
-          diags = merge_diags(diags, self.if_statement(buf, nested, ind, true))
+          diags = merge_diags(
+            diags,
+            self.if_statement(buf, receivers, nested, ind, true),
+          )
         },
         Empty(_) => write(buf, ind + "else;\n"),
         _ => {
           write(buf, ind + "else\n")
           diags = merge_diags(
             diags,
-            self.statement(buf, alternative.body.*, ind + indent_step(), false),
+            self.statement(
+              buf,
+              receivers,
+              alternative.body.*,
+              ind + indent_step(),
+              false,
+            ),
           )
         },
       }
@@ -553,12 +613,13 @@ impl JsPrint {
 
   fn switch_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: SwitchStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, ind + "switch(")
-    let mut diags = self.expressions(buf, st.value.expression.*, ind)
+    let mut diags = self.expressions(buf, receivers, st.value.expression.*, ind)
     write(buf, ") {\n")
     let case_ind = ind + indent_step()
     for entry in st.body.entries {
@@ -567,13 +628,19 @@ impl JsPrint {
           write(buf, case_ind + "case ")
           diags = merge_diags(
             diags,
-            self.expressions(buf, case.value.*, case_ind),
+            self.expressions(buf, receivers, case.value.*, case_ind),
           )
           write(buf, ":\n")
           for body_st in case.body {
             diags = merge_diags(
               diags,
-              self.statement(buf, body_st, case_ind + indent_step(), false),
+              self.statement(
+                buf,
+                receivers,
+                body_st,
+                case_ind + indent_step(),
+                false,
+              ),
             )
           }
         },
@@ -582,7 +649,13 @@ impl JsPrint {
           for body_st in default.body {
             diags = merge_diags(
               diags,
-              self.statement(buf, body_st, case_ind + indent_step(), false),
+              self.statement(
+                buf,
+                receivers,
+                body_st,
+                case_ind + indent_step(),
+                false,
+              ),
             )
           }
         },
@@ -594,7 +667,8 @@ impl JsPrint {
 
   fn for_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: ForStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -605,6 +679,7 @@ impl JsPrint {
         diags,
         self.declarators_inline(
           buf,
+          receivers,
           lexical_kind_text(lexical.kind),
           lexical.declarators,
           ind,
@@ -612,21 +687,30 @@ impl JsPrint {
       ),
       Variable(variable) => diags = merge_diags(
         diags,
-        self.declarators_inline(buf, "var", variable.declarators, ind),
+        self.declarators_inline(
+          buf,
+          receivers,
+          "var",
+          variable.declarators,
+          ind,
+        ),
       ),
       Expression(exprs) => diags = merge_diags(
         diags,
-        self.for_init_expression(buf, exprs.*, ind),
+        self.for_init_expression(buf, receivers, exprs.*, ind),
       ),
       Empty(_) => (),
     }
     write(buf, "; ")
     if let ForCondition.Expression(exprs) = st.condition {
-      diags = merge_diags(diags, self.expressions(buf, exprs.*, ind))
+      diags = merge_diags(diags, self.expressions(buf, receivers, exprs.*, ind))
     }
     write(buf, "; ")
     if let Some(increment) = st.increment {
-      diags = merge_diags(diags, self.expressions(buf, increment, ind))
+      diags = merge_diags(
+        diags,
+        self.expressions(buf, receivers, increment, ind),
+      )
     }
     write(buf, ")")
     let body_empty = match st.body.* {
@@ -636,13 +720,14 @@ impl JsPrint {
     if !body_empty { write(buf, "\n") }
     merge_diags(
       diags,
-      self.statement(buf, st.body.*, ind + indent_step(), false),
+      self.statement(buf, receivers, st.body.*, ind + indent_step(), false),
     )
   }
 
   fn for_init_expression(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     exprs: Expressions,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -656,18 +741,19 @@ impl JsPrint {
           _ => false,
         }
         if bare_in {
-          self.wrapped(buf, e, ind)
+          self.wrapped(buf, receivers, e, ind)
         } else {
-          self.expression(buf, e, ind)
+          self.expression(buf, receivers, e, ind)
         }
       },
-      Sequence(sequence) => self.sequence(buf, sequence, ind),
+      Sequence(sequence) => self.sequence(buf, receivers, sequence, ind),
     }
   }
 
   fn for_in_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: ForInStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -682,28 +768,33 @@ impl JsPrint {
     } else {
       write(buf, ind + "for (")
     }
-    let mut diags = self.for_binding(buf, st.header.binding, ind)
+    let mut diags = self.for_binding(buf, receivers, st.header.binding, ind)
     let of_or_in = if is_of { " of " } else { " in " }
     write(buf, of_or_in)
-    diags = merge_diags(diags, self.expressions(buf, st.header.right.*, ind))
+    diags = merge_diags(
+      diags,
+      self.expressions(buf, receivers, st.header.right.*, ind),
+    )
     write(buf, ")\n")
     merge_diags(
       diags,
-      self.statement(buf, st.body.*, ind + indent_step(), false),
+      self.statement(buf, receivers, st.body.*, ind + indent_step(), false),
     )
   }
 
   fn for_binding(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     binding: ForBinding,
     ind: string,
   ) -> Slice<Diagnostic> {
     match binding {
       Plain(plain) => match plain.left {
-        Lhs(lhs) => self.lhs_expression_value(buf, lhs, ind),
+        Lhs(lhs) => self.lhs_expression_value(buf, receivers, lhs, ind),
         Parenthesized(parenthesized) => self.parenthesized(
           buf,
+          receivers,
           parenthesized,
           ind,
         ),
@@ -715,6 +806,7 @@ impl JsPrint {
           Identifier(identifier) => write(buf, identifier.text),
           Destructuring(pattern) => diags = self.destructuring(
             buf,
+            receivers,
             pattern,
             ind,
           ),
@@ -723,7 +815,7 @@ impl JsPrint {
           write(buf, " = ")
           diags = merge_diags(
             diags,
-            self.expression(buf, initializer.value.*, ind),
+            self.expression(buf, receivers, initializer.value.*, ind),
           )
         }
         diags
@@ -733,12 +825,13 @@ impl JsPrint {
 
   fn while_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: WhileStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, ind + "while (")
-    let diags = self.expressions(buf, st.condition.expression.*, ind)
+    let diags = self.expressions(buf, receivers, st.condition.expression.*, ind)
     write(buf, ")")
     let body_empty = match st.body.* {
       Empty(_) => true,
@@ -747,17 +840,29 @@ impl JsPrint {
     if !body_empty { write(buf, "\n") }
     merge_diags(
       diags,
-      self.statement(buf, st.body.*, ind + indent_step(), false),
+      self.statement(buf, receivers, st.body.*, ind + indent_step(), false),
     )
   }
 
-  fn do_statement(self, buf: Ref<strings.Builder>, st: DoStatement, ind: string) -> Slice<Diagnostic> {
+  fn do_statement(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    st: DoStatement,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     write(buf, ind + "do\n")
-    let mut diags = self.statement(buf, st.body.*, ind + indent_step(), false)
+    let mut diags = self.statement(
+      buf,
+      receivers,
+      st.body.*,
+      ind + indent_step(),
+      false,
+    )
     write(buf, ind + "while (")
     diags = merge_diags(
       diags,
-      self.expressions(buf, st.condition.expression.*, ind),
+      self.expressions(buf, receivers, st.condition.expression.*, ind),
     )
     write(buf, ");\n")
     diags
@@ -765,28 +870,31 @@ impl JsPrint {
 
   fn with_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: WithStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, ind + "with(")
-    let diags = self.expressions(buf, st.object.expression.*, ind)
+    let diags = self.expressions(buf, receivers, st.object.expression.*, ind)
     write(buf, ")\n")
     merge_diags(
       diags,
-      self.statement(buf, st.body.*, ind + indent_step(), false),
+      self.statement(buf, receivers, st.body.*, ind + indent_step(), false),
     )
   }
 
   fn try_statement(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: TryStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, ind + "try ")
     let mut diags = self.block(
       buf,
+      receivers,
       st.body,
       ind + indent_step(),
       true,
@@ -801,21 +909,37 @@ impl JsPrint {
           Identifier(identifier) => write(buf, identifier.text),
           Destructuring(pattern) => diags = merge_diags(
             diags,
-            self.destructuring(buf, pattern, ind),
+            self.destructuring(buf, receivers, pattern, ind),
           ),
         }
         write(buf, ") ")
       }
       diags = merge_diags(
         diags,
-        self.block(buf, handler.body, ind + indent_step(), true, false, false),
+        self.block(
+          buf,
+          receivers,
+          handler.body,
+          ind + indent_step(),
+          true,
+          false,
+          false,
+        ),
       )
     }
     if let Some(finalizer) = st.finalizer {
       write(buf, "\n" + ind + "finally ")
       diags = merge_diags(
         diags,
-        self.block(buf, finalizer.body, ind + indent_step(), true, false, false),
+        self.block(
+          buf,
+          receivers,
+          finalizer.body,
+          ind + indent_step(),
+          true,
+          false,
+          false,
+        ),
       )
     }
     write(buf, "\n")
@@ -824,13 +948,15 @@ impl JsPrint {
 
   fn declaration(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     declaration: Declaration,
     ind: string,
   ) -> Slice<Diagnostic> {
     match declaration {
       Function(function) => self.function_like(
         buf,
+        receivers,
         ind,
         Some(function.name),
         function.is_async,
@@ -841,6 +967,7 @@ impl JsPrint {
       ),
       GeneratorFunction(generator) => self.function_like(
         buf,
+        receivers,
         ind,
         Some(generator.name),
         generator.is_async,
@@ -851,6 +978,7 @@ impl JsPrint {
       ),
       Class(class) => self.class_like(
         buf,
+        receivers,
         Some(class.name),
         class.heritage,
         class.body,
@@ -859,26 +987,29 @@ impl JsPrint {
       ),
       Lexical(lexical) => self.variable_declaration(
         buf,
+        receivers,
         lexical_kind_text(lexical.kind),
         lexical.declarators,
         ind,
       ),
       Variable(variable) => self.variable_declaration(
         buf,
+        receivers,
         "var",
         variable.declarators,
         ind,
       ),
       Using(using) => {
         let kind = if using.is_await { "await using" } else { "using" }
-        self.variable_declaration(buf, kind, using.declarators, ind)
+        self.variable_declaration(buf, receivers, kind, using.declarators, ind)
       },
     }
   }
 
   fn variable_declaration(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     kind: string,
     declarators: Slice<VariableDeclarator>,
     ind: string,
@@ -888,7 +1019,10 @@ impl JsPrint {
     let mut first = true
     for declarator in declarators {
       if !first { write(buf, ",\n" + ind + "    ") }
-      diags = merge_diags(diags, self.declarator(buf, declarator, ind))
+      diags = merge_diags(
+        diags,
+        self.declarator(buf, receivers, declarator, ind),
+      )
       first = false
     }
     write(buf, ";\n")
@@ -897,7 +1031,8 @@ impl JsPrint {
 
   fn declarators_inline(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     kind: string,
     declarators: Slice<VariableDeclarator>,
     ind: string,
@@ -907,7 +1042,10 @@ impl JsPrint {
     let mut first = true
     for declarator in declarators {
       if !first { write(buf, ", ") }
-      diags = merge_diags(diags, self.declarator(buf, declarator, ind))
+      diags = merge_diags(
+        diags,
+        self.declarator(buf, receivers, declarator, ind),
+      )
       first = false
     }
     diags
@@ -915,25 +1053,35 @@ impl JsPrint {
 
   fn declarator(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     declarator: VariableDeclarator,
     ind: string,
   ) -> Slice<Diagnostic> {
     let mut diags: Slice<Diagnostic> = []
     match declarator.name {
       Identifier(identifier) => write(buf, identifier.text),
-      Destructuring(pattern) => diags = self.destructuring(buf, pattern, ind),
+      Destructuring(pattern) => diags = self.destructuring(
+        buf,
+        receivers,
+        pattern,
+        ind,
+      ),
     }
     if let Some(initializer) = declarator.initializer {
       write(buf, " = ")
-      diags = merge_diags(diags, self.expression(buf, initializer.value.*, ind))
+      diags = merge_diags(
+        diags,
+        self.expression(buf, receivers, initializer.value.*, ind),
+      )
     }
     diags
   }
 
   fn function_like(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     ind: string,
     name: Option<Identifier>,
     is_async: bool,
@@ -950,21 +1098,31 @@ impl JsPrint {
     if is_generator { keywords = keywords.append("*") }
     write(buf, strings.Join(keywords, " "))
     write(buf, "(")
-    let diags = self.formal_parameters(buf, parameters, ind)
+    let diags = self.formal_parameters(buf, receivers, parameters, ind)
     write(buf, ")\n")
-    let mut inner = &self
-    let mut dispatch_state = ReceiverState { .. }
-    inner.receivers = Some(&dispatch_state)
+    let mut inner = JsPrint { ..self }
+    let mut dispatch_state: mut Map<string, int> = Map.new<string, int>()
+    dispatch_state["level"] = 0
+    dispatch_state["max"] = 0
     inner.locals = function_scope_locals(self.locals, name, parameters, body)
     merge_diags(
       diags,
-      inner.block(buf, body, ind + indent_step(), false, is_declaration, true),
+      inner.block(
+        buf,
+        dispatch_state,
+        body,
+        ind + indent_step(),
+        false,
+        is_declaration,
+        true,
+      ),
     )
   }
 
   fn formal_parameters(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     parameters: FormalParameters,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -975,11 +1133,11 @@ impl JsPrint {
       match parameter {
         Pattern(pattern) => diags = merge_diags(
           diags,
-          self.pattern(buf, pattern, ind),
+          self.pattern(buf, receivers, pattern, ind),
         ),
         Assignment(assignment) => diags = merge_diags(
           diags,
-          self.assignment_pattern(buf, assignment, ind),
+          self.assignment_pattern(buf, receivers, assignment, ind),
         ),
       }
       first = false
@@ -989,7 +1147,8 @@ impl JsPrint {
 
   fn class_like(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     name: Option<Identifier>,
     heritage: Option<ClassHeritage>,
     body: ClassBody,
@@ -1002,29 +1161,38 @@ impl JsPrint {
     let mut diags: Slice<Diagnostic> = []
     if let Some(parent) = heritage {
       write(buf, " extends ")
-      diags = self.expression(buf, parent.parent.*, ind)
+      diags = self.expression(buf, receivers, parent.parent.*, ind)
     }
-    diags = merge_diags(diags, self.class_body(buf, body, ind + indent_step()))
+    diags = merge_diags(
+      diags,
+      self.class_body(buf, receivers, body, ind + indent_step()),
+    )
     if is_expression { write(buf, ")") }
     diags
   }
 
-  fn class_body(self, buf: Ref<strings.Builder>, body: ClassBody, ind: string) -> Slice<Diagnostic> {
+  fn class_body(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    body: ClassBody,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     write(buf, " {\n")
     let mut diags: Slice<Diagnostic> = []
     for member in body.members {
       match member {
         Method(method) => diags = merge_diags(
           diags,
-          self.class_method(buf, method, ind),
+          self.class_method(buf, receivers, method, ind),
         ),
         Field(field) => diags = merge_diags(
           diags,
-          self.field_definition(buf, field, ind),
+          self.field_definition(buf, receivers, field, ind),
         ),
         StaticBlock(static_block) => diags = merge_diags(
           diags,
-          self.static_block(buf, static_block, ind),
+          self.static_block(buf, receivers, static_block, ind),
         ),
       }
       write(buf, "\n")
@@ -1035,7 +1203,8 @@ impl JsPrint {
 
   fn class_method(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     method: MethodDefinition,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1054,16 +1223,17 @@ impl JsPrint {
     write(buf, ind)
     write(buf, strings.Join(keywords, " "))
     write(buf, " ")
-    let mut diags = self.property_name(buf, method.name, ind)
+    let mut diags = self.property_name(buf, receivers, method.name, ind)
     write(buf, "(")
     diags = merge_diags(
       diags,
-      self.formal_parameters(buf, method.parameters, ind),
+      self.formal_parameters(buf, receivers, method.parameters, ind),
     )
     write(buf, ")\n")
-    let mut inner = &self
-    let mut dispatch_state = ReceiverState { .. }
-    inner.receivers = Some(&dispatch_state)
+    let mut inner = JsPrint { ..self }
+    let mut dispatch_state: mut Map<string, int> = Map.new<string, int>()
+    dispatch_state["level"] = 0
+    dispatch_state["max"] = 0
     inner.locals = function_scope_locals(
       self.locals,
       None,
@@ -1072,22 +1242,34 @@ impl JsPrint {
     )
     merge_diags(
       diags,
-      inner.block(buf, method.body, ind + indent_step(), false, false, true),
+      inner.block(
+        buf,
+        dispatch_state,
+        method.body,
+        ind + indent_step(),
+        false,
+        false,
+        true,
+      ),
     )
   }
 
   fn field_definition(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     field: FieldDefinition,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, ind)
     if field.is_static { write(buf, "static ") }
-    let mut diags = self.property_name(buf, field.property, ind)
+    let mut diags = self.property_name(buf, receivers, field.property, ind)
     if let Some(initializer) = field.initializer {
       write(buf, " = ")
-      diags = merge_diags(diags, self.expression(buf, initializer.value.*, ind))
+      diags = merge_diags(
+        diags,
+        self.expression(buf, receivers, initializer.value.*, ind),
+      )
     }
     write(buf, ";")
     diags
@@ -1095,20 +1277,25 @@ impl JsPrint {
 
   fn static_block(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     static_block: ClassStaticBlock,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, ind + "static{")
     let mut diags: Slice<Diagnostic> = []
     for st in static_block.body.body {
-      diags = merge_diags(diags, self.statement(buf, st, ind, false))
+      diags = merge_diags(diags, self.statement(buf, receivers, st, ind, false))
     }
     write(buf, "}")
     diags
   }
 
-  fn es_import(self, buf: Ref<strings.Builder>, st: ImportStatement) -> Slice<Diagnostic> {
+  fn es_import(
+    self,
+    buf: mut Ref<strings.Builder>,
+    st: ImportStatement,
+  ) -> Slice<Diagnostic> {
     write(buf, "import ")
     let mut diags: Slice<Diagnostic> = []
     if let Some(clause) = st.clause {
@@ -1147,7 +1334,11 @@ impl JsPrint {
     diags
   }
 
-  fn named_imports(self, buf: Ref<strings.Builder>, named: NamedImports) -> Slice<Diagnostic> {
+  fn named_imports(
+    self,
+    buf: mut Ref<strings.Builder>,
+    named: NamedImports,
+  ) -> Slice<Diagnostic> {
     write(buf, "{")
     let mut first = true
     for specifier in named.specifiers {
@@ -1162,7 +1353,8 @@ impl JsPrint {
 
   fn es_export(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     st: ExportStatement,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1196,20 +1388,24 @@ impl JsPrint {
       },
       Declaration(declaration) => {
         write(buf, "export ")
-        self.declaration(buf, declaration, ind)
+        self.declaration(buf, receivers, declaration, ind)
       },
       DefaultDeclaration(declaration) => {
         write(buf, "export default ")
-        self.declaration(buf, declaration, ind)
+        self.declaration(buf, receivers, declaration, ind)
       },
       DefaultValue(e) => {
         write(buf, "export default ")
-        self.expression(buf, e, ind)
+        self.expression(buf, receivers, e, ind)
       },
     }
   }
 
-  fn objj_import(self, buf: Ref<strings.Builder>, st: ObjjImport) -> Slice<Diagnostic> {
+  fn objj_import(
+    self,
+    buf: mut Ref<strings.Builder>,
+    st: ObjjImport,
+  ) -> Slice<Diagnostic> {
     match st.path {
       System(lib) => {
         let length = lib.text.length()
@@ -1230,19 +1426,21 @@ impl JsPrint {
 
   fn expressions(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     exprs: Expressions,
     ind: string,
   ) -> Slice<Diagnostic> {
     match exprs {
-      Single(e) => self.expression(buf, e, ind),
-      Sequence(sequence) => self.sequence(buf, sequence, ind),
+      Single(e) => self.expression(buf, receivers, e, ind),
+      Sequence(sequence) => self.sequence(buf, receivers, sequence, ind),
     }
   }
 
   fn sequence(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     sequence: SequenceExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1251,37 +1449,45 @@ impl JsPrint {
     let mut first = true
     for item in sequence.items {
       if !first { write(buf, ", ") }
-      diags = merge_diags(diags, self.expression(buf, item, ind))
+      diags = merge_diags(diags, self.expression(buf, receivers, item, ind))
       first = false
     }
     write(buf, ")")
     diags
   }
 
-  fn expression(self, buf: Ref<strings.Builder>, e: Expression, ind: string) -> Slice<Diagnostic> {
+  fn expression(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    e: Expression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match e {
-      Primary(primary) => self.primary(buf, primary, ind),
-      Assignment(assignment) => self.assignment(buf, assignment, ind),
+      Primary(primary) => self.primary(buf, receivers, primary, ind),
+      Assignment(assignment) => self.assignment(buf, receivers, assignment, ind),
       AugmentedAssignment(augmented) => self.augmented_assignment(
         buf,
+        receivers,
         augmented,
         ind,
       ),
       Await(await_expr) => {
         write(buf, "await (")
-        let diags = self.expression(buf, await_expr.argument.*, ind)
+        let diags = self.expression(buf, receivers, await_expr.argument.*, ind)
         write(buf, ")")
         diags
       },
       Unary(unary) => {
         write(buf, unary_op_text(unary.operator))
         if unary_op_is_word(unary.operator) { write(buf, " ") }
-        self.operand(buf, 4, 0, false, unary.argument.*, false, ind)
+        self.operand(buf, receivers, 4, 0, false, unary.argument.*, false, ind)
       },
-      Binary(binary) => self.binary(buf, binary, ind),
+      Binary(binary) => self.binary(buf, receivers, binary, ind),
       Ternary(ternary) => {
         let mut diags = self.operand(
           buf,
+          receivers,
           7,
           0,
           false,
@@ -1292,20 +1498,40 @@ impl JsPrint {
         write(buf, " ? ")
         diags = merge_diags(
           diags,
-          self.expression(buf, ternary.consequence.*, ind),
+          self.expression(buf, receivers, ternary.consequence.*, ind),
         )
         write(buf, " : ")
-        merge_diags(diags, self.expression(buf, ternary.alternative.*, ind))
+        merge_diags(
+          diags,
+          self.expression(buf, receivers, ternary.alternative.*, ind),
+        )
       },
       Update(update) => {
         if let Some(deref) = expression_as_deref(update.argument.*) {
-          self.deref_update(buf, deref, update.operator, update.is_prefix, ind)
+          self.deref_update(
+            buf,
+            receivers,
+            deref,
+            update.operator,
+            update.is_prefix,
+            ind,
+          )
         } else if update.is_prefix {
           write(buf, update_op_text(update.operator))
-          self.operand(buf, 4, 0, false, update.argument.*, false, ind)
+          self.operand(
+            buf,
+            receivers,
+            4,
+            0,
+            false,
+            update.argument.*,
+            false,
+            ind,
+          )
         } else {
           let diags = self.operand(
             buf,
+            receivers,
             4,
             0,
             false,
@@ -1317,13 +1543,13 @@ impl JsPrint {
           diags
         }
       },
-      New(new_expr) => self.new_expression(buf, new_expr, ind),
+      New(new_expr) => self.new_expression(buf, receivers, new_expr, ind),
       Yield(yield_expr) => {
         write(buf, "yield")
         if yield_expr.is_delegate { write(buf, "*") }
         if let Some(argument) = yield_expr.argument {
           write(buf, " ")
-          self.expression(buf, argument.*, ind)
+          self.expression(buf, receivers, argument.*, ind)
         } else {
           []
         }
@@ -1333,7 +1559,8 @@ impl JsPrint {
 
   fn operand(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     parent_prec: int,
     parent_t: int,
     parent_is_operator: bool,
@@ -1348,22 +1575,29 @@ impl JsPrint {
       e,
       is_right,
     ) {
-      self.wrapped(buf, e, ind)
+      self.wrapped(buf, receivers, e, ind)
     } else {
-      self.expression(buf, e, ind)
+      self.expression(buf, receivers, e, ind)
     }
   }
 
-  fn wrapped(self, buf: Ref<strings.Builder>, e: Expression, ind: string) -> Slice<Diagnostic> {
+  fn wrapped(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    e: Expression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     write(buf, "(")
-    let diags = self.expression(buf, e, ind)
+    let diags = self.expression(buf, receivers, e, ind)
     write(buf, ")")
     diags
   }
 
   fn binary(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     binary: BinaryExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1386,10 +1620,11 @@ impl JsPrint {
           _ => false,
         }
         if nullish || exponent || left_is_arrow {
-          diags = self.wrapped(buf, left.*, ind)
+          diags = self.wrapped(buf, receivers, left.*, ind)
         } else {
           diags = self.operand(
             buf,
+            receivers,
             parent_prec,
             parent_t,
             true,
@@ -1402,12 +1637,13 @@ impl JsPrint {
     }
     write(buf, f" {binary_op_text(binary.operator)} ")
     if nullish {
-      merge_diags(diags, self.wrapped(buf, binary.right.*, ind))
+      merge_diags(diags, self.wrapped(buf, receivers, binary.right.*, ind))
     } else {
       merge_diags(
         diags,
         self.operand(
           buf,
+          receivers,
           parent_prec,
           parent_t,
           true,
@@ -1421,32 +1657,44 @@ impl JsPrint {
 
   fn assignment(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     assignment: AssignmentExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     match assignment {
       Standard(standard) => {
-        let diags = self.assignment_target(buf, standard.left, ind)
+        let diags = self.assignment_target(buf, receivers, standard.left, ind)
         write(buf, " = ")
         merge_diags(
           diags,
-          self.operand(buf, 8, 0, false, standard.right.*, true, ind),
+          self.operand(buf, receivers, 8, 0, false, standard.right.*, true, ind),
         )
       },
       ObjjDeref(deref) => {
         write(buf, "(")
-        let mut diags = self.expression(buf, deref.left.argument.*, ind)
+        let mut diags = self.expression(
+          buf,
+          receivers,
+          deref.left.argument.*,
+          ind,
+        )
         write(buf, ")(")
         if deref.operator == AssignmentOp.Assign {
-          diags = merge_diags(diags, self.expression(buf, deref.right.*, ind))
+          diags = merge_diags(
+            diags,
+            self.expression(buf, receivers, deref.right.*, ind),
+          )
         } else {
           diags = merge_diags(
             diags,
-            self.expression(buf, deref.left.argument.*, ind),
+            self.expression(buf, receivers, deref.left.argument.*, ind),
           )
           write(buf, "() " + assignment_op_char(deref.operator) + " ")
-          diags = merge_diags(diags, self.expression(buf, deref.right.*, ind))
+          diags = merge_diags(
+            diags,
+            self.expression(buf, receivers, deref.right.*, ind),
+          )
         }
         write(buf, ")")
         diags
@@ -1456,33 +1704,40 @@ impl JsPrint {
 
   fn assignment_target(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     target: AssignmentTarget,
     ind: string,
   ) -> Slice<Diagnostic> {
     match target {
       Parenthesized(parenthesized) => self.parenthesized(
         buf,
+        receivers,
         parenthesized.*,
         ind,
       ),
-      Lhs(lhs) => self.lhs_expression_value(buf, lhs.*, ind),
+      Lhs(lhs) => self.lhs_expression_value(buf, receivers, lhs.*, ind),
     }
   }
 
   fn lhs_expression_value(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     lhs: LhsExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     match lhs {
       Identifier(identifier) => self.identifier(buf, identifier),
-      _ => self.lhs_expression(buf, lhs, ind),
+      _ => self.lhs_expression(buf, receivers, lhs, ind),
     }
   }
 
-  fn identifier(self, buf: Ref<strings.Builder>, identifier: Identifier) -> Slice<Diagnostic> {
+  fn identifier(
+    self,
+    buf: mut Ref<strings.Builder>,
+    identifier: Identifier,
+  ) -> Slice<Diagnostic> {
     if self.in_instance_method && !reserved_identifier(identifier.text) && !self.is_local(
       identifier.text,
     ) {
@@ -1506,16 +1761,18 @@ impl JsPrint {
 
   fn augmented_assignment(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     augmented: AugmentedAssignmentExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     let diags = match augmented.left {
-      Member(member) => self.member(buf, member.*, ind),
-      Subscript(subscript) => self.subscript(buf, subscript.*, ind),
+      Member(member) => self.member(buf, receivers, member.*, ind),
+      Subscript(subscript) => self.subscript(buf, receivers, subscript.*, ind),
       Identifier(identifier) => self.identifier(buf, identifier),
       Parenthesized(parenthesized) => self.parenthesized(
         buf,
+        receivers,
         parenthesized.*,
         ind,
       ),
@@ -1523,13 +1780,14 @@ impl JsPrint {
     write(buf, f" {augmented_op_text(augmented.operator)} ")
     merge_diags(
       diags,
-      self.operand(buf, 8, 0, false, augmented.right.*, true, ind),
+      self.operand(buf, receivers, 8, 0, false, augmented.right.*, true, ind),
     )
   }
 
   fn new_expression(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     new_expr: NewExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1539,17 +1797,17 @@ impl JsPrint {
       Primary(primary) => {
         if 1 < primary_prec(primary.*) {
           write(buf, "(")
-          diags = self.primary(buf, primary.*, ind)
+          diags = self.primary(buf, receivers, primary.*, ind)
           write(buf, ")")
         } else {
-          diags = self.primary(buf, primary.*, ind)
+          diags = self.primary(buf, receivers, primary.*, ind)
         }
       },
-      New(nested) => diags = self.new_expression(buf, nested.*, ind),
+      New(nested) => diags = self.new_expression(buf, receivers, nested.*, ind),
     }
     write(buf, "(")
     if let Some(arguments) = new_expr.arguments {
-      diags = merge_diags(diags, self.arguments(buf, arguments, ind))
+      diags = merge_diags(diags, self.arguments(buf, receivers, arguments, ind))
     }
     write(buf, ")")
     diags
@@ -1557,15 +1815,17 @@ impl JsPrint {
 
   fn primary(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     primary: PrimaryExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     match primary {
-      Subscript(subscript) => self.subscript(buf, subscript, ind),
-      Member(member) => self.member(buf, member, ind),
+      Subscript(subscript) => self.subscript(buf, receivers, subscript, ind),
+      Member(member) => self.member(buf, receivers, member, ind),
       Parenthesized(parenthesized) => self.parenthesized(
         buf,
+        receivers,
         parenthesized,
         ind,
       ),
@@ -1590,7 +1850,7 @@ impl JsPrint {
         write(buf, literal.text)
         []
       },
-      Template(template) => self.template(buf, template, ind),
+      Template(template) => self.template(buf, receivers, template, ind),
       Regex(regex) => {
         let flags = regex.flags.map_or("", |regex_flags| regex_flags.text)
         write(buf, f"/{regex.pattern.text}/{flags}")
@@ -1608,9 +1868,10 @@ impl JsPrint {
         write(buf, "null")
         []
       },
-      Object(object) => self.object_literal(buf, object, ind),
+      Object(object) => self.object_literal(buf, receivers, object, ind),
       Function(function) => self.function_like(
         buf,
+        receivers,
         ind,
         function.name,
         function.is_async,
@@ -1619,9 +1880,10 @@ impl JsPrint {
         function.body,
         false,
       ),
-      Arrow(arrow) => self.arrow(buf, arrow, ind),
+      Arrow(arrow) => self.arrow(buf, receivers, arrow, ind),
       Generator(generator) => self.function_like(
         buf,
+        receivers,
         ind,
         generator.name,
         generator.is_async,
@@ -1632,6 +1894,7 @@ impl JsPrint {
       ),
       Class(class) => self.class_like(
         buf,
+        receivers,
         class.name,
         class.heritage,
         class.body,
@@ -1648,10 +1911,20 @@ impl JsPrint {
           []
         },
       },
-      Call(call) => self.call(buf, call, ind),
-      NativeArray(array) => self.array_literal(buf, array, ind),
-      ObjjDictionary(dictionary) => self.objj_dictionary(buf, dictionary, ind),
-      ObjjArray(array_literal) => self.objj_array(buf, array_literal, ind),
+      Call(call) => self.call(buf, receivers, call, ind),
+      NativeArray(array) => self.array_literal(buf, receivers, array, ind),
+      ObjjDictionary(dictionary) => self.objj_dictionary(
+        buf,
+        receivers,
+        dictionary,
+        ind,
+      ),
+      ObjjArray(array_literal) => self.objj_array(
+        buf,
+        receivers,
+        array_literal,
+        ind,
+      ),
       ObjjString(literal) => {
         write(buf, literal.value.text)
         []
@@ -1664,17 +1937,17 @@ impl JsPrint {
         write(buf, "objj_getProtocol(\"" + protocol.protocol.text + "\")")
         []
       },
-      ObjjMessage(message) => self.objj_message(buf, message, ind),
+      ObjjMessage(message) => self.objj_message(buf, receivers, message, ind),
       ObjjRef(reference) => {
         write(buf, "function(__input) { if (arguments.length) return ")
-        let diags = self.expression(buf, reference.argument.*, ind)
+        let diags = self.expression(buf, receivers, reference.argument.*, ind)
         write(buf, " = __input; return ")
-        let diags2 = self.expression(buf, reference.argument.*, ind)
+        let diags2 = self.expression(buf, receivers, reference.argument.*, ind)
         write(buf, "; }")
         merge_diags(diags, diags2)
       },
       ObjjDeref(dereference) => {
-        let diags = self.expression(buf, dereference.argument.*, ind)
+        let diags = self.expression(buf, receivers, dereference.argument.*, ind)
         write(buf, "()")
         diags
       },
@@ -1683,26 +1956,46 @@ impl JsPrint {
 
   fn subscript(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     subscript: SubscriptExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
-    let diags = self.operand(buf, 1, 0, false, subscript.object.*, false, ind)
+    let diags = self.operand(
+      buf,
+      receivers,
+      1,
+      0,
+      false,
+      subscript.object.*,
+      false,
+      ind,
+    )
     let bracket = if subscript.optional_chain { "?.[" } else { "[" }
     write(buf, bracket)
-    let diags2 = self.expressions(buf, subscript.index.*, ind)
+    let diags2 = self.expressions(buf, receivers, subscript.index.*, ind)
     write(buf, "]")
     merge_diags(diags, diags2)
   }
 
   fn member(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     member: MemberExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     let diags = match member.object {
-      Expression(object) => self.operand(buf, 1, 0, false, object.*, false, ind),
+      Expression(object) => self.operand(
+        buf,
+        receivers,
+        1,
+        0,
+        false,
+        object.*,
+        false,
+        ind,
+      ),
       Import(_) => {
         write(buf, "import")
         []
@@ -1719,19 +2012,26 @@ impl JsPrint {
 
   fn parenthesized(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     parenthesized: ParenthesizedExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     write(buf, "(")
-    let diags = self.expressions(buf, parenthesized.expression.*, ind)
+    let diags = self.expressions(
+      buf,
+      receivers,
+      parenthesized.expression.*,
+      ind,
+    )
     write(buf, ")")
     diags
   }
 
   fn template(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     template: TemplateString,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1745,7 +2045,7 @@ impl JsPrint {
           write(buf, "${")
           diags = merge_diags(
             diags,
-            self.expressions(buf, substitution.expression, ind),
+            self.expressions(buf, receivers, substitution.expression, ind),
           )
           write(buf, "}")
         },
@@ -1757,7 +2057,8 @@ impl JsPrint {
 
   fn object_literal(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     object: Object,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1768,20 +2069,26 @@ impl JsPrint {
       if !first { write(buf, ", ") }
       match member {
         Pair(pair) => {
-          diags = merge_diags(diags, self.property_name(buf, pair.key, ind))
+          diags = merge_diags(
+            diags,
+            self.property_name(buf, receivers, pair.key, ind),
+          )
           write(buf, ": ")
-          diags = merge_diags(diags, self.expression(buf, pair.value.*, ind))
+          diags = merge_diags(
+            diags,
+            self.expression(buf, receivers, pair.value.*, ind),
+          )
         },
         Spread(spread) => {
           write(buf, "...")
           diags = merge_diags(
             diags,
-            self.expression(buf, spread.argument.*, ind),
+            self.expression(buf, receivers, spread.argument.*, ind),
           )
         },
         Method(method) => diags = merge_diags(
           diags,
-          self.object_method(buf, method, ind),
+          self.object_method(buf, receivers, method, ind),
         ),
         Shorthand(identifier) => write(buf, identifier.text),
       }
@@ -1793,7 +2100,8 @@ impl JsPrint {
 
   fn object_method(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     method: MethodDefinition,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1812,16 +2120,17 @@ impl JsPrint {
     write(buf, prefix + ind)
     write(buf, strings.Join(keywords, " "))
     write(buf, " ")
-    let mut diags = self.property_name(buf, method.name, ind)
+    let mut diags = self.property_name(buf, receivers, method.name, ind)
     write(buf, "(")
     diags = merge_diags(
       diags,
-      self.formal_parameters(buf, method.parameters, ind),
+      self.formal_parameters(buf, receivers, method.parameters, ind),
     )
     write(buf, ")\n")
-    let mut inner = &self
-    let mut dispatch_state = ReceiverState { .. }
-    inner.receivers = Some(&dispatch_state)
+    let mut inner = JsPrint { ..self }
+    let mut dispatch_state: mut Map<string, int> = Map.new<string, int>()
+    dispatch_state["level"] = 0
+    dispatch_state["max"] = 0
     inner.locals = function_scope_locals(
       self.locals,
       None,
@@ -1830,13 +2139,22 @@ impl JsPrint {
     )
     merge_diags(
       diags,
-      inner.block(buf, method.body, ind + indent_step(), false, false, true),
+      inner.block(
+        buf,
+        dispatch_state,
+        method.body,
+        ind + indent_step(),
+        false,
+        false,
+        true,
+      ),
     )
   }
 
   fn property_name(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     name: PropertyName,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1859,7 +2177,7 @@ impl JsPrint {
       },
       Computed(computed) => {
         write(buf, "[")
-        let diags = self.expression(buf, computed.expression.*, ind)
+        let diags = self.expression(buf, receivers, computed.expression.*, ind)
         write(buf, "]")
         diags
       },
@@ -1873,7 +2191,8 @@ impl JsPrint {
 
   fn array_literal(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     array: NativeArray,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1885,13 +2204,13 @@ impl JsPrint {
       match element {
         Expression(e) => diags = merge_diags(
           diags,
-          self.expression(buf, e.*, ind),
+          self.expression(buf, receivers, e.*, ind),
         ),
         Spread(spread) => {
           write(buf, "...")
           diags = merge_diags(
             diags,
-            self.expression(buf, spread.argument.*, ind),
+            self.expression(buf, receivers, spread.argument.*, ind),
           )
         },
       }
@@ -1901,7 +2220,13 @@ impl JsPrint {
     diags
   }
 
-  fn arrow(self, buf: Ref<strings.Builder>, arrow: ArrowFunction, ind: string) -> Slice<Diagnostic> {
+  fn arrow(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    arrow: ArrowFunction,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     if arrow.is_async { write(buf, "async ") }
     let mut diags: Slice<Diagnostic> = []
     match arrow.parameters {
@@ -1910,40 +2235,56 @@ impl JsPrint {
         let bare = parameters.parameters.length() == 1 &&
         formal_parameter_is_plain_identifier(parameters.parameters[0])
         if bare {
-          diags = self.formal_parameters(buf, parameters, ind)
+          diags = self.formal_parameters(buf, receivers, parameters, ind)
         } else {
           write(buf, "(")
-          diags = self.formal_parameters(buf, parameters, ind)
+          diags = self.formal_parameters(buf, receivers, parameters, ind)
           write(buf, ")")
         }
       },
     }
     write(buf, " => ")
-    let mut inner = &self
-    let mut dispatch_state = ReceiverState { .. }
-    inner.receivers = Some(&dispatch_state)
+    let mut inner = JsPrint { ..self }
+    let mut dispatch_state: mut Map<string, int> = Map.new<string, int>()
+    dispatch_state["level"] = 0
+    dispatch_state["max"] = 0
     inner.locals = arrow_scope_locals(self.locals, arrow.parameters, arrow.body)
     match arrow.body {
       Expression(e) => {
         if arrow_body_needs_parens(e.*) {
-          merge_diags(diags, inner.wrapped(buf, e.*, ind))
+          merge_diags(diags, inner.wrapped(buf, dispatch_state, e.*, ind))
         } else {
-          merge_diags(diags, inner.expression(buf, e.*, ind))
+          merge_diags(diags, inner.expression(buf, dispatch_state, e.*, ind))
         }
       },
       Block(block) => merge_diags(
         diags,
-        inner.block(buf, block, ind + indent_step(), true, false, true),
+        inner.block(
+          buf,
+          dispatch_state,
+          block,
+          ind + indent_step(),
+          true,
+          false,
+          true,
+        ),
       ),
     }
   }
 
-  fn call(self, buf: Ref<strings.Builder>, call: CallExpression, ind: string) -> Slice<Diagnostic> {
+  fn call(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    call: CallExpression,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match call {
       Call(plain) => {
         let mut diags = match plain.callee {
           Expression(callee) => self.operand(
             buf,
+            receivers,
             1,
             0,
             false,
@@ -1957,7 +2298,10 @@ impl JsPrint {
           },
         }
         write(buf, "(")
-        diags = merge_diags(diags, self.arguments(buf, plain.arguments, ind))
+        diags = merge_diags(
+          diags,
+          self.arguments(buf, receivers, plain.arguments, ind),
+        )
         write(buf, ")")
         diags
       },
@@ -1965,29 +2309,36 @@ impl JsPrint {
         let mut diags: Slice<Diagnostic> = []
         if 1 < primary_prec(optional.callee.*) {
           write(buf, "(")
-          diags = self.primary(buf, optional.callee.*, ind)
+          diags = self.primary(buf, receivers, optional.callee.*, ind)
           write(buf, ")")
         } else {
-          diags = self.primary(buf, optional.callee.*, ind)
+          diags = self.primary(buf, receivers, optional.callee.*, ind)
         }
         write(buf, "?.(")
-        diags = merge_diags(diags, self.arguments(buf, optional.arguments, ind))
+        diags = merge_diags(
+          diags,
+          self.arguments(buf, receivers, optional.arguments, ind),
+        )
         write(buf, ")")
         diags
       },
       TemplateCall(template_call) => {
         let diags = match template_call.callee {
-          Primary(callee) => self.primary(buf, callee.*, ind),
-          New(callee) => self.new_expression(buf, callee.*, ind),
+          Primary(callee) => self.primary(buf, receivers, callee.*, ind),
+          New(callee) => self.new_expression(buf, receivers, callee.*, ind),
         }
-        merge_diags(diags, self.template(buf, template_call.arguments, ind))
+        merge_diags(
+          diags,
+          self.template(buf, receivers, template_call.arguments, ind),
+        )
       },
     }
   }
 
   fn arguments(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     arguments: Arguments,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -1998,13 +2349,13 @@ impl JsPrint {
       match item {
         Expression(e) => diags = merge_diags(
           diags,
-          self.expression(buf, e.*, ind),
+          self.expression(buf, receivers, e.*, ind),
         ),
         Spread(spread) => {
           write(buf, "...")
           diags = merge_diags(
             diags,
-            self.expression(buf, spread.argument.*, ind),
+            self.expression(buf, receivers, spread.argument.*, ind),
           )
         },
       }
@@ -2015,13 +2366,14 @@ impl JsPrint {
 
   fn lhs_expression(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     lhs: LhsExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
     match lhs {
-      Member(member) => self.member(buf, member.*, ind),
-      Subscript(subscript) => self.subscript(buf, subscript.*, ind),
+      Member(member) => self.member(buf, receivers, member.*, ind),
+      Subscript(subscript) => self.subscript(buf, receivers, subscript.*, ind),
       Identifier(identifier) => {
         write(buf, identifier.text)
         []
@@ -2030,46 +2382,60 @@ impl JsPrint {
         write(buf, "undefined")
         []
       },
-      Destructuring(pattern) => self.destructuring(buf, pattern.*, ind),
+      Destructuring(pattern) => self.destructuring(
+        buf,
+        receivers,
+        pattern.*,
+        ind,
+      ),
     }
   }
 
-  fn pattern(self, buf: Ref<strings.Builder>, pattern: Pattern, ind: string) -> Slice<Diagnostic> {
+  fn pattern(
+    self,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
+    pattern: Pattern,
+    ind: string,
+  ) -> Slice<Diagnostic> {
     match pattern {
-      Lhs(lhs) => self.lhs_expression(buf, lhs, ind),
+      Lhs(lhs) => self.lhs_expression(buf, receivers, lhs, ind),
       Rest(rest) => {
         write(buf, "...")
-        self.lhs_expression(buf, rest.argument.*, ind)
+        self.lhs_expression(buf, receivers, rest.argument.*, ind)
       },
     }
   }
 
   fn assignment_pattern(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     pattern: AssignmentPattern,
     ind: string,
   ) -> Slice<Diagnostic> {
-    let diags = self.pattern(buf, pattern.left.*, ind)
+    let diags = self.pattern(buf, receivers, pattern.left.*, ind)
     write(buf, " = ")
-    merge_diags(diags, self.expression(buf, pattern.right.*, ind))
+    merge_diags(diags, self.expression(buf, receivers, pattern.right.*, ind))
   }
 
   fn destructuring(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     pattern: DestructuringPattern,
     ind: string,
   ) -> Slice<Diagnostic> {
     match pattern {
-      Object(object) => self.object_pattern(buf, object, ind),
-      Array(array) => self.array_pattern(buf, array, ind),
+      Object(object) => self.object_pattern(buf, receivers, object, ind),
+      Array(array) => self.array_pattern(buf, receivers, array, ind),
     }
   }
 
   fn object_pattern(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     pattern: ObjectPattern,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -2080,16 +2446,19 @@ impl JsPrint {
       if !first { write(buf, ", ") }
       match member {
         Pair(pair) => {
-          diags = merge_diags(diags, self.property_name(buf, pair.key, ind))
+          diags = merge_diags(
+            diags,
+            self.property_name(buf, receivers, pair.key, ind),
+          )
           write(buf, ": ")
           match pair.value {
             Pattern(value) => diags = merge_diags(
               diags,
-              self.pattern(buf, value.*, ind),
+              self.pattern(buf, receivers, value.*, ind),
             ),
             Assignment(value) => diags = merge_diags(
               diags,
-              self.assignment_pattern(buf, value.*, ind),
+              self.assignment_pattern(buf, receivers, value.*, ind),
             ),
           }
         },
@@ -2097,7 +2466,7 @@ impl JsPrint {
           write(buf, "...")
           diags = merge_diags(
             diags,
-            self.lhs_expression(buf, rest.argument.*, ind),
+            self.lhs_expression(buf, receivers, rest.argument.*, ind),
           )
         },
         Assignment(assignment) => {
@@ -2105,13 +2474,13 @@ impl JsPrint {
             Shorthand(identifier) => write(buf, identifier.text),
             Destructuring(nested) => diags = merge_diags(
               diags,
-              self.destructuring(buf, nested.*, ind),
+              self.destructuring(buf, receivers, nested.*, ind),
             ),
           }
           write(buf, " = ")
           diags = merge_diags(
             diags,
-            self.expression(buf, assignment.right.*, ind),
+            self.expression(buf, receivers, assignment.right.*, ind),
           )
         },
         Shorthand(identifier) => write(buf, identifier.text),
@@ -2124,7 +2493,8 @@ impl JsPrint {
 
   fn array_pattern(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     pattern: ArrayPattern,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -2136,11 +2506,11 @@ impl JsPrint {
       match element {
         Pattern(value) => diags = merge_diags(
           diags,
-          self.pattern(buf, value.*, ind),
+          self.pattern(buf, receivers, value.*, ind),
         ),
         Assignment(value) => diags = merge_diags(
           diags,
-          self.assignment_pattern(buf, value.*, ind),
+          self.assignment_pattern(buf, receivers, value.*, ind),
         ),
       }
       first = false
@@ -2151,7 +2521,8 @@ impl JsPrint {
 
   fn objj_class_implementation(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     implementation: ObjjClassImplementation,
   ) -> Slice<Diagnostic> {
     let class_name = implementation.name.text
@@ -2213,7 +2584,7 @@ impl JsPrint {
       }
     }
 
-    let mut occupied = Map.new<string, bool>()
+    let mut occupied: mut Map<string, bool> = Map.new<string, bool>()
     for member in implementation.members {
       if let ObjjImplementationMember.Method(method) = member {
         if method.scope == ObjjMethodScope.Instance {
@@ -2298,12 +2669,19 @@ impl JsPrint {
         Empty(_) => write(buf, ";\n"),
         Variable(variable) => diags = merge_diags(
           diags,
-          p.variable_declaration(buf, "var", variable.declarators, ""),
+          p.variable_declaration(
+            buf,
+            receivers,
+            "var",
+            variable.declarators,
+            "",
+          ),
         ),
         Function(function) => diags = merge_diags(
           diags,
           p.function_like(
             buf,
+            receivers,
             "",
             Some(function.name),
             function.is_async,
@@ -2317,6 +2695,7 @@ impl JsPrint {
           diags,
           p.function_like(
             buf,
+            receivers,
             "",
             Some(generator.name),
             generator.is_async,
@@ -2356,8 +2735,11 @@ impl JsPrint {
     diags
   }
 
-  fn class_ivar_universe(self, implementation: ObjjClassImplementation) -> Map<string, bool> {
-    let mut ivars = Map.new<string, bool>()
+  fn class_ivar_universe(
+    self,
+    implementation: ObjjClassImplementation,
+  ) -> Map<string, bool> {
+    let mut ivars: mut Map<string, bool> = Map.new<string, bool>()
     if let Some(instance_variables) = implementation.ivars {
       for member in instance_variables.members {
         if let ObjjIvarMember.Variable(ObjjInstanceVariable.Field(field)) = member {
@@ -2399,13 +2781,14 @@ impl JsPrint {
   // message send and is deferred with tier C.
   fn synthesized_accessor_entries(
     self,
-    im_buf: Ref<strings.Builder>,
+    im_buf: mut Ref<strings.Builder>,
     field: ObjjFieldDefinition,
     class_name: string,
     type_name: string,
-    mut occupied: Map<string, bool>,
-    mut any: bool,
+    occupied: mut Map<string, bool>,
+    any: bool,
   ) -> Slice<Diagnostic> {
+    let mut any = any
     let Some(directive) = field.accessors else {
       return []
     }
@@ -2478,7 +2861,7 @@ impl JsPrint {
 
   fn objj_method_entry(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
     method: ObjjMethodDefinition,
     class_name: string,
   ) -> Slice<Diagnostic> {
@@ -2491,9 +2874,10 @@ impl JsPrint {
         params = params.append(part.parameter_name.text)
       }
     }
-    let mut inner = &self
-    let mut dispatch_state = ReceiverState { .. }
-    inner.receivers = Some(&dispatch_state)
+    let mut inner = JsPrint { ..self }
+    let mut dispatch_state: mut Map<string, int> = Map.new<string, int>()
+    dispatch_state["level"] = 0
+    dispatch_state["max"] = 0
     inner.in_instance_method = match method.scope {
       Instance => true,
       Class => false,
@@ -2512,7 +2896,15 @@ impl JsPrint {
       write(buf, ", " + param)
     }
     write(buf, ")\n")
-    let diags = inner.block(buf, method.body, indent_step(), false, true, true)
+    let diags = inner.block(
+      buf,
+      dispatch_state,
+      method.body,
+      indent_step(),
+      false,
+      true,
+      true,
+    )
     write(buf, "\n,[")
     write(buf, quoted_type_list(types))
     write(buf, "])")
@@ -2521,7 +2913,7 @@ impl JsPrint {
 
   fn objj_protocol(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
     declaration: ObjjProtocolDeclaration,
   ) -> Slice<Diagnostic> {
     let protocol_name = declaration.name.text
@@ -2588,7 +2980,8 @@ impl JsPrint {
 
   fn objj_message(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     message: ObjjMessageExpression,
     ind: string,
   ) -> Slice<Diagnostic> {
@@ -2603,7 +2996,7 @@ impl JsPrint {
         selector +
         "\"",
       )
-      let diags = self.trailing_arguments(buf, arguments, ind)
+      let diags = self.trailing_arguments(buf, receivers, arguments, ind)
       write(buf, ")")
       return diags
     }
@@ -2612,7 +3005,7 @@ impl JsPrint {
 
     if self.receiver_is_simple(message.receiver.*) {
       let mut r_buf = strings.Builder { .. }
-      let r_diags = self.expression(&r_buf, message.receiver.*, ind)
+      let r_diags = self.expression(&r_buf, receivers, message.receiver.*, ind)
       let r = r_buf.String()
       let guard = self.simple_receiver_guarded(message.receiver.*)
       if guard { write(buf, "(" + r + " == null ? " + r + " : ") }
@@ -2625,17 +3018,17 @@ impl JsPrint {
       write(buf, self.selector_argument(r, receiver_is_identifier, selector))
       let diags = merge_diags(
         r_diags,
-        self.trailing_arguments(buf, arguments, ind),
+        self.trailing_arguments(buf, receivers, arguments, ind),
       )
       write(buf, ")")
       if guard { write(buf, ")") }
       return diags
     }
 
-    let n = self.receiver_enter()
+    let n = receiver_enter(receivers)
     let temp = f"___r{n}"
     let mut r_buf = strings.Builder { .. }
-    let r_diags = self.expression(&r_buf, message.receiver.*, ind)
+    let r_diags = self.expression(&r_buf, receivers, message.receiver.*, ind)
     let r_text = r_buf.String()
     write(
       buf,
@@ -2651,10 +3044,10 @@ impl JsPrint {
     write(buf, self.selector_argument(r_text, receiver_is_identifier, selector))
     let diags = merge_diags(
       r_diags,
-      self.trailing_arguments(buf, arguments, ind),
+      self.trailing_arguments(buf, receivers, arguments, ind),
     )
     write(buf, "))")
-    self.receiver_exit()
+    receiver_exit(receivers)
     diags
   }
 
@@ -2677,14 +3070,15 @@ impl JsPrint {
 
   fn trailing_arguments(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     arguments: Slice<Expression>,
     ind: string,
   ) -> Slice<Diagnostic> {
     let mut diags: Slice<Diagnostic> = []
     for argument in arguments {
       write(buf, ", ")
-      diags = merge_diags(diags, self.expression(buf, argument, ind))
+      diags = merge_diags(diags, self.expression(buf, receivers, argument, ind))
     }
     diags
   }
@@ -2727,27 +3121,15 @@ impl JsPrint {
     self.is_local(name) || !self.known_classes[name]
   }
 
-  fn receiver_enter(self) -> int {
-    let Some(state) = self.receivers else {
-      return 1
-    }
-    state.level += 1
-    if state.level > state.max { state.max = state.level }
-    state.level
-  }
-
-  fn receiver_exit(self) {
-    if let Some(state) = self.receivers { state.level -= 1 }
-  }
-
   fn objj_array(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     literal: ObjjArrayLiteral,
     ind: string,
   ) -> Slice<Diagnostic> {
     let elements = literal.array.elements
-    let n = self.receiver_enter()
+    let n = receiver_enter(receivers)
     let temp = f"___r{n}"
     self.alloc_head_write(buf, temp, "CPArray")
     let diags = if elements.is_empty() {
@@ -2762,13 +3144,13 @@ impl JsPrint {
         match element {
           Expression(e) => items_diags = merge_diags(
             items_diags,
-            self.expression(&items_buf, e.*, ind),
+            self.expression(&items_buf, receivers, e.*, ind),
           ),
           Spread(spread) => {
             let _ = items_buf.WriteString("...")
             items_diags = merge_diags(
               items_diags,
-              self.expression(&items_buf, spread.argument.*, ind),
+              self.expression(&items_buf, receivers, spread.argument.*, ind),
             )
           },
         }
@@ -2785,17 +3167,18 @@ impl JsPrint {
       items_diags
     }
     write(buf, ")")
-    self.receiver_exit()
+    receiver_exit(receivers)
     diags
   }
 
   fn objj_dictionary(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     literal: ObjjDictionaryLiteral,
     ind: string,
   ) -> Slice<Diagnostic> {
-    let n = self.receiver_enter()
+    let n = receiver_enter(receivers)
     let temp = f"___r{n}"
     self.alloc_head_write(buf, temp, "CPDictionary")
     let diags = if literal.pairs.is_empty() {
@@ -2813,11 +3196,11 @@ impl JsPrint {
         }
         all_diags = merge_diags(
           all_diags,
-          self.expression(&values_buf, pair.value.*, ind),
+          self.expression(&values_buf, receivers, pair.value.*, ind),
         )
         all_diags = merge_diags(
           all_diags,
-          self.expression(&keys_buf, pair.key.*, ind),
+          self.expression(&keys_buf, receivers, pair.key.*, ind),
         )
         first = false
       }
@@ -2832,13 +3215,13 @@ impl JsPrint {
       all_diags
     }
     write(buf, ")")
-    self.receiver_exit()
+    receiver_exit(receivers)
     diags
   }
 
   fn alloc_head_write(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
     temp: string,
     class_name: string,
   ) {
@@ -2868,7 +3251,8 @@ impl JsPrint {
 
   fn deref_update(
     self,
-    buf: Ref<strings.Builder>,
+    buf: mut Ref<strings.Builder>,
+    receivers: mut Map<string, int>,
     deref: ObjjDerefExpression,
     operator: UpdateOp,
     is_prefix: bool,
@@ -2881,9 +3265,12 @@ impl JsPrint {
     let core_open = if is_prefix { "(" } else { "((" }
     write(buf, core_open)
     write(buf, "(")
-    let mut diags = self.expression(buf, deref.argument.*, ind)
+    let mut diags = self.expression(buf, receivers, deref.argument.*, ind)
     write(buf, ")(")
-    diags = merge_diags(diags, self.expression(buf, deref.argument.*, ind))
+    diags = merge_diags(
+      diags,
+      self.expression(buf, receivers, deref.argument.*, ind),
+    )
     write(buf, "() " + op + " 1)")
     if !is_prefix {
       let undo = match operator {
@@ -2984,7 +3371,7 @@ fn reserved_identifier(name: string) -> bool {
   name == "arguments"
 }
 
-fn objj_typedef_write(buf: Ref<strings.Builder>, name: string) {
+fn objj_typedef_write(buf: mut Ref<strings.Builder>, name: string) {
   write(
     buf,
     "{var the_typedef = objj_allocateTypeDef(\"" + name +
@@ -3242,7 +3629,11 @@ fn block_declared_names(block: StatementBlock) -> Slice<string> {
   names
 }
 
-fn statement_declared_names(st: Statement, mut names: Slice<string>) -> Slice<string> {
+fn statement_declared_names(
+  st: Statement,
+  names: Slice<string>,
+) -> Slice<string> {
+  let mut names = names
   match st {
     Declaration(declaration) => match declaration {
       Function(function) => names.append(function.name.text),
@@ -3341,8 +3732,9 @@ fn statement_declared_names(st: Statement, mut names: Slice<string>) -> Slice<st
 
 fn declarator_names(
   declarators: Slice<VariableDeclarator>,
-  mut names: Slice<string>,
+  names: Slice<string>,
 ) -> Slice<string> {
+  let mut names = names
   for declarator in declarators {
     match declarator.name {
       Identifier(identifier) => names = names.append(identifier.text),
@@ -3355,7 +3747,10 @@ fn declarator_names(
   names
 }
 
-fn pattern_declared_names(pattern: Pattern, mut names: Slice<string>) -> Slice<string> {
+fn pattern_declared_names(
+  pattern: Pattern,
+  names: Slice<string>,
+) -> Slice<string> {
   match pattern {
     Lhs(lhs) => match lhs {
       Identifier(identifier) => names.append(identifier.text),
@@ -3374,8 +3769,9 @@ fn pattern_declared_names(pattern: Pattern, mut names: Slice<string>) -> Slice<s
 
 fn destructuring_declared_names(
   pattern: DestructuringPattern,
-  mut names: Slice<string>,
+  names: Slice<string>,
 ) -> Slice<string> {
+  let mut names = names
   match pattern {
     Object(object) => {
       for member in object.members {

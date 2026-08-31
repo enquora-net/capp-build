@@ -112,7 +112,10 @@ fn skippable(kind: string) -> bool {
   kind == capp.NodeKindComment
 }
 
-fn merge_diags(into: Slice<Diagnostic>, from: Slice<Diagnostic>) -> Slice<Diagnostic> {
+fn merge_diags(
+  into: Slice<Diagnostic>,
+  from: Slice<Diagnostic>,
+) -> Slice<Diagnostic> {
   let mut out = into.clone()
   for d in from {
     out = out.append(d)
@@ -168,7 +171,12 @@ impl Lowering {
   // unhandled records a coverage gap: a node reached by a dispatch with no
   // implementing arm.  `what` names the dispatch site, so the diagnostic reads
   // "unhandled statement kind 'with_statement'" rather than a bare kind.
-  fn unhandled(self, node: capp.CSTNode, what: string, kind: string) -> Slice<Diagnostic> {
+  fn unhandled(
+    self,
+    node: capp.CSTNode,
+    what: string,
+    kind: string,
+  ) -> Slice<Diagnostic> {
     let pos = node_pos(node)
     [
       diag_warn_at(
@@ -201,7 +209,10 @@ impl Lowering {
   // Statements
   // -------------------------------------------------------------------------
 
-  fn statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let kind = node.Kind()
     let pos = node_pos(node)
 
@@ -295,7 +306,10 @@ impl Lowering {
     (None, self.unhandled(node, "statement", kind))
   }
 
-  fn objj_import(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn objj_import(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     match node.ChildByFieldName(capp.FieldPath) {
       None => (None, self.malformed(node, "@import without path")),
@@ -319,7 +333,10 @@ impl Lowering {
     }
   }
 
-  fn expression_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn expression_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     // expression_statement holds exactly one named child: an expression or a
     // sequence_expression (the _expressions hidden choice).
@@ -340,7 +357,10 @@ impl Lowering {
     (None, self.malformed(node, "expression statement without expression"))
   }
 
-  fn return_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn return_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut value: Option<Expressions> = None
     let mut diags: Slice<Diagnostic> = []
@@ -355,7 +375,10 @@ impl Lowering {
     (Some(Statement.Return(ReturnStatement { value, pos })), diags)
   }
 
-  fn statement_block(self, node: capp.CSTNode) -> (StatementBlock, Slice<Diagnostic>) {
+  fn statement_block(
+    self,
+    node: capp.CSTNode,
+  ) -> (StatementBlock, Slice<Diagnostic>) {
     let mut body: Slice<Statement> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -375,7 +398,12 @@ impl Lowering {
   // paren_field lowers a required parenthesized_expression field — the
   // header shape shared by if/while/do/switch/with.  `what` names the
   // absence for the malformed diagnostic.
-  fn paren_field(self, node: capp.CSTNode, field: string, what: string) -> (Option<ParenthesizedExpression>, Slice<Diagnostic>) {
+  fn paren_field(
+    self,
+    node: capp.CSTNode,
+    field: string,
+    what: string,
+  ) -> (Option<ParenthesizedExpression>, Slice<Diagnostic>) {
     node
       .ChildByFieldName(field)
       .map_or_else(
@@ -386,7 +414,12 @@ impl Lowering {
 
   // statement_field lowers a required statement-valued field — loop and
   // clause bodies.
-  fn statement_field(self, node: capp.CSTNode, field: string, what: string) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn statement_field(
+    self,
+    node: capp.CSTNode,
+    field: string,
+    what: string,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     node
       .ChildByFieldName(field)
       .map_or_else(
@@ -395,7 +428,10 @@ impl Lowering {
       )
   }
 
-  fn if_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn if_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -436,7 +472,10 @@ impl Lowering {
   }
 
   // else_clause holds its statement as the single unfielded named child.
-  fn else_clause(self, node: capp.CSTNode) -> (Option<ElseClause>, Slice<Diagnostic>) {
+  fn else_clause(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ElseClause>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -450,7 +489,10 @@ impl Lowering {
     (None, self.malformed(node, "else without body"))
   }
 
-  fn while_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn while_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -478,7 +520,10 @@ impl Lowering {
     (Some(Statement.While(lowered)), diags)
   }
 
-  fn do_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn do_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -506,7 +551,10 @@ impl Lowering {
     (Some(Statement.Do(lowered)), diags)
   }
 
-  fn with_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn with_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -534,7 +582,10 @@ impl Lowering {
     (Some(Statement.With(lowered)), diags)
   }
 
-  fn labeled_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn labeled_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let label_node = match node.ChildByFieldName(capp.FieldLabel) {
@@ -564,7 +615,10 @@ impl Lowering {
 
   // throw_statement holds its value as the single unfielded named child: an
   // expression or sequence.
-  fn throw_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn throw_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -579,7 +633,10 @@ impl Lowering {
     (None, self.malformed(node, "throw without value"))
   }
 
-  fn switch_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn switch_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -634,7 +691,10 @@ impl Lowering {
   // tree order; the body is a multiple-valued field, so with first-match
   // field access the first non-comment named child is taken as the value
   // and the remainder as body statements.
-  fn switch_case(self, node: capp.CSTNode) -> (Option<SwitchCase>, Slice<Diagnostic>) {
+  fn switch_case(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<SwitchCase>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
     let mut value: Option<Expressions> = None
@@ -666,7 +726,10 @@ impl Lowering {
     (Some(SwitchCase { value: &case_value, body, pos }), diags)
   }
 
-  fn switch_default(self, node: capp.CSTNode) -> (SwitchDefault, Slice<Diagnostic>) {
+  fn switch_default(
+    self,
+    node: capp.CSTNode,
+  ) -> (SwitchDefault, Slice<Diagnostic>) {
     let mut body: Slice<Statement> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -679,7 +742,10 @@ impl Lowering {
     (SwitchDefault { body, pos: node_pos(node) }, diags)
   }
 
-  fn for_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn for_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -753,7 +819,10 @@ impl Lowering {
     (Some(Statement.For(lowered)), diags)
   }
 
-  fn for_initializer(self, node: capp.CSTNode) -> (Option<ForInitializer>, Slice<Diagnostic>) {
+  fn for_initializer(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ForInitializer>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindEmptyStatement {
       return (
@@ -790,7 +859,10 @@ impl Lowering {
   // scan, where each is unambiguous.  `await using` declarations inside
   // for-headers are not distinguished from `for await (using ...)`; the
   // corpus contains neither.
-  fn for_in_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn for_in_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -911,7 +983,10 @@ impl Lowering {
     (Some(Statement.ForIn(lowered)), diags)
   }
 
-  fn try_statement(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn try_statement(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -944,7 +1019,10 @@ impl Lowering {
     (Some(Statement.Try(lowered)), diags)
   }
 
-  fn catch_clause(self, node: capp.CSTNode) -> (Option<CatchClause>, Slice<Diagnostic>) {
+  fn catch_clause(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<CatchClause>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -977,7 +1055,10 @@ impl Lowering {
     (Some(CatchClause { parameter, body, pos }), diags)
   }
 
-  fn finally_clause(self, node: capp.CSTNode) -> (Option<FinallyClause>, Slice<Diagnostic>) {
+  fn finally_clause(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<FinallyClause>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -993,7 +1074,10 @@ impl Lowering {
 
   // function_declaration lowers to the bare FunctionDeclaration so that both
   // the statement arm and ObjjImplementationMember.Function can wrap it.
-  fn function_declaration(self, node: capp.CSTNode) -> (Option<FunctionDeclaration>, Slice<Diagnostic>) {
+  fn function_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<FunctionDeclaration>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_async = has_anonymous_child(node, "async")
 
@@ -1029,7 +1113,10 @@ impl Lowering {
   // trip on the hot path; everything else — rest, object/array destructuring
   // — goes through pattern(), and a default value (`= expr`) goes through
   // assignment_pattern_struct.
-  fn formal_parameters(self, node: capp.CSTNode) -> (FormalParameters, Slice<Diagnostic>) {
+  fn formal_parameters(
+    self,
+    node: capp.CSTNode,
+  ) -> (FormalParameters, Slice<Diagnostic>) {
     let mut parameters: Slice<FormalParameter> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -1060,7 +1147,10 @@ impl Lowering {
 
   // variable_declaration lowers `var d, d, ...;` — the declarators are the
   // named children.
-  fn variable_declaration(self, node: capp.CSTNode) -> (Option<VariableDeclaration>, Slice<Diagnostic>) {
+  fn variable_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<VariableDeclaration>, Slice<Diagnostic>) {
     let (declarators, diags) = self.declarators(node)
     if declarators.is_empty() {
       return (
@@ -1076,7 +1166,10 @@ impl Lowering {
 
   // lexical_declaration lowers `let|const d, d, ...;`.  The kind field holds
   // the anonymous keyword token.
-  fn lexical_declaration(self, node: capp.CSTNode) -> (Option<LexicalDeclaration>, Slice<Diagnostic>) {
+  fn lexical_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<LexicalDeclaration>, Slice<Diagnostic>) {
     let kind = match node.ChildByFieldName(capp.FieldKind) {
       Some(kind_node) => {
         if kind_node.Text() == "const" {
@@ -1103,7 +1196,10 @@ impl Lowering {
     (Some(LexicalDeclaration { kind, declarators, pos: node_pos(node) }), diags)
   }
 
-  fn declarators(self, node: capp.CSTNode) -> (Slice<VariableDeclarator>, Slice<Diagnostic>) {
+  fn declarators(
+    self,
+    node: capp.CSTNode,
+  ) -> (Slice<VariableDeclarator>, Slice<Diagnostic>) {
     let mut declarators: Slice<VariableDeclarator> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -1127,7 +1223,10 @@ impl Lowering {
   // grammar has no initializer node, so Initializer.pos anchors at the value
   // expression.  An unhandled initializer expression records its diagnostic
   // and leaves the declarator bare rather than discarding it.
-  fn variable_declarator(self, node: capp.CSTNode) -> (Option<VariableDeclarator>, Slice<Diagnostic>) {
+  fn variable_declarator(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<VariableDeclarator>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -1168,7 +1267,10 @@ impl Lowering {
 
   // expressions lowers the _expressions position: one expression or a comma
   // sequence.
-  fn expressions(self, node: capp.CSTNode) -> (Option<Expressions>, Slice<Diagnostic>) {
+  fn expressions(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expressions>, Slice<Diagnostic>) {
     if node.Kind() == capp.NodeKindSequenceExpression {
       let mut items: Slice<Expression> = []
       let mut diags: Slice<Diagnostic> = []
@@ -1190,7 +1292,10 @@ impl Lowering {
     (Some(Expressions.Single(expr)), diags)
   }
 
-  fn expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let kind = node.Kind()
     let pos = node_pos(node)
 
@@ -1422,7 +1527,10 @@ impl Lowering {
     (None, self.unhandled(node, "expression", kind))
   }
 
-  fn parenthesized(self, node: capp.CSTNode) -> (Option<ParenthesizedExpression>, Slice<Diagnostic>) {
+  fn parenthesized(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ParenthesizedExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -1436,7 +1544,10 @@ impl Lowering {
     (None, self.malformed(node, "parenthesized expression without content"))
   }
 
-  fn string_literal(self, node: capp.CSTNode) -> (StringLiteral, Slice<Diagnostic>) {
+  fn string_literal(
+    self,
+    node: capp.CSTNode,
+  ) -> (StringLiteral, Slice<Diagnostic>) {
     let mut parts: Slice<StringPart> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -1460,7 +1571,10 @@ impl Lowering {
     (StringLiteral { parts, text: node.Text(), pos: node_pos(node) }, diags)
   }
 
-  fn call_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn call_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     // Optional-chain calls (f?.()) and template calls (f`...`) are distinct
@@ -1527,7 +1641,10 @@ impl Lowering {
     (Arguments { items, pos: node_pos(node) }, diags)
   }
 
-  fn spread(self, node: capp.CSTNode) -> (Option<SpreadElement>, Slice<Diagnostic>) {
+  fn spread(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<SpreadElement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -1544,7 +1661,10 @@ impl Lowering {
   // member_expression is the dispatch wrapper; member_expr_struct is the
   // bare producer reused by assignment targets, new constructors, and for-in
   // bindings, which need MemberExpression rather than the wrapped Expression.
-  fn member_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn member_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let (member_opt, diags) = self.member_expr_struct(node)
     let Some(member) = member_opt else {
       return (None, diags)
@@ -1552,7 +1672,10 @@ impl Lowering {
     (Some(Expression.Primary(PrimaryExpression.Member(member))), diags)
   }
 
-  fn member_expr_struct(self, node: capp.CSTNode) -> (Option<MemberExpression>, Slice<Diagnostic>) {
+  fn member_expr_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<MemberExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let object_node = match node.ChildByFieldName(capp.FieldObject) {
@@ -1602,7 +1725,10 @@ impl Lowering {
 
   // subscript_expr_struct is the bare producer for o[i].  index is an
   // expression or sequence, so it lowers through `expressions`.
-  fn subscript_expr_struct(self, node: capp.CSTNode) -> (Option<SubscriptExpression>, Slice<Diagnostic>) {
+  fn subscript_expr_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<SubscriptExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -1738,7 +1864,10 @@ impl Lowering {
     }
   }
 
-  fn binary_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn binary_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -1798,7 +1927,10 @@ impl Lowering {
     (Some(Expression.Binary(lowered)), diags)
   }
 
-  fn unary_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn unary_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
@@ -1825,7 +1957,10 @@ impl Lowering {
     (Some(Expression.Unary(lowered)), diags)
   }
 
-  fn ternary_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn ternary_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -1876,7 +2011,10 @@ impl Lowering {
 
   // update_expression: ++x / x++.  The grammar does not field prefix/postfix;
   // it falls out of whether the argument begins after the node's own start.
-  fn update_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn update_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let operator_node = match node.ChildByFieldName(capp.FieldOperator) {
@@ -1915,7 +2053,10 @@ impl Lowering {
     (Some(Expression.Update(lowered)), diags)
   }
 
-  fn await_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn await_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -1932,7 +2073,10 @@ impl Lowering {
 
   // yield_expression: the argument is optional (bare `yield` is valid) and
   // the anonymous '*' marks the delegating `yield*` form.
-  fn yield_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn yield_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_delegate = has_anonymous_child(node, "*")
     for i in 0..node.NamedChildCount() {
@@ -1956,7 +2100,10 @@ impl Lowering {
   // assignment_expression splits on the left side: an @deref target routes to
   // ObjjDerefAssignment with its compound operator; everything else is a
   // StandardAssignment whose target is a parenthesized expression or an lhs.
-  fn assignment_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn assignment_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -2019,7 +2166,10 @@ impl Lowering {
   // assignment_target lowers the StandardAssignment left side: a parenthesized
   // expression, or an lhs (identifier / member / subscript / undefined).
   // Destructuring patterns are deferred.
-  fn assignment_target(self, node: capp.CSTNode) -> (Option<AssignmentTarget>, Slice<Diagnostic>) {
+  fn assignment_target(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<AssignmentTarget>, Slice<Diagnostic>) {
     if node.Kind() == capp.NodeKindParenthesizedExpression {
       let (paren_opt, diags) = self.parenthesized(node)
       let Some(paren) = paren_opt else {
@@ -2041,7 +2191,10 @@ impl Lowering {
   // the single point through which every destructuring binding site (plain
   // for-in, formal parameters, array pattern elements, rest arguments)
   // ultimately passes.
-  fn lhs_expression(self, node: capp.CSTNode) -> (Option<LhsExpression>, Slice<Diagnostic>) {
+  fn lhs_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<LhsExpression>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindIdentifier {
       return (Some(LhsExpression.Identifier(ident_of(node))), [])
@@ -2102,7 +2255,10 @@ impl Lowering {
   // rest_pattern_struct lowers `...pattern`.  The grammar restricts a rest
   // element's own binding to an lhs (no nested rest, no default), so this
   // descends through lhs_expression rather than pattern.
-  fn rest_pattern_struct(self, node: capp.CSTNode) -> (Option<RestPattern>, Slice<Diagnostic>) {
+  fn rest_pattern_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<RestPattern>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2119,7 +2275,10 @@ impl Lowering {
   // assignment_pattern_struct lowers `pattern = expression`, a defaulted
   // binding.  Appears as a formal parameter, an array pattern element, and
   // (nested, nameless) as an object pair pattern's value.
-  fn assignment_pattern_struct(self, node: capp.CSTNode) -> (Option<AssignmentPattern>, Slice<Diagnostic>) {
+  fn assignment_pattern_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<AssignmentPattern>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -2156,7 +2315,10 @@ impl Lowering {
   }
 
   // destructuring_pattern dispatches the two _destructuring_pattern forms.
-  fn destructuring_pattern(self, node: capp.CSTNode) -> (Option<DestructuringPattern>, Slice<Diagnostic>) {
+  fn destructuring_pattern(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<DestructuringPattern>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindObjectPattern {
       let (object_opt, diags) = self.object_pattern_struct(node)
@@ -2180,7 +2342,10 @@ impl Lowering {
   // shorthand_property_identifier_pattern (bare shorthand, no default) —
   // a distinct node kind from object-literal shorthand, so the two never
   // collide in dispatch.
-  fn object_pattern_struct(self, node: capp.CSTNode) -> (Option<ObjectPattern>, Slice<Diagnostic>) {
+  fn object_pattern_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjectPattern>, Slice<Diagnostic>) {
     let mut members: Slice<ObjectPatternMember> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -2220,7 +2385,10 @@ impl Lowering {
   // pair_pattern_struct lowers `key: value` inside an object pattern.  The
   // value is a pattern in the common case, or an assignment_pattern for
   // `{key: value = default}`.
-  fn pair_pattern_struct(self, node: capp.CSTNode) -> (Option<PairPattern>, Slice<Diagnostic>) {
+  fn pair_pattern_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PairPattern>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -2262,7 +2430,10 @@ impl Lowering {
 
   // object_assignment_pattern_struct lowers `{name = default}` (shorthand)
   // and `{...} = default`-shaped destructuring-with-default members.
-  fn object_assignment_pattern_struct(self, node: capp.CSTNode) -> (Option<ObjectAssignmentPattern>, Slice<Diagnostic>) {
+  fn object_assignment_pattern_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjectAssignmentPattern>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -2311,7 +2482,10 @@ impl Lowering {
   // array_pattern_struct: named children are patterns or assignment_pattern
   // (defaulted) elements.  Elisions (sparse holes) are unnamed and therefore
   // invisible to NamedChild iteration, consistent with native_array.
-  fn array_pattern_struct(self, node: capp.CSTNode) -> (Option<ArrayPattern>, Slice<Diagnostic>) {
+  fn array_pattern_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ArrayPattern>, Slice<Diagnostic>) {
     let mut elements: Slice<ArrayPatternElement> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -2335,7 +2509,10 @@ impl Lowering {
     (Some(ArrayPattern { elements, pos: node_pos(node) }), diags)
   }
 
-  fn augmented_assignment_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn augmented_assignment_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -2404,7 +2581,10 @@ impl Lowering {
   // augmented_target: the narrower target set permitted on +=-family
   // assignment — identifier, member, subscript, or parenthesized.  No
   // destructuring or deref here, per the grammar.
-  fn augmented_target(self, node: capp.CSTNode) -> (Option<AugmentedAssignmentTarget>, Slice<Diagnostic>) {
+  fn augmented_target(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<AugmentedAssignmentTarget>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindIdentifier {
       return (Some(AugmentedAssignmentTarget.Identifier(ident_of(node))), [])
@@ -2440,7 +2620,10 @@ impl Lowering {
   // new_expr_struct is recursive: `new new C()()` nests, with the constructor
   // either another new_expression or a primary.  The constructor field is the
   // hidden primary_expression supertype, surfacing as its concrete primary.
-  fn new_expr_struct(self, node: capp.CSTNode) -> (Option<NewExpression>, Slice<Diagnostic>) {
+  fn new_expr_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<NewExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -2478,7 +2661,10 @@ impl Lowering {
   // for the one position — new's constructor — that requires it.  A
   // non-primary expression in constructor position is a grammar impossibility;
   // it is reported rather than silently wrapped.
-  fn primary_struct(self, node: capp.CSTNode) -> (Option<PrimaryExpression>, Slice<Diagnostic>) {
+  fn primary_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PrimaryExpression>, Slice<Diagnostic>) {
     let (expr_opt, diags) = self.expression(node)
     let Some(expr) = expr_opt else {
       return (None, diags)
@@ -2495,7 +2681,10 @@ impl Lowering {
     }
   }
 
-  fn object_literal(self, node: capp.CSTNode) -> (Option<Object>, Slice<Diagnostic>) {
+  fn object_literal(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Object>, Slice<Diagnostic>) {
     let mut members: Slice<ObjectMember> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -2560,7 +2749,10 @@ impl Lowering {
 
   // property_name lowers the _property_name supertype plus its Objective-J
   // objj_string_literal addition.
-  fn property_name(self, node: capp.CSTNode) -> (Option<PropertyName>, Slice<Diagnostic>) {
+  fn property_name(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PropertyName>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindPropertyIdentifier {
       return (Some(PropertyName.Identifier(ident_of(node))), [])
@@ -2602,7 +2794,10 @@ impl Lowering {
     (None, self.unhandled(node, "property name", kind))
   }
 
-  fn computed_property_name(self, node: capp.CSTNode) -> (Option<ComputedPropertyName>, Slice<Diagnostic>) {
+  fn computed_property_name(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ComputedPropertyName>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2616,7 +2811,10 @@ impl Lowering {
     (None, self.malformed(node, "computed property name without expression"))
   }
 
-  fn native_array(self, node: capp.CSTNode) -> (Option<NativeArray>, Slice<Diagnostic>) {
+  fn native_array(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<NativeArray>, Slice<Diagnostic>) {
     let mut elements: Slice<ArrayElement> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -2640,7 +2838,10 @@ impl Lowering {
     (Some(NativeArray { elements, pos: node_pos(node) }), diags)
   }
 
-  fn function_expression(self, node: capp.CSTNode) -> (Option<FunctionExpression>, Slice<Diagnostic>) {
+  fn function_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<FunctionExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_async = has_anonymous_child(node, "async")
     let name = node.ChildByFieldName(capp.FieldName).map(ident_of)
@@ -2653,7 +2854,7 @@ impl Lowering {
       ),
     }
     let (parameters, param_diags) = self.formal_parameters(parameters_node)
-    let mut diags = param_diags.clone()
+    let mut diags: Slice<Diagnostic> = param_diags.clone()
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -2672,7 +2873,10 @@ impl Lowering {
   }
 
   // regex carries pattern and optional flags as named fields of literal text.
-  fn regex_literal(self, node: capp.CSTNode) -> (Option<Regex>, Slice<Diagnostic>) {
+  fn regex_literal(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Regex>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let pattern_node = match node.ChildByFieldName(capp.FieldPattern) {
       Some(n) => n,
@@ -2691,7 +2895,10 @@ impl Lowering {
     (Some(Regex { pattern, flags, pos }), [])
   }
 
-  fn template_string(self, node: capp.CSTNode) -> (Option<TemplateString>, Slice<Diagnostic>) {
+  fn template_string(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<TemplateString>, Slice<Diagnostic>) {
     let mut parts: Slice<TemplatePart> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -2721,7 +2928,10 @@ impl Lowering {
     (Some(TemplateString { parts, pos: node_pos(node) }), diags)
   }
 
-  fn template_substitution(self, node: capp.CSTNode) -> (Option<TemplateSubstitution>, Slice<Diagnostic>) {
+  fn template_substitution(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<TemplateSubstitution>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2738,7 +2948,10 @@ impl Lowering {
   // arrow_function: a bare identifier parameter arrives in the `parameter`
   // field, a parenthesized list in `parameters`; the body is an expression
   // or a statement block.
-  fn arrow_function(self, node: capp.CSTNode) -> (Option<ArrowFunction>, Slice<Diagnostic>) {
+  fn arrow_function(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ArrowFunction>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_async = has_anonymous_child(node, "async")
     let mut diags: Slice<Diagnostic> = []
@@ -2782,7 +2995,10 @@ impl Lowering {
     (Some(ArrowFunction { is_async, parameters, body, pos }), diags)
   }
 
-  fn generator_function(self, node: capp.CSTNode) -> (Option<GeneratorFunction>, Slice<Diagnostic>) {
+  fn generator_function(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<GeneratorFunction>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_async = has_anonymous_child(node, "async")
     let name = node.ChildByFieldName(capp.FieldName).map(ident_of)
@@ -2795,7 +3011,7 @@ impl Lowering {
       ),
     }
     let (parameters, param_diags) = self.formal_parameters(parameters_node)
-    let mut diags = param_diags.clone()
+    let mut diags: Slice<Diagnostic> = param_diags.clone()
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -2813,7 +3029,10 @@ impl Lowering {
     (Some(GeneratorFunction { is_async, name, parameters, body, pos }), diags)
   }
 
-  fn generator_function_declaration(self, node: capp.CSTNode) -> (Option<GeneratorFunctionDeclaration>, Slice<Diagnostic>) {
+  fn generator_function_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<GeneratorFunctionDeclaration>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_async = has_anonymous_child(node, "async")
 
@@ -2833,7 +3052,7 @@ impl Lowering {
       ),
     }
     let (parameters, param_diags) = self.formal_parameters(parameters_node)
-    let mut diags = param_diags.clone()
+    let mut diags: Slice<Diagnostic> = param_diags.clone()
 
     let body_node = match node.ChildByFieldName(capp.FieldBody) {
       Some(n) => n,
@@ -2862,7 +3081,10 @@ impl Lowering {
   // Objective-J — ref / deref
   // -------------------------------------------------------------------------
 
-  fn objj_ref_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn objj_ref_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2880,7 +3102,10 @@ impl Lowering {
     (None, self.malformed(node, "@ref without argument"))
   }
 
-  fn objj_deref_struct(self, node: capp.CSTNode) -> (Option<ObjjDerefExpression>, Slice<Diagnostic>) {
+  fn objj_deref_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjDerefExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2899,7 +3124,10 @@ impl Lowering {
   // -------------------------------------------------------------------------
 
   // objj_string_literal wraps a single string node: @"...".
-  fn objj_string_literal(self, node: capp.CSTNode) -> (Option<ObjjStringLiteral>, Slice<Diagnostic>) {
+  fn objj_string_literal(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjStringLiteral>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2910,7 +3138,10 @@ impl Lowering {
     (None, self.malformed(node, "objj string without string"))
   }
 
-  fn objj_selector_expression(self, node: capp.CSTNode) -> (Option<ObjjSelectorExpression>, Slice<Diagnostic>) {
+  fn objj_selector_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjSelectorExpression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -2927,7 +3158,10 @@ impl Lowering {
   // objj_selector_name: the named children are the selector identifiers and
   // the colons are anonymous.  A colon anywhere makes it a keyword selector;
   // otherwise the single identifier is the unary form.
-  fn objj_selector_name(self, node: capp.CSTNode) -> (Option<ObjjSelectorName>, Slice<Diagnostic>) {
+  fn objj_selector_name(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjSelectorName>, Slice<Diagnostic>) {
     if has_anonymous_child(node, ":") {
       let mut parts: Slice<ObjjSelectorNamePart> = []
       for i in 0..node.NamedChildCount() {
@@ -2952,7 +3186,10 @@ impl Lowering {
     (None, self.malformed(node, "selector without identifiers"))
   }
 
-  fn objj_dictionary_literal(self, node: capp.CSTNode) -> (Option<ObjjDictionaryLiteral>, Slice<Diagnostic>) {
+  fn objj_dictionary_literal(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjDictionaryLiteral>, Slice<Diagnostic>) {
     let mut pairs: Slice<ObjjDictionaryPair> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -2975,7 +3212,10 @@ impl Lowering {
 
   // key and value arrive in single-purpose wrapper nodes (objj_dictionary_key
   // / objj_dictionary_value) whose meaning is the single named child.
-  fn objj_dictionary_pair(self, node: capp.CSTNode) -> (Option<ObjjDictionaryPair>, Slice<Diagnostic>) {
+  fn objj_dictionary_pair(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjDictionaryPair>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -3017,7 +3257,11 @@ impl Lowering {
   // wrapped_expression descends through a single-purpose wrapper node to its
   // one named child and lowers it as an expression.  `what` is the complete
   // malformed message for an empty wrapper.
-  fn wrapped_expression(self, node: capp.CSTNode, what: string) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn wrapped_expression(
+    self,
+    node: capp.CSTNode,
+    what: string,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
       if skippable(child.Kind()) { continue }
@@ -3027,7 +3271,10 @@ impl Lowering {
   }
 
   // objj_array_literal wraps a single native_array: @[...].
-  fn objj_array_literal(self, node: capp.CSTNode) -> (Option<ObjjArrayLiteral>, Slice<Diagnostic>) {
+  fn objj_array_literal(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjArrayLiteral>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -3045,7 +3292,10 @@ impl Lowering {
   // Objective-J — declarations
   // -------------------------------------------------------------------------
 
-  fn objj_class_forward_declaration(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn objj_class_forward_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let name_node = match node.ChildByFieldName(capp.FieldName) {
       Some(n) => n,
       None => return (None, self.malformed(node, "@class without name")),
@@ -3057,7 +3307,10 @@ impl Lowering {
     (Some(Statement.ObjjClassForward(declaration)), [])
   }
 
-  fn objj_global_struct(self, node: capp.CSTNode) -> (Option<ObjjGlobalDeclaration>, Slice<Diagnostic>) {
+  fn objj_global_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjGlobalDeclaration>, Slice<Diagnostic>) {
     let name_node = match node.ChildByFieldName(capp.FieldName) {
       Some(n) => n,
       None => return (None, self.malformed(node, "@global without name")),
@@ -3069,7 +3322,10 @@ impl Lowering {
     (Some(declaration), [])
   }
 
-  fn objj_global_declaration(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn objj_global_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let (global_opt, diags) = self.objj_global_struct(node)
     let Some(global) = global_opt else {
       return (None, diags)
@@ -3077,7 +3333,10 @@ impl Lowering {
     (Some(Statement.ObjjGlobal(global)), diags)
   }
 
-  fn objj_typedef(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn objj_typedef(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let name_node = match node.ChildByFieldName(capp.FieldName) {
       Some(n) => n,
       None => return (None, self.malformed(node, "@typedef without name")),
@@ -3092,7 +3351,10 @@ impl Lowering {
   // The protocol body interleaves anonymous @optional/@required markers with
   // objj_method_declaration members; ordering matters, so the walk covers all
   // children rather than only named ones.
-  fn objj_protocol_declaration(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn objj_protocol_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -3138,7 +3400,10 @@ impl Lowering {
   // objj_method_declaration is the bodiless protocol form of
   // objj_method_definition; scope, return type, and selector lower
   // identically.
-  fn objj_method_declaration(self, node: capp.CSTNode) -> (Option<ObjjMethodDeclaration>, Slice<Diagnostic>) {
+  fn objj_method_declaration(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjMethodDeclaration>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -3210,7 +3475,10 @@ impl Lowering {
   // Objective-J — accessors
   // -------------------------------------------------------------------------
 
-  fn accessors_directive(self, node: capp.CSTNode) -> (Option<ObjjAccessorsDirective>, Slice<Diagnostic>) {
+  fn accessors_directive(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjAccessorsDirective>, Slice<Diagnostic>) {
     let mut attributes: Slice<ObjjAccessorAttribute> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -3236,7 +3504,10 @@ impl Lowering {
   // objj_accessor_attribute: `key = name` (the '=' is anonymous) or a bare
   // flag identifier.  Presence of an objj_accessor_name child selects the
   // key-value form.
-  fn accessor_attribute(self, node: capp.CSTNode) -> (Option<ObjjAccessorAttribute>, Slice<Diagnostic>) {
+  fn accessor_attribute(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjAccessorAttribute>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
     let mut key: Option<Identifier> = None
@@ -3282,7 +3553,10 @@ impl Lowering {
   // objj_accessor_name: identifiers with anonymous colons.  No colon is the
   // simple form; a colon with a single identifier is a setter; further
   // identifiers make the keyword form.
-  fn accessor_name(self, node: capp.CSTNode) -> (Option<ObjjAccessorName>, Slice<Diagnostic>) {
+  fn accessor_name(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjAccessorName>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut head: Option<Identifier> = None
     let mut parts: Slice<Identifier> = []
@@ -3324,7 +3598,10 @@ impl Lowering {
   // children appearing in order, with the else line splitting body from the
   // else branch.  The walk covers all children, switching accumulation at
   // the else line.
-  fn preproc_if_block_struct(self, node: capp.CSTNode) -> (Option<PreprocIfBlock>, Slice<Diagnostic>) {
+  fn preproc_if_block_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocIfBlock>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -3400,7 +3677,10 @@ impl Lowering {
     (Some(block), diags)
   }
 
-  fn preproc_block_item(self, node: capp.CSTNode) -> (Option<PreprocBlockItem>, Slice<Diagnostic>) {
+  fn preproc_block_item(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocBlockItem>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindPreprocIfBlock {
       let (nested_opt, diags) = self.preproc_if_block_struct(node)
@@ -3425,7 +3705,10 @@ impl Lowering {
 
   // preproc_ivar_if_block mirrors preproc_if_block over ivar items, with
   // recursive nesting.
-  fn preproc_ivar_if_block_struct(self, node: capp.CSTNode) -> (Option<PreprocIvarIfBlock>, Slice<Diagnostic>) {
+  fn preproc_ivar_if_block_struct(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocIvarIfBlock>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -3502,7 +3785,10 @@ impl Lowering {
     (Some(block), diags)
   }
 
-  fn preproc_ivar_item(self, node: capp.CSTNode) -> (Option<PreprocIvarItem>, Slice<Diagnostic>) {
+  fn preproc_ivar_item(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocIvarItem>, Slice<Diagnostic>) {
     let kind = node.Kind()
     if kind == capp.NodeKindObjjInstanceVariable {
       let (variable_opt, diags) = self.instance_variable(node)
@@ -3528,7 +3814,10 @@ impl Lowering {
     (None, self.unhandled(node, "preprocessor ivar item", kind))
   }
 
-  fn preproc_if_line(self, node: capp.CSTNode) -> (Option<PreprocIfLine>, Slice<Diagnostic>) {
+  fn preproc_if_line(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocIfLine>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let condition_node = match node.ChildByFieldName(capp.FieldCondition) {
       Some(n) => n,
@@ -3541,7 +3830,10 @@ impl Lowering {
     (Some(PreprocIfLine { condition, pos }), diags)
   }
 
-  fn preproc_condition(self, node: capp.CSTNode) -> (Option<PreprocCondition>, Slice<Diagnostic>) {
+  fn preproc_condition(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocCondition>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
@@ -3555,7 +3847,10 @@ impl Lowering {
     (None, self.malformed(node, "preprocessor condition without content"))
   }
 
-  fn preproc_disjunction(self, node: capp.CSTNode) -> (Option<PreprocDisjunction>, Slice<Diagnostic>) {
+  fn preproc_disjunction(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocDisjunction>, Slice<Diagnostic>) {
     let mut conjunctions: Slice<PreprocConjunction> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -3580,7 +3875,10 @@ impl Lowering {
     (Some(PreprocDisjunction { conjunctions, pos: node_pos(node) }), diags)
   }
 
-  fn preproc_conjunction(self, node: capp.CSTNode) -> (Option<PreprocConjunction>, Slice<Diagnostic>) {
+  fn preproc_conjunction(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocConjunction>, Slice<Diagnostic>) {
     let mut negations: Slice<PreprocNegation> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -3607,7 +3905,10 @@ impl Lowering {
 
   // preproc_negation holds either a nested negation (the '!' form, with the
   // bang anonymous) or a primary.
-  fn preproc_negation(self, node: capp.CSTNode) -> (Option<PreprocNegation>, Slice<Diagnostic>) {
+  fn preproc_negation(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocNegation>, Slice<Diagnostic>) {
     for i in 0..node.NamedChildCount() {
       let child = node.NamedChild(i)
       let kind = child.Kind()
@@ -3637,7 +3938,10 @@ impl Lowering {
   // preproc_primary discriminates four ways: a callee field marks the call
   // form; a nested condition marks grouping; an anonymous comparison
   // operator marks comparison; otherwise the single identifier stands alone.
-  fn preproc_primary(self, node: capp.CSTNode) -> (Option<PreprocPrimary>, Slice<Diagnostic>) {
+  fn preproc_primary(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<PreprocPrimary>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     if let Some(callee_node) = node.ChildByFieldName(capp.FieldCallee) {
@@ -3754,7 +4058,10 @@ impl Lowering {
   // Objective-J — message expressions
   // -------------------------------------------------------------------------
 
-  fn message_expression(self, node: capp.CSTNode) -> (Option<Expression>, Slice<Diagnostic>) {
+  fn message_expression(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Expression>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let receiver_node = match node.ChildByFieldName(capp.FieldReceiver) {
@@ -3767,7 +4074,7 @@ impl Lowering {
     }
 
     let (receiver_opt, receiver_diags) = self.expression(receiver_node)
-    let mut diags = receiver_diags.clone()
+    let mut diags: Slice<Diagnostic> = receiver_diags.clone()
     let receiver = match receiver_opt {
       Some(receiver_expr) => receiver_expr,
       None => return (None, diags),
@@ -3787,7 +4094,10 @@ impl Lowering {
   // message_selector lowers the objj_message_selector wrapper: its named
   // children are either a single objj_selector_identifier (unary send) or one
   // or more objj_message_keyword_argument nodes (keyword send).
-  fn message_selector(self, node: capp.CSTNode) -> (Option<ObjjMessageSelector>, Slice<Diagnostic>) {
+  fn message_selector(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjMessageSelector>, Slice<Diagnostic>) {
     if node.NamedChildCount() == 0 {
       return (None, self.malformed(node, "message selector without content"))
     }
@@ -3832,7 +4142,10 @@ impl Lowering {
   // keyword_argument lowers one `name: expr` (or anonymous `: expr`) part of a
   // keyword message send.  The keyword is the fielded objj_selector_identifier
   // child; the argument expressions are the remaining named children.
-  fn keyword_argument(self, node: capp.CSTNode) -> (Option<ObjjMessageKeywordArgument>, Slice<Diagnostic>) {
+  fn keyword_argument(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjMessageKeywordArgument>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let keyword = node
       .ChildByFieldName(capp.FieldKeyword)
@@ -3869,7 +4182,10 @@ impl Lowering {
   // Objective-J — class implementation
   // -------------------------------------------------------------------------
 
-  fn class_implementation(self, node: capp.CSTNode) -> (Option<Statement>, Slice<Diagnostic>) {
+  fn class_implementation(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<Statement>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     let name_node = match node.ChildByFieldName(capp.FieldName) {
@@ -3930,7 +4246,10 @@ impl Lowering {
 
   // implementation_member lowers the objj_implementation_member wrapper: a
   // single named child carrying the member proper.
-  fn implementation_member(self, node: capp.CSTNode) -> (Option<ObjjImplementationMember>, Slice<Diagnostic>) {
+  fn implementation_member(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjImplementationMember>, Slice<Diagnostic>) {
     if node.NamedChildCount() == 0 {
       return (
         None,
@@ -3998,7 +4317,10 @@ impl Lowering {
   // Objective-J — instance variables
   // -------------------------------------------------------------------------
 
-  fn instance_variables(self, node: capp.CSTNode) -> (ObjjInstanceVariables, Slice<Diagnostic>) {
+  fn instance_variables(
+    self,
+    node: capp.CSTNode,
+  ) -> (ObjjInstanceVariables, Slice<Diagnostic>) {
     let mut members: Slice<ObjjIvarMember> = []
     let mut diags: Slice<Diagnostic> = []
 
@@ -4031,7 +4353,10 @@ impl Lowering {
 
   // instance_variable lowers the objj_instance_variable wrapper: a single
   // named child that is either a visibility specifier or a field definition.
-  fn instance_variable(self, node: capp.CSTNode) -> (Option<ObjjInstanceVariable>, Slice<Diagnostic>) {
+  fn instance_variable(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjInstanceVariable>, Slice<Diagnostic>) {
     if node.NamedChildCount() == 0 {
       return (None, self.malformed(node, "instance variable without content"))
     }
@@ -4058,7 +4383,10 @@ impl Lowering {
 
   // visibility_specifier carries only anonymous token children; the node's
   // text is the specifier itself.
-  fn visibility_specifier(self, node: capp.CSTNode) -> (Option<ObjjVisibilitySpecifier>, Slice<Diagnostic>) {
+  fn visibility_specifier(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjVisibilitySpecifier>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let text = node.Text()
     if text == "@private" {
@@ -4076,7 +4404,10 @@ impl Lowering {
     (None, self.unhandled(node, "visibility specifier", text))
   }
 
-  fn field_definition(self, node: capp.CSTNode) -> (Option<ObjjFieldDefinition>, Slice<Diagnostic>) {
+  fn field_definition(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjFieldDefinition>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -4135,7 +4466,10 @@ impl Lowering {
     (Some(field), diags)
   }
 
-  fn ivar_modifiers(self, node: capp.CSTNode) -> (Slice<ObjjIvarModifier>, Slice<Diagnostic>) {
+  fn ivar_modifiers(
+    self,
+    node: capp.CSTNode,
+  ) -> (Slice<ObjjIvarModifier>, Slice<Diagnostic>) {
     let mut modifiers: Slice<ObjjIvarModifier> = []
     let mut diags: Slice<Diagnostic> = []
     for i in 0..node.NamedChildCount() {
@@ -4162,7 +4496,10 @@ impl Lowering {
   // Objective-J — methods
   // -------------------------------------------------------------------------
 
-  fn method_definition(self, node: capp.CSTNode) -> (Option<ObjjMethodDefinition>, Slice<Diagnostic>) {
+  fn method_definition(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjMethodDefinition>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -4235,7 +4572,10 @@ impl Lowering {
     (Some(method), diags)
   }
 
-  fn parameter_part(self, node: capp.CSTNode) -> (Option<ObjjMethodParameterPart>, Slice<Diagnostic>) {
+  fn parameter_part(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjMethodParameterPart>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut diags: Slice<Diagnostic> = []
 
@@ -4277,7 +4617,10 @@ impl Lowering {
 
   // method_type lowers `( async? @action|void|objj_type )`.  The type field
   // holds either an anonymous token ('@action', 'void') or an objj_type node.
-  fn method_type(self, node: capp.CSTNode) -> (Option<ObjjMethodType>, Slice<Diagnostic>) {
+  fn method_type(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjMethodType>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let is_async = has_anonymous_child(node, "async")
 
@@ -4333,7 +4676,10 @@ impl Lowering {
   //   [identifier]                    → plain named type
   //   [objj_protocol_reference_list]  → id<Protocols> (the 'id' is anonymous)
   //   (none)                          → bare id
-  fn objj_type(self, node: capp.CSTNode) -> (Option<ObjjType>, Slice<Diagnostic>) {
+  fn objj_type(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjType>, Slice<Diagnostic>) {
     let pos = node_pos(node)
 
     if node.NamedChildCount() == 0 {
@@ -4362,7 +4708,10 @@ impl Lowering {
 
   // protocol_type lowers `Name<P, Q>`: unfielded children are the name
   // identifier followed by the protocol reference list.
-  fn protocol_type(self, node: capp.CSTNode) -> (Option<ObjjType>, Slice<Diagnostic>) {
+  fn protocol_type(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjType>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let mut name: Option<Identifier> = None
     let mut protocols: Option<ObjjProtocolReferenceList> = None
@@ -4394,7 +4743,10 @@ impl Lowering {
   // multi_word_type maps the C-style spellings onto their variants.  The
   // node's children are anonymous word tokens; the text is normalised to
   // single spaces before matching so source whitespace cannot affect dispatch.
-  fn multi_word_type(self, node: capp.CSTNode) -> (Option<ObjjType>, Slice<Diagnostic>) {
+  fn multi_word_type(
+    self,
+    node: capp.CSTNode,
+  ) -> (Option<ObjjType>, Slice<Diagnostic>) {
     let pos = node_pos(node)
     let normalized = strings.Join(strings.Fields(node.Text()), " ")
 

@@ -57,12 +57,12 @@ fn fparse_err_whitelist() -> cobra.FParseErrWhitelist {
   cobra.FParseErrWhitelist { UnknownFlags: false }
 }
 
-fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
+fn make_command(use: string, short: string, run: RunFn) -> mut cobra.Command {
   cobra.Command {
     Use: use,
     Short: short,
     Args: Some(no_args as cobra.PositionalArgs),
-    Annotations: Map.new<string, string>(),
+    Annotations: Some(Map.new<string, string>()),
     PersistentPreRun: Some(noop_run as RunFn),
     PersistentPreRunE: None,
     PreRun: Some(noop_run as RunFn),
@@ -83,11 +83,15 @@ fn make_command(use: string, short: string, run: RunFn) -> cobra.Command {
   }
 }
 
-fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Command {
+fn make_command_with_args(
+  use: string,
+  short: string,
+  run: RunFn,
+) -> mut cobra.Command {
   cobra.Command {
     Use: use,
     Short: short,
-    Annotations: Map.new<string, string>(),
+    Annotations: Some(Map.new<string, string>()),
     PersistentPreRun: Some(noop_run as RunFn),
     PersistentPreRunE: None,
     PreRun: Some(noop_run as RunFn),
@@ -108,12 +112,12 @@ fn make_command_with_args(use: string, short: string, run: RunFn) -> cobra.Comma
   }
 }
 
-fn make_group(use: string, short: string) -> cobra.Command {
+fn make_group(use: string, short: string) -> mut cobra.Command {
   cobra.Command {
     Use: use,
     Short: short,
     Args: Some(no_args as cobra.PositionalArgs),
-    Annotations: Map.new<string, string>(),
+    Annotations: Some(Map.new<string, string>()),
     PersistentPreRun: Some(noop_run as RunFn),
     PersistentPreRunE: None,
     PreRun: None,
@@ -138,26 +142,18 @@ fn make_group(use: string, short: string) -> cobra.Command {
 // build command
 // ---------------------------------------------------------------------------
 
-// run_build executes the compilation pipeline using configuration parsed from
-// the command-line context. It coalesces recovery cascade artifacts to ensure
-// a maximum of one primary error is emitted per distinct source file.
-//
-// Returns a terminal exit status code (1) to the host OS on failure.
-fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
-  let source_root = if !args.is_empty() { args[0] } else { "." }
-  let mode_str = cmd.Flags().GetString("mode").unwrap_or("debug")
+fn do_run_build(source_root: string, mode_str: string, http2_flag: bool) {
   let mode = match mode_str {
     "release" => build.BuildMode.Release,
     "clean" => build.BuildMode.Clean,
     "debug" => build.BuildMode.Debug,
     _ => {
-      cmd.Println(
+      fmt.Println(
         f"unknown mode '{mode_str}': must be debug, release, or clean",
       )
       return
     },
   }
-  let http2_flag = cmd.Flags().GetBool("http2").unwrap_or(false)
   let delivery = if http2_flag {
     build.DeliveryContext.HTTP2
   } else {
@@ -168,7 +164,7 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
   match build.build(cfg) {
     Ok(result) => {
       if !result.ok {
-        let mut seen_files: Map<string, int> = Map.new<string, int>()
+        let mut seen_files: mut Map<string, int> = Map.new<string, int>()
         let mut suppressed = 0
 
         for d in result.diags {
@@ -184,42 +180,53 @@ fn run_build(cmd: Ref<cobra.Command>, args: Slice<string>) {
                 (Some(f), None, _) => f,
                 _ => "<unknown>",
               }
-              cmd.Println(f"  error: {loc}: {d.message}")
+              let _ = fmt.Println(f"  error: {loc}: {d.message}")
             }
           }
         }
 
         if suppressed > 0 {
-          cmd.Println(
+          fmt.Println(
             f"  ({suppressed} further error(s) suppressed — first error per file shown)",
           )
         }
 
-        cmd.Println(f"build failed: {result.message}")
+        fmt.Println(f"build failed: {result.message}")
         os.Exit(1)
       }
 
-      cmd.Println(f"build success: {result.message}")
+      fmt.Println(f"build success: {result.message}")
     },
     Err(e) => {
-      cmd.Println(f"build error: {e}")
+      fmt.Println(f"build error: {e}")
       os.Exit(1)
     },
   }
 }
 
-fn new_build_cmd() -> cobra.Command {
+fn new_build_cmd() -> mut cobra.Command {
+  let mut mode_str = "debug"
+  let mut http2_flag = false
+
   let mut cmd = make_command_with_args(
     "build [path]",
     "Compile Objective-J source",
-    run_build,
+    |_cmd: Ref<cobra.Command>, args: Slice<string>| {
+      let source_root = if !args.is_empty() { args[0] } else { "." }
+      do_run_build(source_root, mode_str, http2_flag)
+    },
   )
-  let _ = cmd
+  cmd
     .Flags()
-    .String("mode", "debug", "build mode: debug, release, clean")
-  let _ = cmd
+    .StringVar(&mode_str, "mode", "debug", "build mode: debug, release, clean")
+  cmd
     .Flags()
-    .Bool("http2", false, "target HTTP/2 delivery (default: HTTP/1.x)")
+    .BoolVar(
+      &http2_flag,
+      "http2",
+      false,
+      "target HTTP/2 delivery (default: HTTP/1.x)",
+    )
   cmd
 }
 
@@ -227,11 +234,11 @@ fn new_build_cmd() -> cobra.Command {
 // version command
 // ---------------------------------------------------------------------------
 
-fn run_version(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  cmd.Println(f"capp-build {VERSION}")
+fn run_version(_cmd: Ref<cobra.Command>, _args: Slice<string>) {
+  fmt.Println(f"capp-build {VERSION}")
 }
 
-fn new_version_cmd() -> cobra.Command {
+fn new_version_cmd() -> mut cobra.Command {
   make_command("version", "Print version information", run_version)
 }
 
@@ -239,40 +246,40 @@ fn new_version_cmd() -> cobra.Command {
 // verify commands
 // ---------------------------------------------------------------------------
 
-fn run_verify_root(cmd: Ref<cobra.Command>, args: Slice<string>) {
+fn run_verify_root(_cmd: Ref<cobra.Command>, args: Slice<string>) {
   let start = if !args.is_empty() { args[0] } else { "." }
   let result = verify.verify_root(start)
   let icon = if result.ok { "✓" } else { "✗" }
-  cmd.Println(f"{icon}  {result.label}: {result.detail}")
+  fmt.Println(f"{icon}  {result.label}: {result.detail}")
 }
 
-fn run_verify_model(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+fn run_verify_model(_cmd: Ref<cobra.Command>, _args: Slice<string>) {
   let results = verify.verify_model()
   let mut failures = 0
   for result in results {
     let icon = if result.ok { "✓" } else { "✗" }
-    cmd.Println(f"{icon}  {result.label}: {result.detail}")
+    fmt.Println(f"{icon}  {result.label}: {result.detail}")
     if !result.ok { failures += 1 }
   }
   let total = results.length()
   if failures > 0 {
-    cmd.Println(f"{failures} of {total} model checks failed")
+    fmt.Println(f"{failures} of {total} model checks failed")
   } else {
-    cmd.Println(f"all {total} model checks passed")
+    fmt.Println(f"all {total} model checks passed")
   }
 }
 
-fn new_verify_cmd() -> cobra.Command {
+fn new_verify_cmd() -> mut cobra.Command {
   let mut verify_cmd = make_group(
     "verify",
     "Verify Cappuccino project structure",
   )
-  let root_cmd = make_command_with_args(
+  let mut root_cmd = make_command_with_args(
     "root [path]",
     "Locate the project root",
     run_verify_root,
   )
-  let model_cmd = make_command(
+  let mut model_cmd = make_command(
     "model",
     "Exercise the typed CST model against hand-built values",
     run_verify_model,
@@ -286,58 +293,65 @@ fn new_verify_cmd() -> cobra.Command {
 // smoke commands
 // ---------------------------------------------------------------------------
 
-fn run_smoke_cobra(cmd: Ref<cobra.Command>, _args: Slice<string>) {
+fn run_smoke_cobra(_cmd: Ref<cobra.Command>, _args: Slice<string>) {
   let result = smoke.smoke_cobra()
   let icon = if result.ok { "✓" } else { "✗" }
-  cmd.Println(f"{icon}  {result.name}: {result.note}")
+  fmt.Println(f"{icon}  {result.name}: {result.note}")
 }
 
-fn run_smoke_capp(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  let grammar = cmd.Flags().GetString("grammar").unwrap_or("")
-  let result = smoke.smoke_capp(grammar)
-  let icon = if result.ok { "✓" } else { "✗" }
-  cmd.Println(f"{icon}  {result.name}: {result.note}")
-}
-
-fn run_smoke_boundary(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  let grammar = cmd.Flags().GetString("grammar").unwrap_or("")
-  let result = smoke.smoke_boundary(grammar)
-  let icon = if result.ok { "✓" } else { "✗" }
-  cmd.Println(f"{icon}  {result.name}: {result.note}")
-}
-
-fn run_smoke_all(cmd: Ref<cobra.Command>, _args: Slice<string>) {
-  let grammar = cmd.Flags().GetString("grammar").unwrap_or("")
-  smoke.smoke_all(grammar)
-}
-
-fn new_smoke_cmd() -> cobra.Command {
+fn new_smoke_cmd() -> mut cobra.Command {
   let mut smoke_cmd = make_group("smoke", "Run interop smoke tests")
-  let cobra_cmd = make_command(
+  let mut cobra_cmd = make_command(
     "cobra",
     "Smoke-test cobra interop",
     run_smoke_cobra,
   )
+
+  let mut capp_grammar = ""
   let mut capp_cmd = make_command(
     "capp",
     "Smoke-test capp-parse interop",
-    run_smoke_capp,
+    |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      let result = smoke.smoke_capp(capp_grammar)
+      let icon = if result.ok { "✓" } else { "✗" }
+      fmt.Println(f"{icon}  {result.name}: {result.note}")
+    },
   )
-  let _ = capp_cmd
+  capp_cmd
     .Flags()
-    .String("grammar", "", "explicit path to grammar dylib")
+    .StringVar(&capp_grammar, "grammar", "", "explicit path to grammar dylib")
+
+  let mut boundary_grammar = ""
   let mut boundary_cmd = make_command(
     "boundary",
     "Verify the capp-parse surface matches BoundaryVersion 2",
-    run_smoke_boundary,
+    |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      let result = smoke.smoke_boundary(boundary_grammar)
+      let icon = if result.ok { "✓" } else { "✗" }
+      fmt.Println(f"{icon}  {result.name}: {result.note}")
+    },
   )
-  let _ = boundary_cmd
+  boundary_cmd
     .Flags()
-    .String("grammar", "", "explicit path to grammar dylib")
-  let mut all_cmd = make_command("all", "Run all smoke tests", run_smoke_all)
-  let _ = all_cmd
+    .StringVar(
+      &boundary_grammar,
+      "grammar",
+      "",
+      "explicit path to grammar dylib",
+    )
+
+  let mut all_grammar = ""
+  let mut all_cmd = make_command(
+    "all",
+    "Run all smoke tests",
+    |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      smoke.smoke_all(all_grammar)
+    },
+  )
+  all_cmd
     .Flags()
-    .String("grammar", "", "explicit path to grammar dylib")
+    .StringVar(&all_grammar, "grammar", "", "explicit path to grammar dylib")
+
   smoke_cmd.AddCommand(&cobra_cmd)
   smoke_cmd.AddCommand(&capp_cmd)
   smoke_cmd.AddCommand(&boundary_cmd)
@@ -351,10 +365,10 @@ fn new_smoke_cmd() -> cobra.Command {
 
 fn main() {
   let mut root = make_group("capp-build", "Cappuccino source compiler")
-  let build_cmd = new_build_cmd()
-  let version_cmd = new_version_cmd()
-  let verify_cmd = new_verify_cmd()
-  let smoke_cmd = new_smoke_cmd()
+  let mut build_cmd = new_build_cmd()
+  let mut version_cmd = new_version_cmd()
+  let mut verify_cmd = new_verify_cmd()
+  let mut smoke_cmd = new_smoke_cmd()
   root.AddCommand(&build_cmd)
   root.AddCommand(&version_cmd)
   root.AddCommand(&verify_cmd)

@@ -35,7 +35,9 @@ pub struct PreprocessResult {
   pub diags: Slice<Diagnostic>,
 }
 
-pub fn run_preprocess_sources(ctx: Ref<BuildContext>) -> Result<PreprocessResult, error> {
+pub fn run_preprocess_sources(
+  ctx: Ref<BuildContext>,
+) -> Result<PreprocessResult, error> {
   let parsed = match ctx.parsed {
     Some(p) => p,
     None => return Err(errors.New(

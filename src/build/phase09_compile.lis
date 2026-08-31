@@ -168,7 +168,10 @@ fn record_name(ctx: Ref<BuildContext>, path: string) -> string {
 // write_records materialises the per-file records under
 // Build/capp-build.build/<Mode>/Sources/, the comparison surface for
 // payload_oracle.py.
-fn write_records(ctx: Ref<BuildContext>, records: Slice<CompiledRecord>) -> Result<(), error> {
+fn write_records(
+  ctx: Ref<BuildContext>,
+  records: Slice<CompiledRecord>,
+) -> Result<(), error> {
   let mode_dir = match ctx.config.mode {
     Debug => "Debug",
     Release => "Release",
