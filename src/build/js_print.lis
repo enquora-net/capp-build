@@ -3166,7 +3166,9 @@ impl JsPrint {
       )
       items_diags
     }
-    write(buf, ")")
+    // init_send leaves the init call open and alloc_head_write leaves the
+    // wrapper open.  Both need a close, as in the message-send path.
+    write(buf, "))")
     receiver_exit(receivers)
     diags
   }
@@ -3214,7 +3216,9 @@ impl JsPrint {
       )
       all_diags
     }
-    write(buf, ")")
+    // init_send leaves the init call open and alloc_head_write leaves the
+    // wrapper open.  Both need a close, as in the message-send path.
+    write(buf, "))")
     receiver_exit(receivers)
     diags
   }
@@ -3271,7 +3275,9 @@ impl JsPrint {
       diags,
       self.expression(buf, receivers, deref.argument.*, ind),
     )
-    write(buf, "() " + op + " 1)")
+    // The second close ends the group that wraps the setter call.  Without it
+    // the outermost paren opened by core_open is never closed.
+    write(buf, "() " + op + " 1))")
     if !is_prefix {
       let undo = match operator {
         Increment => " - 1)",
