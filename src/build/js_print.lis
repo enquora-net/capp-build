@@ -48,7 +48,7 @@
 //     legacy warns on the pattern anyway.
 //
 // Deferred constructs route through named catch-all diagnostics, per the
-// house pattern: message sends and the @accessors(copy) setter (tier C),
+// house pattern: message sends (tier C),
 // ObjJ expression literals -- @"...", @[...], @{...}, @selector, @protocol
 // expressions, @ref/@deref (tier D), and #if blocks (pending the
 // build-feature environment, PHASE-8-BRIEF.md decision 4).  Each deferral
@@ -2777,8 +2777,8 @@ impl JsPrint {
   // synthesized_accessor_entries writes the getter (and setter unless
   // readonly) objj_method entries for one @accessors directive directly
   // into im_buf.  Naming reuses phase 6's rules; an explicit method with
-  // the same selector wins silently.  The copy setter variant embeds a
-  // message send and is deferred with tier C.
+  // the same selector wins silently.  The copy setter variant sends -copy
+  // to the new value, in the legacy compiler's guarded dispatch form.
   fn synthesized_accessor_entries(
     self,
     im_buf: mut Ref<strings.Builder>,
@@ -2833,17 +2833,6 @@ impl JsPrint {
     if readonly { return [] }
     if occupied[setter] { return [] }
     occupied[setter] = true
-    if copy {
-      return [
-        diag_warn_at(
-          BuildPhase.Compile,
-          "codegen: @accessors(copy) setter deferred pending tier C dispatch",
-          self.file,
-          field.pos.row,
-          field.pos.col,
-        ),
-      ]
-    }
     if any { let _ = im_buf.WriteString(", ") }
     let mangled = strings.ReplaceAll(setter, ":", "_")
     let _ = im_buf.WriteString(
@@ -2852,9 +2841,18 @@ impl JsPrint {
       mangled +
       "(self, _cmd, newValue)\n",
     )
-    let _ = im_buf.WriteString(
-      "{\n    self." + field.name.text + " = newValue;\n}\n\n",
-    )
+    let ivar = "self." + field.name.text
+    if copy {
+      let _ = im_buf.WriteString(
+        "{\n    if (" + ivar + " !== newValue)\n        " + ivar +
+        " = (newValue == null ? newValue : " +
+        "(newValue.isa.method_msgSend[\"copy\"] || _objj_forward)(newValue, " +
+        self.selector_argument("newValue", true, "copy") +
+        "));\n}\n\n",
+      )
+    } else {
+      let _ = im_buf.WriteString("{\n    " + ivar + " = newValue;\n}\n\n")
+    }
     let _ = im_buf.WriteString(",[\"void\",\"" + type_name + "\"])")
     []
   }
