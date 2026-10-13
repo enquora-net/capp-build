@@ -2181,11 +2181,10 @@ impl JsPrint {
         write(buf, "]")
         diags
       },
-      ObjjString(literal) => self.deferred(
-        "@\"...\" property name",
-        "tier D",
-        literal.pos,
-      ),
+      ObjjString(literal) => {
+        write(buf, literal.value.text)
+        []
+      },
     }
   }
 
