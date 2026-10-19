@@ -13,6 +13,7 @@
 // **
 import "go:fmt"
 import "go:github.com/enquora-net/capp-parse"
+import "go:os"
 import "go:path/filepath"
 import "go:strings"
 
@@ -57,7 +58,9 @@ fn classify(path: string) -> SourceKind {
 //   Frameworks/          — framework source is consumed via import resolution only
 //   Build/               — build artefact output directories
 //   *.environment/       — compiled Cappuccino runtime bundle directories
+//   CommonJS/            — legacy Node toolchain code, never browser source
 //   .cappuccino/         — toolchain metadata directory
+//   nested projects      — any subdirectory carrying its own Info.plist
 pub fn run_walk_source_tree(ctx: Ref<BuildContext>) -> Result<SourceTree, error> {
   let diags: Slice<Diagnostic> = []
 
@@ -77,12 +80,14 @@ pub fn run_walk_source_tree(ctx: Ref<BuildContext>) -> Result<SourceTree, error>
     "ObjJ.environment",
     "Browser.environment",
     "CommonJS.environment",
+    "CommonJS",
     ".cappuccino",
   ]
   let paths = capp.SourcePaths(ctx.root.path, capp.ModeAuto, skip)?
 
   let mut files: Slice<SourceFile> = []
   for path in paths {
+    if in_nested_project(ctx.root.path, path) { continue }
     files = files.append(SourceFile { path, kind: classify(path) })
   }
 
@@ -100,4 +105,19 @@ pub fn run_walk_source_tree(ctx: Ref<BuildContext>) -> Result<SourceTree, error>
   )
 
   Ok(SourceTree { files, diags })
+}
+
+// in_nested_project reports whether path lies inside a subdirectory of root
+// that carries its own Info.plist.  Such a directory is a separate project --
+// a theme, or a framework such as BlendKit under AppKit/Themes -- built on
+// its own, never part of the enclosing project's sources.
+fn in_nested_project(root: string, path: string) -> bool {
+  let mut dir = filepath.Dir(path)
+  loop {
+    if dir == root { return false }
+    if os.Stat(filepath.Join(dir, "Info.plist")).is_ok() { return true }
+    let parent = filepath.Dir(dir)
+    if parent == dir { return false }
+    dir = parent
+  }
 }
