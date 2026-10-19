@@ -85,6 +85,9 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
     Release | Clean => "",
   }
 
+  // The global name sets identifier resolution consults, built once per build.
+  let known = build_known_names(ctx.symbols)
+
   let mut records: Slice<CompiledRecord> = []
   for path in sorted.order {
     let mut found: Option<ParsedUnit> = None
@@ -107,6 +110,7 @@ pub fn run_compile(ctx: Ref<BuildContext>) -> Result<CompileOutput, error> {
       unit.program,
       path,
       ctx.symbols,
+      known,
       debug_dispatch,
     )
     diags = merge_diags(diags, printed.diags)

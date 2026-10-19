@@ -1,0 +1,370 @@
+//**
+// build/name_resolution.lis
+// capp-build
+//
+// Name resolution for identifiers in generated code.
+//
+// Every identifier the emitter reads resolves to exactly one NameResolution.
+// The emitter matches on it exhaustively: an ivar is emitted as self.<name>,
+// every other resolved name is emitted unchanged, and an unresolved name is a
+// compile error.  A name that resolves nowhere cannot reach the output
+// silently.
+//
+// Resolution order, first match wins:
+//
+//   Local          reserved names, locals and parameters of the enclosing
+//                  functions, and names declared at the top level of the file
+//   Ivar           an ivar of the current class (instance methods only)
+//   ProjectGlobal  a class, forward declaration or @global of the project, or
+//                  a global the project defines at the top level of a file
+//   FrameworkGlobal a class or global defined by an imported framework, read
+//                  from its compiled bundle
+//   RuntimeGlobal  a global defined by the Objective-J runtime, or a parameter
+//                  the runtime passes to every compiled file
+//   HostGlobal     an ECMAScript built-in or a browser global
+//   Unresolved     none of the above
+//
+// **
+
+pub enum NameResolution {
+  Local,
+  Ivar,
+  ProjectGlobal,
+  FrameworkGlobal,
+  RuntimeGlobal,
+  HostGlobal,
+  Unresolved,
+}
+
+// KnownNames holds the global name sets resolution consults after lexical
+// scope and ivars.  It is built once per build from the symbol table.
+pub struct KnownNames {
+  pub project: Map<string, bool>,
+  pub framework: Map<string, bool>,
+  pub runtime: Map<string, bool>,
+  pub host: Map<string, bool>,
+}
+
+// build_known_names builds the global name sets from the symbol table.
+pub fn build_known_names(symbols: Option<SymbolTable>) -> KnownNames {
+  let mut project: mut Map<string, bool> = Map.new<string, bool>()
+  let mut framework: mut Map<string, bool> = Map.new<string, bool>()
+  let mut runtime: mut Map<string, bool> = Map.new<string, bool>()
+  let mut host: mut Map<string, bool> = Map.new<string, bool>()
+
+  if let Some(table) = symbols {
+    for class_symbol in table.classes {
+      project[class_symbol.name] = true
+    }
+    for forward in table.forwards {
+      project[forward.name] = true
+    }
+    for global in table.globals {
+      project[global.name] = true
+    }
+    for name in table.project_globals {
+      project[name] = true
+    }
+    for external in table.external {
+      framework[external.name] = true
+    }
+    for name in table.external_globals {
+      framework[name] = true
+    }
+    for name in table.runtime_globals {
+      runtime[name] = true
+    }
+  }
+  for name in compiled_file_parameters() {
+    runtime[name] = true
+  }
+  for name in host_global_names() {
+    host[name] = true
+  }
+  KnownNames { project, framework, runtime, host }
+}
+
+// compiled_file_parameters are the parameter names the browser runtime gives
+// the function wrapping every compiled file
+// (Executable.prototype.functionParameters).
+fn compiled_file_parameters() -> Slice<string> {
+  ["global", "objj_executeFile", "objj_importFile"]
+}
+
+// host_global_names lists the ECMAScript built-ins and browser globals a
+// compiled file may reference without declaring them.
+pub fn host_global_names() -> Slice<string> {
+  [
+    // ECMAScript value properties and functions
+    "globalThis",
+    "Infinity",
+    "NaN",
+    "undefined",
+    "eval",
+    "isFinite",
+    "isNaN",
+    "parseFloat",
+    "parseInt",
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "escape",
+    "unescape",
+    // ECMAScript constructors and namespaces
+    "Object",
+    "Function",
+    "Array",
+    "Number",
+    "Boolean",
+    "String",
+    "Symbol",
+    "BigInt",
+    "Date",
+    "RegExp",
+    "Error",
+    "AggregateError",
+    "EvalError",
+    "RangeError",
+    "ReferenceError",
+    "SyntaxError",
+    "TypeError",
+    "URIError",
+    "Math",
+    "JSON",
+    "Reflect",
+    "Proxy",
+    "Promise",
+    "Map",
+    "Set",
+    "WeakMap",
+    "WeakSet",
+    "WeakRef",
+    "FinalizationRegistry",
+    "ArrayBuffer",
+    "SharedArrayBuffer",
+    "DataView",
+    "Atomics",
+    "Int8Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "Int16Array",
+    "Uint16Array",
+    "Int32Array",
+    "Uint32Array",
+    "Float32Array",
+    "Float64Array",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Intl",
+    // Window and document
+    "window",
+    "document",
+    "navigator",
+    "location",
+    "history",
+    "screen",
+    "frames",
+    "parent",
+    "top",
+    "opener",
+    "frameElement",
+    "name",
+    "status",
+    "event",
+    "external",
+    "devicePixelRatio",
+    "innerWidth",
+    "innerHeight",
+    "outerWidth",
+    "outerHeight",
+    "screenX",
+    "screenY",
+    "screenLeft",
+    "screenTop",
+    "scrollX",
+    "scrollY",
+    "pageXOffset",
+    "pageYOffset",
+    "visualViewport",
+    "customElements",
+    "isSecureContext",
+    "origin",
+    // Window functions
+    "alert",
+    "confirm",
+    "prompt",
+    "print",
+    "open",
+    "close",
+    "stop",
+    "focus",
+    "blur",
+    "postMessage",
+    "getComputedStyle",
+    "getSelection",
+    "matchMedia",
+    "scroll",
+    "scrollTo",
+    "scrollBy",
+    "moveTo",
+    "moveBy",
+    "resizeTo",
+    "resizeBy",
+    "addEventListener",
+    "removeEventListener",
+    "dispatchEvent",
+    // Timers and scheduling
+    "setTimeout",
+    "clearTimeout",
+    "setInterval",
+    "clearInterval",
+    "requestAnimationFrame",
+    "cancelAnimationFrame",
+    "requestIdleCallback",
+    "cancelIdleCallback",
+    "queueMicrotask",
+    "structuredClone",
+    "reportError",
+    // Encoding, storage, crypto, performance, console
+    "atob",
+    "btoa",
+    "TextEncoder",
+    "TextDecoder",
+    "localStorage",
+    "sessionStorage",
+    "indexedDB",
+    "caches",
+    "crypto",
+    "performance",
+    "console",
+    // Networking
+    "fetch",
+    "XMLHttpRequest",
+    "FormData",
+    "Headers",
+    "Request",
+    "Response",
+    "URL",
+    "URLSearchParams",
+    "WebSocket",
+    "EventSource",
+    "AbortController",
+    "AbortSignal",
+    // Files and binary data
+    "Blob",
+    "File",
+    "FileList",
+    "FileReader",
+    "DataTransfer",
+    "DataTransferItem",
+    "DataTransferItemList",
+    "ClipboardItem",
+    // Workers and messaging
+    "Worker",
+    "SharedWorker",
+    "MessageChannel",
+    "MessagePort",
+    "BroadcastChannel",
+    "Notification",
+    // DOM nodes and ranges
+    "EventTarget",
+    "Node",
+    "Element",
+    "Document",
+    "DocumentFragment",
+    "HTMLDocument",
+    "Text",
+    "Comment",
+    "CDATASection",
+    "Attr",
+    "NodeList",
+    "HTMLCollection",
+    "NamedNodeMap",
+    "Range",
+    "Selection",
+    "DOMParser",
+    "XMLSerializer",
+    "XPathResult",
+    "TreeWalker",
+    "NodeFilter",
+    "DOMException",
+    "DOMRect",
+    "DOMMatrix",
+    "DOMPoint",
+    "DOMTokenList",
+    "ShadowRoot",
+    // HTML elements
+    "HTMLElement",
+    "HTMLAnchorElement",
+    "HTMLAudioElement",
+    "HTMLBodyElement",
+    "HTMLButtonElement",
+    "HTMLCanvasElement",
+    "HTMLDivElement",
+    "HTMLFormElement",
+    "HTMLIFrameElement",
+    "HTMLImageElement",
+    "HTMLInputElement",
+    "HTMLLabelElement",
+    "HTMLLinkElement",
+    "HTMLOptionElement",
+    "HTMLScriptElement",
+    "HTMLSelectElement",
+    "HTMLSpanElement",
+    "HTMLStyleElement",
+    "HTMLTableElement",
+    "HTMLTextAreaElement",
+    "HTMLVideoElement",
+    "Image",
+    "Audio",
+    "Option",
+    "SVGElement",
+    "SVGSVGElement",
+    // Events
+    "Event",
+    "CustomEvent",
+    "UIEvent",
+    "MouseEvent",
+    "WheelEvent",
+    "KeyboardEvent",
+    "FocusEvent",
+    "InputEvent",
+    "CompositionEvent",
+    "TouchEvent",
+    "Touch",
+    "TouchList",
+    "PointerEvent",
+    "DragEvent",
+    "ClipboardEvent",
+    "ErrorEvent",
+    "ProgressEvent",
+    "MessageEvent",
+    "AnimationEvent",
+    "TransitionEvent",
+    "PopStateEvent",
+    "HashChangeEvent",
+    "StorageEvent",
+    // Observers and styling
+    "MutationObserver",
+    "ResizeObserver",
+    "IntersectionObserver",
+    "PerformanceObserver",
+    "CSS",
+    "CSSStyleDeclaration",
+    "CSSStyleSheet",
+    "StyleSheet",
+    "MediaQueryList",
+    // Canvas and graphics
+    "CanvasRenderingContext2D",
+    "CanvasGradient",
+    "CanvasPattern",
+    "Path2D",
+    "ImageData",
+    "ImageBitmap",
+    "OffscreenCanvas",
+    "createImageBitmap",
+    "WebGLRenderingContext",
+    "WebGL2RenderingContext",
+  ]
+}

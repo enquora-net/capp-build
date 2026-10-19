@@ -83,6 +83,7 @@ pub fn print_js_program(
   program: Program,
   file: string,
   symbols: Option<SymbolTable>,
+  known: KnownNames,
   debug_dispatch: bool,
 ) -> JsPrinted {
   let mut known_classes: mut Map<string, bool> = Map.new<string, bool>()
@@ -97,7 +98,26 @@ pub fn print_js_program(
   let mut top_receivers: mut Map<string, int> = Map.new<string, int>()
   top_receivers["level"] = 0
   top_receivers["max"] = 0
-  let p = JsPrint { file, symbols, known_classes, debug_dispatch, .. }
+  // Names declared at the top level of the file: compiled code runs inside a
+  // function per file, so these are visible throughout the file only.
+  let mut file_names: mut Map<string, bool> = Map.new<string, bool>()
+  let mut top_level: Slice<string> = []
+  for st in program.body {
+    top_level = statement_declared_names(st, top_level)
+    top_level = implementation_declared_names(st, top_level)
+  }
+  for name in top_level {
+    file_names[name] = true
+  }
+  let p = JsPrint {
+    file,
+    symbols,
+    known,
+    file_names,
+    known_classes,
+    debug_dispatch,
+    ..,
+  }
   let mut buf = strings.Builder { .. }
   if let Some(hash_bang) = program.hash_bang {
     write(&buf, hash_bang.text)
@@ -111,12 +131,14 @@ pub fn print_js_program(
       p.statement(&buf, top_receivers, program.body[i], "", i < prologue),
     )
   }
-  JsPrinted { text: buf.String(), diags }
+  JsPrinted { text: buf.String(), diags: first_unresolved_per_name(diags) }
 }
 
 struct JsPrint {
   file: string,
   symbols: Option<SymbolTable>,
+  known: KnownNames,
+  file_names: Map<string, bool>,
   known_classes: Map<string, bool>,
   debug_dispatch: bool,
   current_class: Option<ClassContext>,
@@ -1728,28 +1750,82 @@ impl JsPrint {
     ind: string,
   ) -> Slice<Diagnostic> {
     match lhs {
-      Identifier(identifier) => self.identifier(buf, identifier),
+      Identifier(identifier) => self.identifier_target(buf, identifier),
       _ => self.lhs_expression(buf, receivers, lhs, ind),
     }
   }
 
+  // identifier emits an identifier that is read.  Every name resolves to
+  // exactly one NameResolution; an unresolved name is a compile error.
   fn identifier(
     self,
     buf: mut Ref<strings.Builder>,
     identifier: Identifier,
   ) -> Slice<Diagnostic> {
-    if self.in_instance_method && !reserved_identifier(identifier.text) && !self.is_local(
-      identifier.text,
-    ) {
+    match self.resolve(identifier.text) {
+      Ivar => {
+        write(buf, f"self.{identifier.text}")
+        []
+      },
+      Local | ProjectGlobal | FrameworkGlobal | RuntimeGlobal | HostGlobal => {
+        write(buf, identifier.text)
+        []
+      },
+      Unresolved => {
+        write(buf, identifier.text)
+        [
+          diag_error_at(
+            BuildPhase.Compile,
+            f"unresolved identifier '{identifier.text}': not a local, ivar, or a global of the project, its frameworks, the runtime or the browser",
+            self.file,
+            identifier.pos.row,
+            identifier.pos.col,
+          ),
+        ]
+      },
+    }
+  }
+
+  // identifier_target emits an identifier that is assigned to.  Assigning to
+  // a name declared nowhere defines an implicit global, so an unresolved
+  // target is not an error.
+  fn identifier_target(
+    self,
+    buf: mut Ref<strings.Builder>,
+    identifier: Identifier,
+  ) -> Slice<Diagnostic> {
+    match self.resolve(identifier.text) {
+      Ivar => write(buf, f"self.{identifier.text}"),
+      Local |
+      ProjectGlobal |
+      FrameworkGlobal |
+      RuntimeGlobal |
+      HostGlobal |
+      Unresolved => write(buf, identifier.text),
+    }
+    []
+  }
+
+  // resolve classifies a name, first match wins: lexical scope, the current
+  // class's ivars, the file's top-level declarations, then the project,
+  // framework, runtime and host global sets.
+  fn resolve(self, name: string) -> NameResolution {
+    if reserved_identifier(name) || self.is_local(name) {
+      return NameResolution.Local
+    }
+    if self.in_instance_method {
       if let Some(context) = self.current_class {
-        if context.ivars[identifier.text] {
-          write(buf, f"self.{identifier.text}")
-          return []
-        }
+        if context.ivars[name] { return NameResolution.Ivar }
       }
     }
-    write(buf, identifier.text)
-    []
+    if self.file_names[name] { return NameResolution.Local }
+    if self.known_classes[name] || self.known.project[name] {
+      return NameResolution.ProjectGlobal
+    }
+    if self.known.framework[name] { return NameResolution.FrameworkGlobal }
+    if self.known.runtime[name] { return NameResolution.RuntimeGlobal }
+    if self.known.host[name] { return NameResolution.HostGlobal }
+    NameResolution.Unresolved
   }
 
   fn is_local(self, name: string) -> bool {
@@ -3745,6 +3821,51 @@ fn statement_declared_names(
     },
     _ => names,
   }
+}
+
+// implementation_declared_names adds the variables declared between the
+// methods of a class implementation.  They compile to file-level variables,
+// visible throughout the file like top-level declarations.
+fn implementation_declared_names(
+  st: Statement,
+  names: Slice<string>,
+) -> Slice<string> {
+  let mut names = names
+  if let Statement.ObjjClassImpl(implementation) = st {
+    for member in implementation.members {
+      match member {
+        Variable(variable) => names = declarator_names(
+          variable.declarators,
+          names,
+        ),
+        Method(_) => (),
+        PreprocDirective(_) => (),
+        Global(_) => (),
+        Function(_) => (),
+        GeneratorFunction(_) => (),
+        Empty(_) => (),
+      }
+    }
+  }
+  names
+}
+
+// first_unresolved_per_name keeps one unresolved-identifier error per name
+// in a file, the first; every other diagnostic is kept unchanged.
+fn first_unresolved_per_name(diags: Slice<Diagnostic>) -> Slice<Diagnostic> {
+  let mut seen: mut Map<string, bool> = Map.new<string, bool>()
+  let mut kept: Slice<Diagnostic> = []
+  for d in diags {
+    if d.level == DiagLevel.Error && strings.HasPrefix(
+      d.message,
+      "unresolved identifier",
+    ) {
+      if seen[d.message] { continue }
+      seen[d.message] = true
+    }
+    kept = kept.append(d)
+  }
+  kept
 }
 
 fn declarator_names(

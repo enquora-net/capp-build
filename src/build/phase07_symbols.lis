@@ -82,6 +82,9 @@ pub struct PreprocGuard {
 pub struct SymbolTable {
   pub classes: Slice<ClassSymbol>,
   pub external: Slice<ExternalClass>, // classes declared by imported frameworks
+  pub external_globals: Slice<string>, // globals defined by imported frameworks
+  pub runtime_globals: Slice<string>, // globals defined by the Objective-J runtime
+  pub project_globals: Slice<string>, // globals defined at the top level of project files
   pub protocols: Slice<ProtocolSymbol>,
   pub forwards: Slice<ForwardSymbol>,
   pub typedefs: Slice<TypedefSymbol>,
@@ -272,6 +275,7 @@ pub fn run_build_symbol_table(
   }
 
   let mut total = empty_harvest()
+  let mut project_globals: Slice<string> = []
   for path in sorted.order {
     let index = unit_index[path]
     if index == 0 {
@@ -286,6 +290,7 @@ pub fn run_build_symbol_table(
           total,
           harvest_statement(statement, [], unit.source.path),
         )
+        project_globals = top_level_globals(statement, project_globals)
       }
     }
   }
@@ -304,6 +309,15 @@ pub fn run_build_symbol_table(
       f"no compiled bundle found for {framework}; ivars inherited from it will not resolve",
     ))
   }
+  let runtime_globals = harvest_runtime_globals(ctx.root.path).unwrap_or_else(
+    || {
+      diags = diags.append(diag_warn(
+        phase,
+        "no Objective-J runtime found; names it defines will not resolve",
+      ))
+      []
+    },
+  )
 
   for d in diags {
     print_symbol_diag(d)
@@ -337,6 +351,9 @@ pub fn run_build_symbol_table(
     SymbolTable {
       classes: total.classes,
       external: external.classes,
+      external_globals: external.globals,
+      runtime_globals,
+      project_globals,
       protocols: total.protocols,
       forwards: total.forwards,
       typedefs: total.typedefs,
@@ -344,6 +361,176 @@ pub fn run_build_symbol_table(
       diags,
     },
   )
+}
+
+// top_level_globals adds the globals one top-level statement of a project file
+// defines: the names of top-level function declarations, which compile to
+// global assignments (including functions declared between the methods of a
+// class implementation), and the identifiers assigned in top-level code,
+// including inside top-level blocks and loops.  Function bodies are not
+// entered, and var, let, const and class declarations are local to the file.
+fn top_level_globals(
+  statement: Statement,
+  names: Slice<string>,
+) -> Slice<string> {
+  let mut names = names
+  match statement {
+    Declaration(declaration) => match declaration {
+      Function(function) => names.append(function.name.text),
+      GeneratorFunction(generator) => names.append(generator.name.text),
+      Class(_) => names,
+      Lexical(_) => names,
+      Variable(_) => names,
+      Using(_) => names,
+    },
+    Expression(expression_statement) => assigned_in_expressions(
+      expression_statement.expression.*,
+      names,
+    ),
+    BlockScope(block) => {
+      for nested in block.body {
+        names = top_level_globals(nested, names)
+      }
+      names
+    },
+    If(if_statement) => {
+      names = top_level_globals(if_statement.consequence.*, names)
+      if let Some(alternative) = if_statement.alternative {
+        names = top_level_globals(alternative.body.*, names)
+      }
+      names
+    },
+    Switch(switch_statement) => {
+      for entry in switch_statement.body.entries {
+        match entry {
+          Case(case) => {
+            for nested in case.body {
+              names = top_level_globals(nested, names)
+            }
+          },
+          Default(default) => {
+            for nested in default.body {
+              names = top_level_globals(nested, names)
+            }
+          },
+        }
+      }
+      names
+    },
+    Try(try_statement) => {
+      for nested in try_statement.body.body {
+        names = top_level_globals(nested, names)
+      }
+      if let Some(handler) = try_statement.handler {
+        for nested in handler.body.body {
+          names = top_level_globals(nested, names)
+        }
+      }
+      if let Some(finalizer) = try_statement.finalizer {
+        for nested in finalizer.body.body {
+          names = top_level_globals(nested, names)
+        }
+      }
+      names
+    },
+    For(for_statement) => top_level_globals(for_statement.body.*, names),
+    ForIn(for_in) => top_level_globals(for_in.body.*, names),
+    While(while_statement) => top_level_globals(while_statement.body.*, names),
+    Do(do_statement) => top_level_globals(do_statement.body.*, names),
+    With(with_statement) => top_level_globals(with_statement.body.*, names),
+    Labeled(labeled) => top_level_globals(labeled.body.*, names),
+    Export(_) => names,
+    Import(_) => names,
+    Debugger(_) => names,
+    Break(_) => names,
+    Continue(_) => names,
+    Return(_) => names,
+    Throw(_) => names,
+    Empty(_) => names,
+    ObjjImport(_) => names,
+    ObjjGlobal(_) => names,
+    ObjjClassForward(_) => names,
+    ObjjTypedef(_) => names,
+    ObjjProtocol(_) => names,
+    ObjjClassImpl(implementation) => {
+      // Functions declared between methods compile to globals, like
+      // top-level functions.
+      for member in implementation.members {
+        match member {
+          Function(function) => names = names.append(function.name.text),
+          GeneratorFunction(generator) => names = names.append(
+            generator.name.text,
+          ),
+          Method(_) => (),
+          PreprocDirective(_) => (),
+          Global(_) => (),
+          Variable(_) => (),
+          Empty(_) => (),
+        }
+      }
+      names
+    },
+    PreprocIf(_) => names,
+    PreprocDirective(_) => names,
+  }
+}
+
+// assigned_in_expressions adds the identifiers assigned to in an expression
+// statement's expressions.
+fn assigned_in_expressions(
+  expressions: Expressions,
+  names: Slice<string>,
+) -> Slice<string> {
+  let mut names = names
+  match expressions {
+    Single(expression) => assigned_in_expression(expression, names),
+    Sequence(sequence) => {
+      for item in sequence.items {
+        names = assigned_in_expression(item, names)
+      }
+      names
+    },
+  }
+}
+
+// assigned_in_expression adds the identifier an assignment expression assigns
+// to, following chained assignments (a = b = c).
+fn assigned_in_expression(
+  expression: Expression,
+  names: Slice<string>,
+) -> Slice<string> {
+  match expression {
+    Assignment(assignment) => match assignment {
+      Standard(standard) => {
+        let names = assigned_in_expression(standard.right.*, names)
+        match standard.left {
+          Lhs(lhs) => match lhs.* {
+            Identifier(identifier) => names.append(identifier.text),
+            Member(_) => names,
+            Subscript(_) => names,
+            Undefined(_) => names,
+            Destructuring(_) => names,
+          },
+          Parenthesized(_) => names,
+        }
+      },
+      ObjjDeref(_) => names,
+    },
+    AugmentedAssignment(augmented) => match augmented.left {
+      Identifier(identifier) => names.append(identifier.text),
+      Member(_) => names,
+      Subscript(_) => names,
+      Parenthesized(_) => names,
+    },
+    Primary(_) => names,
+    Await(_) => names,
+    Unary(_) => names,
+    Binary(_) => names,
+    Ternary(_) => names,
+    Update(_) => names,
+    New(_) => names,
+    Yield(_) => names,
+  }
 }
 
 // imported_frameworks returns the distinct frameworks named by the project's

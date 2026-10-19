@@ -2,8 +2,9 @@
 // build/external_symbols.lis
 // capp-build
 //
-// Class symbols harvested from the compiled bundles of the frameworks a
-// project imports.
+// Class and global symbols harvested from the compiled bundles of the
+// frameworks a project imports, and globals harvested from the Objective-J
+// runtime.
 //
 // The symbol table (phase 7) records only the project's own classes.  Code
 // generation also needs the ivars of classes defined elsewhere: a subclass or
@@ -24,9 +25,19 @@
 //   if(!the_class) throw ...
 //   var meta_class = the_class.isa;class_addIvars(the_class, [...]);
 //
+// Name resolution also needs every global a framework or the runtime defines.
+// In compiled code a cross-file global is always an assignment -- a top-level
+// function compiles to `Name = function` -- so the globals of a bundle or of
+// Objective-J.js are taken as every identifier assigned to anywhere in it,
+// plus `global.<name>` and `window.<name>` assignments.  This over-approximates
+// (an assigned local is included), which can only hide an unresolved name
+// that happens to share a name with some assigned identifier, never reject a
+// defined one.
+//
 // Bundles are located the way the build lays them out: an application's own
 // Frameworks/<Name>, then, walking upward, the package output
-// Build/modern/Frameworks/<Name> and the legacy Build/Frameworks/<Name>.
+// Build/modern/Frameworks/<Name> and the legacy Build/Frameworks/<Name>.  The
+// runtime is Objective-J.js in the Objective-J directory of the same places.
 //
 // **
 import "go:os"
@@ -43,20 +54,23 @@ pub struct ExternalClass {
 }
 
 // ExternalHarvest is the result of harvesting a set of frameworks: the
-// classes found, the frameworks read, and those with no compiled bundle.
+// classes and globals found, the frameworks read, and those with no compiled
+// bundle.
 pub struct ExternalHarvest {
   pub classes: Slice<ExternalClass>,
+  pub globals: Slice<string>,
   pub found: Slice<string>,
   pub missing: Slice<string>,
 }
 
 // harvest_external_classes reads the compiled bundle of each named framework
-// and returns the classes it declares.
+// and returns the classes and globals it declares.
 pub fn harvest_external_classes(
   root: string,
   frameworks: Slice<string>,
 ) -> ExternalHarvest {
   let mut classes: Slice<ExternalClass> = []
+  let mut globals: Slice<string> = []
   let mut found: Slice<string> = []
   let mut missing: Slice<string> = []
   for framework in frameworks {
@@ -74,9 +88,49 @@ pub fn harvest_external_classes(
     for class in classes_in_archive(content) {
       classes = classes.append(class)
     }
+    for name in globals_in_script(content) {
+      globals = globals.append(name)
+    }
     found = found.append(framework)
   }
-  ExternalHarvest { classes, found, missing }
+  ExternalHarvest { classes, globals, found, missing }
+}
+
+// harvest_runtime_globals reads Objective-J.js and returns the globals it
+// defines, or None when no runtime script is found.
+pub fn harvest_runtime_globals(root: string) -> Option<Slice<string>> {
+  for candidate in framework_dir_candidates(root, "Objective-J") {
+    let script = filepath.Join(candidate, "Objective-J.js")
+    if let Ok(data) = os.ReadFile(script) {
+      return Some(globals_in_script(data as string))
+    }
+  }
+  None
+}
+
+// globals_in_script returns every identifier assigned to anywhere in a
+// compiled script, plus the targets of global.<name> and window.<name>
+// assignments.
+fn globals_in_script(content: string) -> Slice<string> {
+  let assignment_pattern = regexp.MustCompile(
+    "(?m)(?:^|[^.\\w$])([A-Za-z_$][\\w$]*)[ \\t]*(?:[-+*/%&|^]|<<|>>>?|\\*\\*|\\?\\?|\\|\\||&&)?=[^=>]",
+  )
+  let property_pattern = regexp.MustCompile(
+    "(?:global|window)\\.([A-Za-z_$][\\w$]*)[ \\t]*=[^=]",
+  )
+  let mut seen: mut Map<string, bool> = Map.new<string, bool>()
+  let mut names: Slice<string> = []
+  for m in assignment_pattern.FindAllStringSubmatch(content, -1) {
+    if seen[m[1]] { continue }
+    seen[m[1]] = true
+    names = names.append(m[1])
+  }
+  for m in property_pattern.FindAllStringSubmatch(content, -1) {
+    if seen[m[1]] { continue }
+    seen[m[1]] = true
+    names = names.append(m[1])
+  }
+  names
 }
 
 // classes_in_archive extracts every class and ivar-declaring category from
@@ -124,12 +178,27 @@ fn ivar_names(list: string) -> Slice<string> {
 }
 
 // find_framework_archive returns the path of the compiled bundle for
-// framework, searching root/Frameworks/<framework> first, then each
-// ancestor's Build/modern/Frameworks/<framework> and Build/Frameworks/<framework>.
+// framework, searching the directories framework_dir_candidates yields.
 fn find_framework_archive(root: string, framework: string) -> Option<string> {
-  let mut candidates: Slice<string> = [
-    filepath.Join(root, "Frameworks", framework),
+  let environments = [
+    "Browser.environment",
+    "ObjJ.environment",
+    "CommonJS.environment",
   ]
+  for candidate in framework_dir_candidates(root, framework) {
+    for environment in environments {
+      let archive = filepath.Join(candidate, environment, f"{framework}.sj")
+      if os.Stat(archive).is_ok() { return Some(archive) }
+    }
+  }
+  None
+}
+
+// framework_dir_candidates lists where a framework directory named name may
+// be, in search order: root/Frameworks/<name>, then each ancestor's
+// Build/modern/Frameworks/<name> and Build/Frameworks/<name>.
+fn framework_dir_candidates(root: string, name: string) -> Slice<string> {
+  let mut candidates: Slice<string> = [filepath.Join(root, "Frameworks", name)]
   let mut dir = root
   loop {
     candidates = candidates.append(filepath.Join(
@@ -137,28 +206,17 @@ fn find_framework_archive(root: string, framework: string) -> Option<string> {
       "Build",
       "modern",
       "Frameworks",
-      framework,
+      name,
     ))
     candidates = candidates.append(filepath.Join(
       dir,
       "Build",
       "Frameworks",
-      framework,
+      name,
     ))
     let parent = filepath.Dir(dir)
     if parent == dir { break }
     dir = parent
   }
-  let environments = [
-    "Browser.environment",
-    "ObjJ.environment",
-    "CommonJS.environment",
-  ]
-  for candidate in candidates {
-    for environment in environments {
-      let archive = filepath.Join(candidate, environment, f"{framework}.sj")
-      if os.Stat(archive).is_ok() { return Some(archive) }
-    }
-  }
-  None
+  candidates
 }
