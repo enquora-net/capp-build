@@ -1,0 +1,164 @@
+//**
+// build/external_symbols.lis
+// capp-build
+//
+// Class symbols harvested from the compiled bundles of the frameworks a
+// project imports.
+//
+// The symbol table (phase 7) records only the project's own classes.  Code
+// generation also needs the ivars of classes defined elsewhere: a subclass or
+// category that touches an ivar inherited from another framework must emit
+// self.<ivar>, exactly as for its own ivars.  _CPCibKeyedUnarchiver (AppKit)
+// reads _objects from CPKeyedUnarchiver (Foundation); CPBundle (CPCibLoading)
+// reads CPBundle's _bundle.
+//
+// A compiled bundle already states every class's superclass and ivars in a
+// fixed form, so no framework source is needed:
+//
+//   objj_allocateClassPair(<Super>, "<Name>"),
+//   meta_class = the_class.isa;class_addIvars(the_class, [new objj_ivar("<ivar>", ...), ...]);
+//
+// and, for a category that declares ivars:
+//
+//   var the_class = objj_getClass("<Name>")
+//   if(!the_class) throw ...
+//   var meta_class = the_class.isa;class_addIvars(the_class, [...]);
+//
+// Bundles are located the way the build lays them out: an application's own
+// Frameworks/<Name>, then, walking upward, the package output
+// Build/modern/Frameworks/<Name> and the legacy Build/Frameworks/<Name>.
+//
+// **
+import "go:os"
+import "go:path/filepath"
+import "go:regexp"
+
+// ExternalClass is one class or category harvested from a framework bundle.
+// superclass is None for a category and for a root class.
+pub struct ExternalClass {
+  pub name: string,
+  pub superclass: Option<string>,
+  pub is_category: bool,
+  pub ivars: Slice<string>,
+}
+
+// ExternalHarvest is the result of harvesting a set of frameworks: the
+// classes found, the frameworks read, and those with no compiled bundle.
+pub struct ExternalHarvest {
+  pub classes: Slice<ExternalClass>,
+  pub found: Slice<string>,
+  pub missing: Slice<string>,
+}
+
+// harvest_external_classes reads the compiled bundle of each named framework
+// and returns the classes it declares.
+pub fn harvest_external_classes(
+  root: string,
+  frameworks: Slice<string>,
+) -> ExternalHarvest {
+  let mut classes: Slice<ExternalClass> = []
+  let mut found: Slice<string> = []
+  let mut missing: Slice<string> = []
+  for framework in frameworks {
+    let Some(archive) = find_framework_archive(root, framework) else {
+      missing = missing.append(framework)
+      continue
+    }
+    let content = match os.ReadFile(archive) {
+      Ok(data) => data as string,
+      Err(_) => {
+        missing = missing.append(framework)
+        continue
+      },
+    }
+    for class in classes_in_archive(content) {
+      classes = classes.append(class)
+    }
+    found = found.append(framework)
+  }
+  ExternalHarvest { classes, found, missing }
+}
+
+// classes_in_archive extracts every class and ivar-declaring category from
+// the text of a compiled bundle.
+fn classes_in_archive(content: string) -> Slice<ExternalClass> {
+  let class_pattern = regexp.MustCompile(
+    "objj_allocateClassPair\\((\\w+), \"([\\w$]+)\"\\),\\s*meta_class = the_class\\.isa;(class_addIvars\\(the_class, \\[([^\\]]*)\\]\\);)?",
+  )
+  let category_pattern = regexp.MustCompile(
+    "var the_class = objj_getClass\\(\"([\\w$]+)\"\\)\\nif\\(!the_class\\)[^\\n]*\\nvar meta_class = the_class\\.isa;class_addIvars\\(the_class, \\[([^\\]]*)\\]\\);",
+  )
+  let mut classes: Slice<ExternalClass> = []
+  for m in class_pattern.FindAllStringSubmatch(content, -1) {
+    let superclass = if m[1] == "Nil" { None } else { Some(m[1]) }
+    classes = classes.append(
+      ExternalClass {
+        name: m[2],
+        superclass,
+        is_category: false,
+        ivars: ivar_names(m[4]),
+      },
+    )
+  }
+  for m in category_pattern.FindAllStringSubmatch(content, -1) {
+    classes = classes.append(
+      ExternalClass {
+        name: m[1],
+        superclass: None,
+        is_category: true,
+        ivars: ivar_names(m[2]),
+      },
+    )
+  }
+  classes
+}
+
+// ivar_names extracts the ivar names from the body of a class_addIvars list.
+fn ivar_names(list: string) -> Slice<string> {
+  let ivar_pattern = regexp.MustCompile("new objj_ivar\\(\"([^\"]+)\"")
+  let mut names: Slice<string> = []
+  for m in ivar_pattern.FindAllStringSubmatch(list, -1) {
+    names = names.append(m[1])
+  }
+  names
+}
+
+// find_framework_archive returns the path of the compiled bundle for
+// framework, searching root/Frameworks/<framework> first, then each
+// ancestor's Build/modern/Frameworks/<framework> and Build/Frameworks/<framework>.
+fn find_framework_archive(root: string, framework: string) -> Option<string> {
+  let mut candidates: Slice<string> = [
+    filepath.Join(root, "Frameworks", framework),
+  ]
+  let mut dir = root
+  loop {
+    candidates = candidates.append(filepath.Join(
+      dir,
+      "Build",
+      "modern",
+      "Frameworks",
+      framework,
+    ))
+    candidates = candidates.append(filepath.Join(
+      dir,
+      "Build",
+      "Frameworks",
+      framework,
+    ))
+    let parent = filepath.Dir(dir)
+    if parent == dir { break }
+    dir = parent
+  }
+  let environments = [
+    "Browser.environment",
+    "ObjJ.environment",
+    "CommonJS.environment",
+  ]
+  for candidate in candidates {
+    for environment in environments {
+      let archive = filepath.Join(candidate, environment, f"{framework}.sj")
+      if os.Stat(archive).is_ok() { return Some(archive) }
+    }
+  }
+  None
+}

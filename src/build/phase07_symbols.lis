@@ -81,6 +81,7 @@ pub struct PreprocGuard {
 // SymbolTable is the output of phase 7 and a read-only input to phases 8 and 9.
 pub struct SymbolTable {
   pub classes: Slice<ClassSymbol>,
+  pub external: Slice<ExternalClass>, // classes declared by imported frameworks
   pub protocols: Slice<ProtocolSymbol>,
   pub forwards: Slice<ForwardSymbol>,
   pub typedefs: Slice<TypedefSymbol>,
@@ -289,7 +290,20 @@ pub fn run_build_symbol_table(
     }
   }
 
-  let diags = merge_diags(total.diags, duplicate_diags(total))
+  let mut diags = merge_diags(total.diags, duplicate_diags(total))
+
+  // Classes declared by the frameworks this project imports, read from their
+  // compiled bundles, so code generation can resolve inherited ivars.
+  let external = harvest_external_classes(
+    ctx.root.path,
+    imported_frameworks(ctx),
+  )
+  for framework in external.missing {
+    diags = diags.append(diag_warn(
+      phase,
+      f"no compiled bundle found for {framework}; ivars inherited from it will not resolve",
+    ))
+  }
 
   for d in diags {
     print_symbol_diag(d)
@@ -314,10 +328,15 @@ pub fn run_build_symbol_table(
   fmt.Println(
     f"   {method_count} methods ({synthesized_count} synthesized), {ivar_count} ivars, {diags.length()} diagnostics",
   )
+  if !external.found.is_empty() {
+    let names = strings.Join(external.found, ", ")
+    fmt.Println(f"   {external.classes.length()} external classes from {names}")
+  }
 
   Ok(
     SymbolTable {
       classes: total.classes,
+      external: external.classes,
       protocols: total.protocols,
       forwards: total.forwards,
       typedefs: total.typedefs,
@@ -325,6 +344,23 @@ pub fn run_build_symbol_table(
       diags,
     },
   )
+}
+
+// imported_frameworks returns the distinct frameworks named by the project's
+// angle-bracket imports, excluding the project itself.
+fn imported_frameworks(ctx: Ref<BuildContext>) -> Slice<string> {
+  let own = ctx.project.map_or("", |project| project.meta.name)
+  let Some(imports) = ctx.imports else {
+    return []
+  }
+  let mut seen: mut Map<string, bool> = Map.new<string, bool>()
+  let mut names: Slice<string> = []
+  for dep in imports.framework_deps {
+    if dep.framework == own || seen[dep.framework] { continue }
+    seen[dep.framework] = true
+    names = names.append(dep.framework)
+  }
+  names
 }
 
 // print_symbol_diag surfaces one phase-7 diagnostic in the build output.

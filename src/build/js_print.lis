@@ -2749,23 +2749,37 @@ impl JsPrint {
     let Some(table) = self.symbols else {
       return ivars
     }
-    let mut current = implementation.superclass.map_or(
-      "",
-      |identifier| identifier.text,
-    )
+    // The walk starts at the class itself, not its superclass: a category
+    // declares no superclass, and the class's ivars may be declared in any of
+    // its categories as well as in its own ivar block.
+    let mut current = implementation.name.text
     for _ in 0..64 {
       if current.is_empty() { break }
       let mut found = false
       let mut next = ""
+      // Categories may declare ivars of their own (e.g. CPImage
+      // (CSSTheming)); they belong to the class, so every symbol of the
+      // class contributes.  The superclass comes from the class symbol.
       for class_symbol in table.classes {
         if class_symbol.name != current { continue }
-        if class_symbol.category.is_some() { continue }
-        found = true
         for ivar in class_symbol.ivars {
           ivars[ivar.name] = true
         }
+        if class_symbol.category.is_some() { continue }
+        found = true
         next = class_symbol.superclass.unwrap_or("")
-        break
+      }
+      // Classes from imported frameworks, read from their compiled bundles:
+      // the chain continues through them when the project does not define
+      // the class itself (e.g. CPKeyedUnarchiver beneath an AppKit subclass).
+      for external in table.external {
+        if external.name != current { continue }
+        for name in external.ivars {
+          ivars[name] = true
+        }
+        if external.is_category || found { continue }
+        found = true
+        next = external.superclass.unwrap_or("")
       }
       if !found { break }
       current = next
