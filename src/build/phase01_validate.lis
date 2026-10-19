@@ -136,6 +136,35 @@ fn plist_string(content: string, key: string) -> Option<string> {
   Some(strings.TrimSpace(after_open.substring(..close_idx)))
 }
 
+// plist_string_array searches an XML plist for <key>key</key> and returns the
+// <string> items of the immediately following <array>, or None if the key is
+// absent or its value is not an array.  Same scanner sophistication as
+// plist_string.
+fn plist_string_array(content: string, key: string) -> Option<Slice<string>> {
+  let key_tag = f"<key>{key}</key>"
+  let key_idx = strings.Index(content, key_tag)?
+  let after_key = content.substring((key_idx + key_tag.length())..)
+  let open_idx = strings.Index(after_key, "<array>")?
+  if let Some(next_key) = strings.Index(after_key, "<key>") {
+    if next_key < open_idx { return None }
+  }
+  let close_idx = strings.Index(after_key, "</array>")?
+  let mut body = after_key.substring((open_idx + 7)..close_idx)
+  let mut items: Slice<string> = []
+  loop {
+    let Some(open) = strings.Index(body, "<string>") else {
+      break
+    }
+    let rest = body.substring((open + 8)..)
+    let Some(close) = strings.Index(rest, "</string>") else {
+      break
+    }
+    items = items.append(strings.TrimSpace(rest.substring(..close)))
+    body = rest.substring((close + 9)..)
+  }
+  Some(items)
+}
+
 // ---------------------------------------------------------------------------
 // Typed constructors
 // ---------------------------------------------------------------------------
@@ -295,6 +324,106 @@ fn validate_application(
   }
 }
 
+// validate_package constructs PackageDetails for a Package project from the
+// CPBuild* keys of its Info.plist.  CPBuildRuntime and CPBuildFrameworks are
+// required; CPBuildThemes is optional.  Paths are relative to the package
+// root.  All defects are accumulated before returning.
+fn validate_package(
+  root: string,
+  content: string,
+) -> Result<PackageDetails, Slice<string>> {
+  let mut errs: Slice<string> = []
+
+  let runtime = plist_string(content, "CPBuildRuntime").map_or_else(
+    || {
+      errs = errs.append(
+        "CPBuildRuntime not declared — required for Package projects",
+      )
+      ""
+    },
+    |rel| {
+      let path = filepath.Join(root, rel)
+      if !os.Stat(path).map_or(false, |info| info.IsDir()) {
+        errs = errs.append(
+          f"CPBuildRuntime: {rel} not found or not a directory",
+        )
+      }
+      path
+    },
+  )
+
+  let mut frameworks: Slice<string> = []
+  match plist_string_array(content, "CPBuildFrameworks") {
+    Some(rels) => {
+      if rels.is_empty() {
+        errs = errs.append(
+          "CPBuildFrameworks is empty — a Package project builds at least one framework",
+        )
+      }
+      for rel in rels {
+        let path = filepath.Join(root, rel)
+        match framework_member_defect(path, rel) {
+          Some(e) => {
+            errs = errs.append(e)
+          },
+          None => {
+            frameworks = frameworks.append(path)
+          },
+        }
+      }
+    },
+    None => {
+      errs = errs.append(
+        "CPBuildFrameworks not declared — required for Package projects",
+      )
+    },
+  }
+
+  let theme_rels: Slice<string> = plist_string_array(content, "CPBuildThemes").unwrap_or(
+    [],
+  )
+  let mut themes: Slice<string> = []
+  for rel in theme_rels {
+    let path = filepath.Join(root, rel)
+    if os.Stat(path).map_or(false, |info| info.IsDir()) {
+      themes = themes.append(path)
+    } else {
+      errs = errs.append(f"CPBuildThemes: {rel} not found or not a directory")
+    }
+  }
+
+  if !errs.is_empty() { return Err(errs) }
+  Ok(PackageDetails { runtime, frameworks, themes })
+}
+
+// framework_member_defect returns the defect message when the directory at
+// path is not a framework project -- no Info.plist, or a
+// CPBundlePackageType other than FMWK -- and None when it is.
+fn framework_member_defect(path: string, rel: string) -> Option<string> {
+  let content = match os.ReadFile(filepath.Join(path, "Info.plist")) {
+    Ok(data) => data as string,
+    Err(_) => {
+      return Some(f"CPBuildFrameworks: {rel}/Info.plist not found")
+    },
+  }
+  match plist_string(content, "CPBundlePackageType") {
+    Some(declared) => {
+      if declared == "FMWK" {
+        None
+      } else {
+        Some(
+          f"CPBuildFrameworks: {rel} declares CPBundlePackageType \"{declared}\" — expected FMWK",
+        )
+      }
+    },
+    None => {
+      Some(
+        f"CPBuildFrameworks: {rel}/Info.plist has no CPBundlePackageType — expected FMWK",
+      )
+    },
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Phase entry point
 // ---------------------------------------------------------------------------
@@ -338,7 +467,7 @@ pub fn run_validate_project_structure(
     Unknown(raw) => {
       diags = diags.append(diag_error(
         phase,
-        f"Info.plist: unrecognised CPBundlePackageType \"{raw}\" — expected APPL, FMWK, or THME",
+        f"Info.plist: unrecognised CPBundlePackageType \"{raw}\" — expected APPL, FMWK, THME, or CPKG",
       ))
       return finish_validation(root, diags)
     },
@@ -389,6 +518,15 @@ pub fn run_validate_project_structure(
     },
     Framework => Some(ProjectDetails.Framework),
     Theme => Some(ProjectDetails.Theme),
+    Package => match validate_package(root, content) {
+      Ok(pkg) => Some(ProjectDetails.Package(pkg)),
+      Err(errs) => {
+        for e in errs {
+          diags = diags.append(diag_error(phase, e))
+        }
+        None
+      },
+    },
   }
 
   // Construct ValidatedProject only when both meta and details are present.

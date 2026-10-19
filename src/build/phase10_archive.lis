@@ -118,6 +118,19 @@ pub fn run_archive(ctx: Ref<BuildContext>) -> Result<ArchiveResult, error> {
       fmt.Println("✓  archive: theme (not yet implemented)")
       (ctx.root.path, [diag_info(phase, "theme archive: not yet implemented")])
     },
+    Package(_) => {
+      // build() diverts Package projects to build_package after phase 1,
+      // so they never reach the archive phase.
+      (
+        ctx.root.path,
+        [
+          diag_error(
+            phase,
+            "internal: package projects are assembled by build_package, not archived",
+          ),
+        ],
+      )
+    },
   }
 
   for d in arm_diags {

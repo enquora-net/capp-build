@@ -14,6 +14,8 @@
 //
 // **
 import "go:fmt"
+import "go:os"
+import "go:path/filepath"
 import "go:strings"
 
 // ---------------------------------------------------------------------------
@@ -187,6 +189,11 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
         BuildResult { ok: false, message: halt_message(phase, n, diags), diags },
       )
     }
+    // A Package project has no sources of its own: once phase 1 has
+    // validated it, it is built by building its members.
+    if let Some(pkg) = package_details(&ctx) {
+      return build_package(ctx.config, ctx.root, pkg)
+    }
   }
 
   let file_count = ctx.tree.map_or(0, |t| t.files.length())
@@ -200,6 +207,61 @@ pub fn build(cfg: BuildConfig) -> Result<BuildResult, error> {
   )
 
   Ok(BuildResult { ok: true, message: f"build complete: {ctx.root.path}", .. })
+}
+
+// package_details returns the PackageDetails of a validated Package project,
+// or None for every other kind and before phase 1 has run.
+fn package_details(ctx: Ref<BuildContext>) -> Option<PackageDetails> {
+  let project = ctx.project?
+  match project.details {
+    Package(pkg) => Some(pkg),
+    _ => None,
+  }
+}
+
+// build_package builds a Package project into Build/modern/Frameworks/:
+// each member framework through the full pipeline in declared order, then
+// the runtime, which capp-build does not yet produce, copied from the legacy
+// Build/Frameworks/.  Themes reach the package inside AppKit's Resources,
+// copied from the legacy tree by the AppKit framework build.
+fn build_package(
+  cfg: BuildConfig,
+  root: ProjectRoot,
+  pkg: PackageDetails,
+) -> Result<BuildResult, error> {
+  for framework in pkg.frameworks {
+    fmt.Println(f"── {framework}")
+    let member = build(BuildConfig { source_root: framework, ..cfg })?
+    if !member.ok {
+      return Ok(
+        BuildResult { ok: false, message: member.message, diags: member.diags },
+      )
+    }
+  }
+
+  let runtime_name = filepath.Base(pkg.runtime)
+  let legacy_runtime = filepath.Join(
+    root.path,
+    "Build",
+    "Frameworks",
+    runtime_name,
+  )
+  if let Err(_) = os.Stat(legacy_runtime) {
+    return Ok(
+      BuildResult {
+        ok: false,
+        message: f"Build/Frameworks/{runtime_name} not found — build the frameworks with the legacy toolchain first (jake build)",
+        ..,
+      },
+    )
+  }
+  let out = filepath.Join(root.path, "Build", "modern", "Frameworks")
+  let out_runtime = filepath.Join(out, runtime_name)
+  os.RemoveAll(out_runtime)?
+  copy_dir_recursive(legacy_runtime, out_runtime)?
+  fmt.Println(f"✓  package: {runtime_name} copied from Build/Frameworks")
+
+  Ok(BuildResult { ok: true, message: f"package complete: {out}", .. })
 }
 
 // halt_message renders a phase halt with concrete Error diagnostics.  The

@@ -49,10 +49,13 @@ pub struct ValidatedProject {
 // Framework and Theme carry no additional structural requirements beyond
 // PlistMeta; their source trees are validated by phase 2 (WalkSourceTree).
 // Both are open for extension without disturbing ValidatedProject.
+// Package carries PackageDetails: it has no sources of its own and is built
+// by building its member frameworks, so it never enters phases 2-10.
 pub enum ProjectDetails {
   Application(ApplicationDetails),
   Framework,
   Theme,
+  Package(PackageDetails),
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +72,21 @@ pub enum ProjectDetails {
 // model and the primary driver of phase 9 branching.
 pub struct ApplicationDetails {
   pub frameworks: FrameworkRoots,
+}
+
+// ---------------------------------------------------------------------------
+// PackageDetails — structural evidence for Package projects
+// ---------------------------------------------------------------------------
+
+// PackageDetails carries the validated absolute paths a Package project
+// declares in its Info.plist: the runtime (CPBuildRuntime), the member
+// frameworks in build order (CPBuildFrameworks), and the themes
+// (CPBuildThemes).  Constructed only when every declared path exists and
+// every member framework declares CPBundlePackageType FMWK.
+pub struct PackageDetails {
+  pub runtime: string,
+  pub frameworks: Slice<string>,
+  pub themes: Slice<string>,
 }
 
 // ---------------------------------------------------------------------------
@@ -95,7 +113,7 @@ pub struct FrameworkRoots {
 // Constructed only when all three keys are present; their absence is a phase 1
 // error.  CPBundlePackageType is the authoritative source for ProjectDetails.
 pub struct PlistMeta {
-  pub package_type: string, // CPBundlePackageType — "APPL", "FMWK", or "THME"
+  pub package_type: string, // CPBundlePackageType — "APPL", "FMWK", "THME", or "CPKG"
   pub name: string, // CPBundleName
   pub identifier: string, // CPBundleIdentifier
 }
@@ -111,6 +129,7 @@ pub enum ProjectKind {
   Application,
   Framework,
   Theme,
+  Package,
 }
 
 // parse_package_type converts the on-disk CPBundlePackageType string to the
@@ -123,6 +142,7 @@ pub fn parse_package_type(s: string) -> Option<ProjectKind> {
     "APPL" => Some(ProjectKind.Application),
     "FMWK" => Some(ProjectKind.Framework),
     "THME" => Some(ProjectKind.Theme),
+    "CPKG" => Some(ProjectKind.Package),
     _ => None,
   }
 }
@@ -135,6 +155,7 @@ pub fn package_type_string(kind: ProjectKind) -> string {
     Application => "APPL",
     Framework => "FMWK",
     Theme => "THME",
+    Package => "CPKG",
   }
 }
 
@@ -156,7 +177,7 @@ pub struct ProjectRoot {
 // Sentinels:
 //   Frameworks/Foundation  — Application project root: must resolve to a
 //                            directory (symlinks are followed via os.Stat)
-//   Info.plist             — Framework or Theme project root
+//   Info.plist             — Framework, Theme or Package project root
 //
 // os.Stat is used throughout (not os.Lstat) so that a symlinked
 // Frameworks/Foundation is recognised as a valid sentinel when its target
