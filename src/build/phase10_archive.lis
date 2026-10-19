@@ -10,10 +10,12 @@
 // Produces the build output artifact from the compiled records delivered
 // by phase 9.  The form of the artifact depends on the project type:
 //
-//   Framework:   a .sj bundle in the static blob format, written to the
-//                appropriate environment subdirectory
-//                (e.g. ObjJ.environment/Foundation.sj).  Each compiled
-//                record becomes a p/t pair in the bundle.
+//   Framework:   a framework directory under Build/modern/Frameworks/<Name>/,
+//                beside the legacy Build/Frameworks/ tree.  The legacy
+//                framework directory is copied for everything capp-build
+//                does not yet produce, and the compiled .sj bundle replaces
+//                <Name>.sj in each of its environment directories.  Each
+//                compiled record becomes a p/t pair in the bundle.
 //
 //   Application: an assembled deliverable directory under Build/<Mode>/<Name>/
 //                containing the application's compiled .sj bundle, the
@@ -192,7 +194,7 @@ fn archive_application_http1(
   let mut diags: Slice<Diagnostic> = []
 
   // Assemble the bundle from the compiled records.
-  let bundle = assemble_bundle(compiled.records)
+  let bundle = assemble_bundle(compiled.records, false)
 
   // Browser.environment/<Name>.sj
   let browser_env = filepath.Join(out_dir, "Browser.environment")
@@ -441,9 +443,13 @@ fn file_byte_size(path: string) -> int {
 // Framework archive
 // ---------------------------------------------------------------------------
 
-// archive_framework writes the compiled bundle for a Framework project.
-// The destination is <project>/<Name>/ObjJ.environment/<Name>.sj, the layout
-// the ObjJ runtime loader expects when resolving framework bundles.
+// archive_framework assembles the framework product under
+// Build/modern/Frameworks/<Name>/, alongside the legacy toolchain's
+// Build/Frameworks/ tree.  The legacy framework directory supplies
+// everything capp-build does not yet produce -- Info.plist, Resources,
+// image sprites, LICENSE -- and is copied first; the compiled bundle then
+// replaces <Name>.sj in each environment directory the legacy framework
+// carries.  The legacy tree is read, never written.
 //
 // Returns the output path and the diagnostics accumulated during assembly;
 // the caller merges them into its own diagnostic slice.
@@ -457,18 +463,51 @@ fn archive_framework(
 
   match ctx.config.delivery {
     HTTP1 => {
-      let env_dir = filepath.Join(ctx.root.path, meta.name, "ObjJ.environment")
-      os.MkdirAll(env_dir, os.ModePerm)?
-      let out_path = filepath.Join(env_dir, f"{meta.name}.sj")
-      let bundle = assemble_bundle(compiled.records)
-      write_bundle(out_path, bundle)?
+      let legacy_hint = "build the frameworks with the legacy toolchain first (jake build)"
+      let Some(base) = find_legacy_frameworks_base(ctx.root.path) else {
+        diags = diags.append(diag_error(
+          phase,
+          f"Build/Frameworks not found — {legacy_hint}",
+        ))
+        return Ok((ctx.root.path, diags))
+      }
+      let legacy_dir = filepath.Join(base, "Build", "Frameworks", meta.name)
+      if let Err(_) = os.Stat(legacy_dir) {
+        diags = diags.append(diag_error(
+          phase,
+          f"Build/Frameworks/{meta.name} not found — {legacy_hint}",
+        ))
+        return Ok((ctx.root.path, diags))
+      }
+
+      let out_dir = filepath.Join(
+        base,
+        "Build",
+        "modern",
+        "Frameworks",
+        meta.name,
+      )
+      os.RemoveAll(out_dir)?
+      copy_dir_recursive(legacy_dir, out_dir)?
+
+      let bundle = assemble_bundle(compiled.records, true)
+      let envs = replace_environment_bundles(out_dir, meta.name, bundle)?
+      if envs.is_empty() {
+        diags = diags.append(diag_error(
+          phase,
+          f"Build/Frameworks/{meta.name} has no environment containing {meta.name}.sj — {legacy_hint}",
+        ))
+        return Ok((out_dir, diags))
+      }
+
       let n = compiled.records.length()
+      let env_list = strings.Join(envs, ", ")
       diags = diags.append(diag_info(
         phase,
-        f"http1 framework: {n} records → {out_path}",
+        f"http1 framework: {n} records → {out_dir} ({env_list})",
       ))
-      fmt.Println(f"✓  archive: http1 framework, {n} records → {out_path}")
-      Ok((out_path, diags))
+      fmt.Println(f"✓  archive: http1 framework, {n} records → {out_dir}")
+      Ok((out_dir, diags))
     },
     HTTP2 => {
       // TODO: HTTP2 framework delivery — per-file records as the deliverable.
@@ -484,9 +523,50 @@ fn archive_framework(
   }
 }
 
+// replace_environment_bundles writes bundle as <name>.sj into every
+// *.environment directory under dir that already holds one, and returns the
+// names of the environments written.
+fn replace_environment_bundles(
+  dir: string,
+  name: string,
+  bundle: string,
+) -> Result<Slice<string>, error> {
+  let entries = match os.ReadDir(dir) {
+    Ok(e) => e,
+    Err(e) => return Err(e),
+    Both(_, e) => return Err(e),
+  }
+  let mut envs: Slice<string> = []
+  for entry in entries {
+    let env = entry.Name()
+    if !strings.HasSuffix(env, ".environment") { continue }
+    let sj = filepath.Join(dir, env, f"{name}.sj")
+    if let Err(_) = os.Stat(sj) { continue }
+    write_bundle(sj, bundle)?
+    envs = envs.append(env)
+  }
+  Ok(envs)
+}
+
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
+
+// find_legacy_frameworks_base walks upward from start to the first directory
+// containing Build/Frameworks/ -- the legacy toolchain's framework output --
+// and returns that directory.  The framework product is written beside it.
+fn find_legacy_frameworks_base(start: string) -> Option<string> {
+  let mut dir = start
+  loop {
+    let candidate = filepath.Join(dir, "Build", "Frameworks")
+    if os.Stat(candidate).map_or(false, |info| info.IsDir()) {
+      return Some(dir)
+    }
+    let parent = filepath.Dir(dir)
+    if parent == dir { return None }
+    dir = parent
+  }
+}
 
 // app_output_dir returns Build/<Mode>/<Name>/ inside the project root —
 // the root of the assembled application deliverable, matching the legacy
@@ -634,10 +714,21 @@ fn mhtml_test_stub() -> string {
 // file, in delivered order, terminated by e;.  The framing is the bundle
 // level of STATIC-BLOB-FORMAT.md; the t content is the complete per-file
 // record string phase 8 produced (itself @STATIC;1.0;-framed).
-fn assemble_bundle(records: Slice<CompiledRecord>) -> string {
+//
+// flatten names each p record by its file name alone, as the legacy
+// toolchain does for frameworks (BundleTask setFlattensSources): the runtime
+// resolves <Framework/File.j> against the bundle by file name, so a record
+// named with its source subdirectory is never found.  Applications keep
+// source-relative names.
+fn assemble_bundle(records: Slice<CompiledRecord>, flatten: bool) -> string {
   let mut out = "@STATIC;1.0;"
   for compiled in records {
-    out += f"p;{bundle_length(compiled.name)};{compiled.name}"
+    let name = if flatten {
+      filepath.Base(compiled.name)
+    } else {
+      compiled.name
+    }
+    out += f"p;{bundle_length(name)};{name}"
     out += f"t;{bundle_length(compiled.record)};{compiled.record}"
   }
   out += "e;"
