@@ -52,6 +52,7 @@
 //     Frameworks/                  ← source Frameworks/ tree copied verbatim
 //
 // **
+import "go:errors"
 import "go:fmt"
 import "go:io"
 import "go:os"
@@ -295,95 +296,94 @@ fn archive_application_http1(
 // write_app_info_plist generates the application Info.plist in 280NPLIST
 // format and writes it to dst_path.
 //
-// The generated plist carries the keys the Cappuccino runtime requires to
-// locate and load the application bundle:
+// Every key of the source XML plist is carried through, in source order and
+// with its type -- CPPrincipalClass, CPApplicationDelegateClass,
+// CPDefaultTheme and any other key the application declares.  The identity
+// keys take their values from PlistMeta (which phase 1 completed), and the
+// keys the build computes are then appended, as the legacy toolchain does:
 //
-//   CPBundlePackageType        from PlistMeta (always "APPL" for Application)
-//   CPBundleIdentifier         from PlistMeta
-//   CPBundleName               from PlistMeta
-//   CPBundleVersion            from source plist, or "1.0" if absent
-//   CPHumanReadableCopyright   from source plist, or "" if absent
-//   Main cib file base name    from source plist, or "" if absent
-//   CPBundleInfoDictionaryVersion  6  (fixed; the runtime expects this)
-//   CPBundleEnvironments       ["Browser", "CommonJS"]
-//   CPBundleExecutable         "<Name>.sj"
+//   CPBundleInfoDictionaryVersion  6
+//   CPBundleVersion                "1.0", only when the source declares none
+//   CPBundleEnvironments           ["Browser", "CommonJS"]
+//   CPBundleExecutable             "<Name>.sj"
 //   CPBundleEnvironmentsWithImageSprites  []  (no sprites in app bundle)
-//   CPApplicationSize          { executable: <sj_byte_size>, data: 0, mhtml: 0 }
+//   CPApplicationSize              { executable: <sj_byte_size>, data: 0, mhtml: 0 }
 //
 // sj_byte_size is the byte length of the assembled .sj file, used by the
-// runtime's loading progress bar.
+// runtime's loading progress bar.  A source plist that cannot be read, or
+// that holds a value 280NPLIST cannot represent, is an error.
 fn write_app_info_plist(
   src_path: string,
   dst_path: string,
   meta: PlistMeta,
   sj_byte_size: int,
 ) -> Result<(), error> {
-  // Read the source XML plist to extract passthrough keys.  Failure to read
-  // is non-fatal: the generated plist proceeds with fallback values and the
-  // runtime's required keys are always present.
   let xml_content = os.ReadFile(src_path).map_or("", |b| b as string)
-
-  let version = plist_xml_string(xml_content, "CPBundleVersion").unwrap_or(
-    "1.0",
-  )
-  let copyright = plist_xml_string(xml_content, "CPHumanReadableCopyright").unwrap_or(
-    "",
-  )
-  let cib_name = plist_xml_string(xml_content, "Main cib file base name").unwrap_or(
-    "",
-  )
-
-  let executable = f"{meta.name}.sj"
+  let source_pairs = match parse_xml_plist(xml_content) {
+    Ok(PDict(pairs)) => pairs,
+    Ok(_) => return Err(errors.New(f"{src_path}: top-level value is not a dict")),
+    Err(message) => return Err(errors.New(f"{src_path}: {message}")),
+  }
 
   let mut pairs: Slice<Plist280NPair> = []
-  pairs = pairs.append(
-    Plist280NPair {
-      key: "CPBundlePackageType",
-      value: Plist280NValue.PString(meta.package_type),
-    },
-  )
-  pairs = pairs.append(
-    Plist280NPair {
-      key: "CPBundleIdentifier",
-      value: Plist280NValue.PString(meta.identifier),
-    },
-  )
-  pairs = pairs.append(
-    Plist280NPair {
-      key: "CPBundleName",
-      value: Plist280NValue.PString(meta.name),
-    },
-  )
-  pairs = pairs.append(
-    Plist280NPair {
-      key: "CPBundleVersion",
-      value: Plist280NValue.PString(version),
-    },
-  )
-  if !copyright.is_empty() {
-    pairs = pairs.append(
-      Plist280NPair {
-        key: "CPHumanReadableCopyright",
-        value: Plist280NValue.PString(copyright),
+  let mut has_version = false
+  let mut has_identity: mut Map<string, bool> = Map.new<string, bool>()
+  for pair in source_pairs {
+    match pair.key {
+      "CPBundlePackageType" => {
+        has_identity[pair.key] = true
+        pairs = pairs.append(plist_string_pair(pair.key, meta.package_type))
       },
-    )
-  }
-  if !cib_name.is_empty() {
-    pairs = pairs.append(
-      Plist280NPair {
-        key: "Main cib file base name",
-        value: Plist280NValue.PString(cib_name),
+      "CPBundleIdentifier" => {
+        has_identity[pair.key] = true
+        pairs = pairs.append(plist_string_pair(pair.key, meta.identifier))
       },
-    )
+      "CPBundleName" => {
+        has_identity[pair.key] = true
+        pairs = pairs.append(plist_string_pair(pair.key, meta.name))
+      },
+      "CPBundleVersion" => {
+        has_version = true
+        pairs = pairs.append(pair)
+      },
+      // Computed by the build and appended below.
+      "CPBundleInfoDictionaryVersion" |
+      "CPBundleEnvironments" |
+      "CPBundleExecutable" |
+      "CPBundleEnvironmentsWithImageSprites" |
+      "CPApplicationSize" => (),
+      _ => pairs = pairs.append(pair),
+    }
   }
-  // CPBundleInfoDictionaryVersion is always the integer 6; the runtime
-  // expects this key to be present.
+
+  // Identity keys the source omitted come first, as phase 1 derived them.
+  let mut identity: Slice<Plist280NPair> = []
+  if !has_identity["CPBundlePackageType"] {
+    identity = identity.append(plist_string_pair(
+      "CPBundlePackageType",
+      meta.package_type,
+    ))
+  }
+  if !has_identity["CPBundleIdentifier"] {
+    identity = identity.append(plist_string_pair(
+      "CPBundleIdentifier",
+      meta.identifier,
+    ))
+  }
+  if !has_identity["CPBundleName"] {
+    identity = identity.append(plist_string_pair("CPBundleName", meta.name))
+  }
+  pairs = identity.append(pairs...)
+
   pairs = pairs.append(
     Plist280NPair {
       key: "CPBundleInfoDictionaryVersion",
       value: Plist280NValue.PInteger(6),
     },
   )
+  if !has_version {
+    pairs = pairs.append(plist_string_pair("CPBundleVersion", "1.0"))
+  }
   pairs = pairs.append(
     Plist280NPair {
       key: "CPBundleEnvironments",
@@ -393,15 +393,12 @@ fn write_app_info_plist(
       ]),
     },
   )
-  pairs = pairs.append(
-    Plist280NPair {
-      key: "CPBundleExecutable",
-      value: Plist280NValue.PString(executable),
-    },
-  )
-  // CPBundleEnvironmentsWithImageSprites: empty array — the application
-  // bundle itself has no sprites.  Framework sprite entries live in the
-  // respective framework Info.plists, which are copied verbatim.
+  pairs = pairs.append(plist_string_pair(
+    "CPBundleExecutable",
+    f"{meta.name}.sj",
+  ))
+  // The application bundle itself has no sprites; framework sprite entries
+  // live in the respective framework Info.plists.
   pairs = pairs.append(
     Plist280NPair {
       key: "CPBundleEnvironmentsWithImageSprites",
@@ -409,8 +406,7 @@ fn write_app_info_plist(
     },
   )
   // CPApplicationSize drives the loading progress bar.  The executable size
-  // is the assembled .sj byte count; data and mhtml are zero for this bundle
-  // (sprites belong to the frameworks, not the application bundle itself).
+  // is the assembled .sj byte count; data and mhtml are zero for this bundle.
   let size_pairs: Slice<Plist280NPair> = [
     Plist280NPair {
       key: "executable",
@@ -430,18 +426,9 @@ fn write_app_info_plist(
   write_file_str(dst_path, content)
 }
 
-// plist_xml_string extracts a string value from an XML plist by key.
-// Duplicated from phase01_validate.lis; consolidate into a shared plist
-// utility module when the plist surface grows further.
-// TODO: consolidate plist_string / plist_xml_string into a shared module.
-fn plist_xml_string(content: string, key: string) -> Option<string> {
-  let key_tag = f"<key>{key}</key>"
-  let key_idx = strings.Index(content, key_tag)?
-  let after_key = content.substring((key_idx + key_tag.length())..)
-  let open_idx = strings.Index(after_key, "<string>")?
-  let after_open = after_key.substring((open_idx + 8)..)
-  let close_idx = strings.Index(after_open, "</string>")?
-  Some(strings.TrimSpace(after_open.substring(..close_idx)))
+// plist_string_pair is a key with a string value.
+fn plist_string_pair(key: string, value: string) -> Plist280NPair {
+  Plist280NPair { key, value: Plist280NValue.PString(value) }
 }
 
 // file_byte_size returns the byte size of a file on disk, or 0 if the stat

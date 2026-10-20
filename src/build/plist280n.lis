@@ -21,6 +21,7 @@
 //   Header:     280NPLIST;1.0;
 //   String:     S;<utf16_length>;<value>
 //   Integer:    d;<decimal_length>;<decimal_string>
+//   Real:       f;<decimal_length>;<decimal_string>
 //   Boolean:    T;  or  F;
 //   Key:        K;<utf16_length>;<key_string>
 //   Array:      A;<item>...<item>E;
@@ -34,10 +35,8 @@
 // utf16_len — each would require two UTF-16 code units but counts as one
 // rune.  None appear in any observed Cappuccino plist corpus.
 //
-// Float values are not encoded: no Cappuccino plist in the observed corpus
-// uses floating-point values, and the runtime plist writer (CFPropertyList.js)
-// treats integers and floats as distinct types only to round-trip JS numbers
-// faithfully.  Add PReal if a float plist value is encountered in future.
+// A real is carried as the text of its source <real> element, so its spelling
+// survives the round trip unchanged.
 //
 // This file is shared infrastructure: phase 9 (Archive) uses it for
 // application and framework Info.plist generation; nib2cib will use it
@@ -54,10 +53,10 @@ import "go:unicode/utf8"
 // Plist280NValue is the sum of all types representable in a 280NPLIST.
 // It is closed: a new type is a compile error at every serialisation site
 // until handled.  This mirrors the CFPropertyList.js type dispatch.
-// PReal (float) is omitted: no Cappuccino plist in the corpus uses it.
 pub enum Plist280NValue {
   PString(string),
   PInteger(int),
+  PReal(string),
   PBool(bool),
   PArray(Slice<Plist280NValue>),
   PDict(Slice<Plist280NPair>),
@@ -92,6 +91,7 @@ fn write_value(value: Plist280NValue) -> string {
   match value {
     PString(s) => write_pstring(s),
     PInteger(n) => write_pinteger(n),
+    PReal(text) => f"f;{text.length()};{text}",
     PBool(b) => write_pbool(b),
     PArray(items) => write_parray(items),
     PDict(pairs) => write_pdict(pairs),

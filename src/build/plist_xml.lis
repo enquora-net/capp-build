@@ -1,0 +1,156 @@
+//**
+// build/plist_xml.lis
+// capp-build
+//
+// Reads an XML property list into a Plist280NValue, so a source Info.plist
+// can be carried into a 280NPLIST output whole.
+//
+// Supported elements are those 280NPLIST can represent: dict, array, string,
+// integer, real, true and false.  date and data have no 280NPLIST form and are
+// reported as errors rather than dropped.  The XML prolog, DOCTYPE and comments
+// are skipped; the predefined XML entities are decoded in keys and strings.
+//
+// **
+import "go:strconv"
+import "go:strings"
+import "go:unicode"
+
+// parse_xml_plist parses the text of an XML property list.
+pub fn parse_xml_plist(content: string) -> Result<Plist280NValue, string> {
+  let rest = skip_misc(content)
+  if !strings.HasPrefix(rest, "<plist") {
+    return Err("missing <plist> element")
+  }
+  let Some(open_end) = strings.Index(rest, ">") else {
+    return Err("unterminated <plist> element")
+  }
+  let (value, after) = parse_value(rest.substring((open_end + 1)..))?
+  if !strings.HasPrefix(skip_misc(after), "</plist>") {
+    return Err("expected </plist> after the top-level value")
+  }
+  Ok(value)
+}
+
+// parse_value parses one value element and returns it with the text that
+// follows it.
+fn parse_value(text: string) -> Result<(Plist280NValue, string), string> {
+  let rest = skip_misc(text)
+  if !strings.HasPrefix(rest, "<") { return Err("expected a value element") }
+  let Some(tag_end) = strings.Index(rest, ">") else {
+    return Err("unterminated element")
+  }
+  let tag = rest.substring(1..tag_end)
+  let body = rest.substring((tag_end + 1)..)
+  match tag {
+    "dict" => parse_dict(body),
+    "dict/" => Ok((Plist280NValue.PDict([]), body)),
+    "array" => parse_array(body),
+    "array/" => Ok((Plist280NValue.PArray([]), body)),
+    "string" => {
+      let (content, after) = element_text(body, "string")?
+      Ok((Plist280NValue.PString(decode_entities(content)), after))
+    },
+    "string/" => Ok((Plist280NValue.PString(""), body)),
+    "integer" => {
+      let (content, after) = element_text(body, "integer")?
+      let digits = strings.TrimSpace(content)
+      match strconv.Atoi(digits) {
+        Ok(n) => Ok((Plist280NValue.PInteger(n), after)),
+        Err(_) => Err(f"invalid integer \"{digits}\""),
+      }
+    },
+    "real" => {
+      let (content, after) = element_text(body, "real")?
+      Ok((Plist280NValue.PReal(strings.TrimSpace(content)), after))
+    },
+    "true/" => Ok((Plist280NValue.PBool(true), body)),
+    "false/" => Ok((Plist280NValue.PBool(false), body)),
+    _ => Err(f"<{tag}> values have no 280NPLIST form"),
+  }
+}
+
+// parse_dict parses the key/value pairs of a dict up to its closing tag.
+fn parse_dict(text: string) -> Result<(Plist280NValue, string), string> {
+  let mut pairs: Slice<Plist280NPair> = []
+  let mut rest = text
+  loop {
+    rest = skip_misc(rest)
+    if strings.HasPrefix(rest, "</dict>") {
+      return Ok((Plist280NValue.PDict(pairs), rest.substring(7..)))
+    }
+    if !strings.HasPrefix(rest, "<key>") {
+      return Err("expected <key> or </dict> in a dict")
+    }
+    let (key, after_key) = element_text(rest.substring(5..), "key")?
+    let (value, after_value) = parse_value(after_key)?
+    pairs = pairs.append(Plist280NPair { key: decode_entities(key), value })
+    rest = after_value
+  }
+}
+
+// parse_array parses the values of an array up to its closing tag.
+fn parse_array(text: string) -> Result<(Plist280NValue, string), string> {
+  let mut items: Slice<Plist280NValue> = []
+  let mut rest = text
+  loop {
+    rest = skip_misc(rest)
+    if strings.HasPrefix(rest, "</array>") {
+      return Ok((Plist280NValue.PArray(items), rest.substring(8..)))
+    }
+    let (value, after) = parse_value(rest)?
+    items = items.append(value)
+    rest = after
+  }
+}
+
+// element_text returns the raw text of an element up to its closing tag, and
+// the text after that tag.
+fn element_text(text: string, name: string) -> Result<(string, string), string> {
+  let closing = f"</{name}>"
+  let Some(end) = strings.Index(text, closing) else {
+    return Err(f"missing {closing}")
+  }
+  Ok((text.substring(..end), text.substring((end + closing.length())..)))
+}
+
+// skip_misc removes leading whitespace, comments, processing instructions and
+// the DOCTYPE declaration.
+fn skip_misc(text: string) -> string {
+  let mut rest = strings.TrimLeftFunc(text, unicode.IsSpace)
+  loop {
+    if strings.HasPrefix(rest, "<!--") {
+      let Some(end) = strings.Index(rest, "-->") else {
+        return ""
+      }
+      rest = strings.TrimLeftFunc(rest.substring((end + 3)..), unicode.IsSpace)
+    } else if strings.HasPrefix(rest, "<?") || strings.HasPrefix(
+      rest,
+      "<!DOCTYPE",
+    ) {
+      let Some(end) = strings.Index(rest, ">") else {
+        return ""
+      }
+      rest = strings.TrimLeftFunc(rest.substring((end + 1)..), unicode.IsSpace)
+    } else {
+      return rest
+    }
+  }
+}
+
+// decode_entities replaces the predefined XML entities.
+fn decode_entities(text: string) -> string {
+  strings
+    .NewReplacer(
+      "&lt;",
+      "<",
+      "&gt;",
+      ">",
+      "&quot;",
+      "\"",
+      "&apos;",
+      "'",
+      "&amp;",
+      "&",
+    )
+    .Replace(text)
+}
