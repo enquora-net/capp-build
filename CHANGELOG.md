@@ -6,6 +6,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## 2.0.0-beta.3 — 2026-10-20
+
+### Added
+
+- Frameworks package: a project whose root `Info.plist` declares
+  `CPBundlePackageType` `CPKG` builds its member frameworks in order into
+  `Build/modern/Frameworks`, alongside the legacy `Build/Frameworks` tree,
+  which supplies what capp-build does not yet produce
+- Framework products: each framework build writes a complete framework
+  directory to `Build/modern/Frameworks/<Name>`
+- Name resolution: every identifier resolves to a local, ivar, or a global of
+  the project, its frameworks, the Objective-J runtime or the browser; an
+  unresolved identifier is a compile error
+- Emitter: `@accessors(copy)` setters and `@"..."` object literal property
+  names
+- Lowering: destructuring patterns
+- Pipeline: preprocessing phase
+
+### Fixed
+
+- Ivars declared in categories, or inherited from classes in imported
+  frameworks, were emitted without `self.`
+- Framework archive records were named by source path instead of file name,
+  so the runtime could not resolve `<Framework/File.j>` imports
+- Source walk compiled nested projects (any subdirectory with its own
+  `Info.plist`) and legacy `CommonJS` tooling into the enclosing framework
+- Application `Info.plist` generation dropped every key outside a fixed set,
+  including `CPPrincipalClass`, `CPApplicationDelegateClass` and
+  `CPDefaultTheme`
+- Unbalanced parentheses in array, dictionary and `@deref` output
+
+### Changed
+
+- Synced to Lisette v0.12, including its mutability model
+
+### Platforms
+
+macOS (arm64, x86_64), Linux (arm64, x86_64), Windows (arm64, x86_64).
+
+---
+
 ## 2.0.0-beta.2 — 2026-06-29
 
 ### Fixed
