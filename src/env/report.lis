@@ -1,0 +1,285 @@
+//**
+// report.lis
+// capp-build
+//
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Renders the `capp-build env` report as text or JSON.
+// **
+import "go:encoding/json"
+import "go:fmt"
+import "go:github.com/enquora-net/capp-parse/grammar"
+import "go:github.com/enquora-net/capp-parse/host"
+import "go:path/filepath"
+
+// ---------------------------------------------------------------------------
+// Text
+// ---------------------------------------------------------------------------
+
+pub fn print_text(version: string, override_path: string) {
+  let b = collect_build_facts(version)
+  let h = host.Detect()
+  let g = search_grammar(override_path)
+
+  fmt.Println("capp-build")
+  row("version", b.version)
+  if b.commit != "" {
+    let dirty = if b.modified { "  (uncommitted changes)" } else { "" }
+    row("commit", f"{b.commit}  {b.commit_time}{dirty}")
+  }
+  row("go", b.go_version)
+
+  fmt.Println("")
+  fmt.Println("host")
+  row("os", f"{h.OSName} {h.OSVersion}")
+  row("binary", f"{h.OS}/{h.BinaryArch}")
+  row("machine", h.HostArch)
+  row("translation", translation_text(h))
+
+  fmt.Println("")
+  fmt.Println(
+    f"grammar  (minimum release {minimum_release()}; the first library found is used)",
+  )
+  let mut in_use_seen = false
+  if let Some(finding) = g.override {
+    fmt.Println("  --grammar override")
+    print_finding(finding, true)
+    in_use_seen = true
+  }
+  let mut n = 0
+  for loc in g.locations {
+    n += 1
+    fmt.Println(f"  {n}. {pad(loc.scope, 10)} {loc.dir}")
+    for finding in loc.findings {
+      let in_use = !in_use_seen && !is_absent(finding)
+      if in_use { in_use_seen = true }
+      print_finding(finding, in_use)
+    }
+  }
+  if !in_use_seen {
+    fmt.Println("")
+    fmt.Println("  no grammar library found")
+  }
+}
+
+fn translation_text(h: host.Facts) -> string {
+  if !h.TranslationKnown { return "not detectable on this platform" }
+  if h.Translated { return f"{h.Translator}: not supported" }
+  "none"
+}
+
+fn print_finding(finding: Finding, in_use: bool) {
+  let marker = if in_use { ", in use" } else { "" }
+  let indent = "                "
+  match finding {
+    Finding.Absent => fmt.Println(f"{indent}no library"),
+    Finding.LoadFailed { path, file, reason } => {
+      fmt.Println(f"{indent}{filepath.Base(path)}: cannot load{marker}")
+      detail("reason", reason)
+      print_file(file)
+    },
+    Finding.Outdated { path, file, info, reason } => {
+      fmt.Println(f"{indent}{filepath.Base(path)}: outdated{marker}")
+      detail("reason", reason)
+      print_versions(info)
+      print_file(file)
+    },
+    Finding.Supported { path, file, info } => {
+      fmt.Println(f"{indent}{filepath.Base(path)}: supported{marker}")
+      print_versions(info)
+      print_file(file)
+    },
+  }
+}
+
+fn print_versions(info: grammar.Info) {
+  let release = if info.HasRelease { release_string(info) } else { "none" }
+  let build = if info.HasBuild { info.Build } else { "none" }
+  detail("release", release)
+  detail("build", build)
+  detail("abi", f"{info.ABIVersion}")
+}
+
+fn print_file(file: FileFacts) {
+  if file.sha256 == "" { return }
+  detail("size", f"{file.size} bytes")
+  detail("modified", file.modified)
+  detail("sha256", file.sha256)
+}
+
+fn is_absent(finding: Finding) -> bool {
+  match finding {
+    Finding.Absent => true,
+    _ => false,
+  }
+}
+
+fn row(label: string, value: string) {
+  fmt.Println(f"  {pad(label, 12)} {value}")
+}
+
+fn detail(label: string, value: string) {
+  fmt.Println(f"                  {pad(label, 9)} {value}")
+}
+
+fn pad(s: string, width: int) -> string {
+  let mut out = s
+  while out.length() < width {
+    out += " "
+  }
+  out
+}
+
+// ---------------------------------------------------------------------------
+// JSON
+// ---------------------------------------------------------------------------
+
+#[json]
+pub struct JsonBuild {
+  pub version: string,
+  pub commit: string,
+  pub commit_time: string,
+  pub modified: bool,
+  pub go_version: string,
+}
+
+#[json]
+pub struct JsonLibrary {
+  pub path: string,
+  // "supported", "outdated" or "load_failed"
+  pub state: string,
+  pub in_use: bool,
+  pub reason: string,
+  pub has_release: bool,
+  pub release: string,
+  pub has_build: bool,
+  pub build: string,
+  pub abi_version: int,
+  pub size: int,
+  pub modified: string,
+  pub sha256: string,
+}
+
+#[json]
+pub struct JsonLocation {
+  pub dir: string,
+  pub scope: string,
+  pub libraries: Slice<JsonLibrary>,
+}
+
+#[json]
+pub struct JsonGrammar {
+  pub minimum_release: string,
+  pub override: Option<JsonLibrary>,
+  pub locations: Slice<JsonLocation>,
+}
+
+#[json]
+pub struct JsonReport {
+  pub capp_build: JsonBuild,
+  pub host: host.Facts,
+  pub grammar: JsonGrammar,
+}
+
+pub fn print_json(version: string, override_path: string) {
+  let b = collect_build_facts(version)
+  let g = search_grammar(override_path)
+
+  let mut in_use_seen = false
+  let override = match g.override {
+    Some(finding) => {
+      in_use_seen = true
+      json_library(finding, true)
+    },
+    None => None,
+  }
+  let mut locations: Slice<JsonLocation> = []
+  for loc in g.locations {
+    let mut libraries: Slice<JsonLibrary> = []
+    for finding in loc.findings {
+      let in_use = !in_use_seen && !is_absent(finding)
+      if in_use { in_use_seen = true }
+      if let Some(lib) = json_library(finding, in_use) {
+        libraries = libraries.append(lib)
+      }
+    }
+    locations = locations.append(
+      JsonLocation { dir: loc.dir, scope: loc.scope, libraries },
+    )
+  }
+
+  let report = JsonReport {
+    capp_build: JsonBuild {
+      version: b.version,
+      commit: b.commit,
+      commit_time: b.commit_time,
+      modified: b.modified,
+      go_version: b.go_version,
+    },
+    host: host.Detect(),
+    grammar: JsonGrammar {
+      minimum_release: minimum_release(),
+      override,
+      locations,
+    },
+  }
+  match json.MarshalIndent(report, "", "  ") {
+    Ok(out) => fmt.Println(out as string),
+    Err(e) => fmt.Println(f"error: {e}"),
+  }
+}
+
+fn json_library(finding: Finding, in_use: bool) -> Option<JsonLibrary> {
+  match finding {
+    Finding.Absent => None,
+    Finding.LoadFailed { path, file, reason } => Some(
+      JsonLibrary {
+        path,
+        state: "load_failed",
+        in_use,
+        reason,
+        size: file.size,
+        modified: file.modified,
+        sha256: file.sha256,
+        ..,
+      },
+    ),
+    Finding.Outdated { path, file, info, reason } => Some(json_versions(
+      JsonLibrary {
+        path,
+        state: "outdated",
+        in_use,
+        reason,
+        size: file.size,
+        modified: file.modified,
+        sha256: file.sha256,
+        ..,
+      },
+      info,
+    )),
+    Finding.Supported { path, file, info } => Some(json_versions(
+      JsonLibrary {
+        path,
+        state: "supported",
+        in_use,
+        size: file.size,
+        modified: file.modified,
+        sha256: file.sha256,
+        ..,
+      },
+      info,
+    )),
+  }
+}
+
+fn json_versions(lib: JsonLibrary, info: grammar.Info) -> JsonLibrary {
+  let release = if info.HasRelease { release_string(info) } else { "" }
+  JsonLibrary {
+    has_release: info.HasRelease,
+    release,
+    has_build: info.HasBuild,
+    build: info.Build,
+    abi_version: info.ABIVersion,
+    ..lib,
+  }
+}

@@ -15,7 +15,7 @@ Lisette brings that guarantee to a Go runtime. The binary has no runtime depende
 Download the binary for your platform from the[ releases page](https://github.com/enquora-net/capp-build/releases), make it executable, and place it in your PATH.
 
 The Objective-J Tree-sitter dynamic library must be installed separately.
-Download the appropriate binary for your platform from the[ tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases) and place it in `/usr/local/lib`.
+Download the appropriate binary for your platform from the[ tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases) and install it in one of the supported locations listed in the [tree-sitter-objj README](https://github.com/enquora-net/tree-sitter-objj#install-locations). Run `capp-build env` to confirm which library is in use.
 
 On macOS, Gatekeeper quarantines downloaded files. Strip the attribute from both before first use:
 
@@ -46,7 +46,18 @@ Flags:
 ```
 capp-build verify model     verify the CST model against the grammar
 capp-build smoke            run smoke tests against the installed grammar
+capp-build env [--json]     report capp-build, host and grammar library facts, for support
+capp-build version          print the version
 ```
+
+`build` and the grammar-loading `smoke` commands first check the environment
+and stop with an explanation when capp-build runs under architecture
+translation (an amd64 binary under Rosetta 2 on Apple silicon, or under x64
+emulation on Windows on ARM), or when the grammar library in use is missing,
+cannot be loaded, or is older than capp-build accepts. `env` and `version`
+always run, and `env` lists every install location, every library found with
+its versions, and which one is in use. Attach `capp-build env --json` output to
+support requests.
 
 The command surface will be refined as development matures and absorbed into the `cappuccino` omnibus binary on release. Community feedback on the command surface is welcome during this beta.
 
@@ -87,7 +98,7 @@ Build/<Mode>/<Name>/
 ---
 
 ## Known limitations
-**Grammar library must be installed manually.** capp-build requires the Objective-J tree-sitter grammar dynamic library at `/usr/local/lib`. Download the appropriate binary from the[ tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases).
+**Grammar library must be installed manually.** capp-build requires the Objective-J tree-sitter grammar dynamic library in one of the supported install locations. Download the appropriate binary from the[ tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases).
 Automatic installation will be handled by `cappuccino install` in a forthcoming release.
 
 **XIB compilation is not part of this tool.** The `.xib` → `.cib` compilation step is performed by `capp-nib2cib`, which is under development as a separate component. Before building, compile your XIB files using the legacy `nib2cib`tool and commit the resulting `.cib` files to your project's `Resources/`directory. capp-build copies them into the build output as-is.

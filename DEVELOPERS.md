@@ -14,7 +14,7 @@ native development builds.
 
 **tree-sitter-objj dynamic library** — required at runtime. Install from the
 [tree-sitter-objj releases page](https://github.com/enquora-net/tree-sitter-objj/releases)
-to `/usr/local/lib`. Confirm with `capp-build smoke`.
+to one of the supported install locations. Confirm with `capp-build env`.
 
 **gh (GitHub CLI)** — required for `make release` only.
 

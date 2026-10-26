@@ -17,6 +17,12 @@
 //   capp-build smoke boundary
 //   capp-build smoke all
 //   capp-build version
+//   capp-build env [--json] [--grammar path]
+//
+// build and the grammar-loading smoke commands first run the launch checks in
+// the env package: they stop under architecture translation, and when the
+// grammar library is missing, unloadable or outdated. version and env never
+// stop, so that a support case can always collect the facts.
 //
 // VERSION is a generated constant in src/version_generated.lis, written by
 // `make emit` before lis emit runs.  Local builds report "dev".
@@ -27,6 +33,7 @@ import "go:github.com/spf13/cobra"
 import "go:os"
 
 import "build"
+import "env"
 import "smoke"
 import "verify"
 
@@ -142,7 +149,17 @@ fn make_group(use: string, short: string) -> mut cobra.Command {
 // build command
 // ---------------------------------------------------------------------------
 
+// require_ready runs the launch checks and stops with their message on
+// failure.
+fn require_ready(grammar_override: string) {
+  if let Err(msg) = env.preflight(grammar_override) {
+    fmt.Fprintln(os.Stderr, f"error: {msg}")
+    os.Exit(1)
+  }
+}
+
 fn do_run_build(source_root: string, mode_str: string, http2_flag: bool) {
+  require_ready("")
   let mode = match mode_str {
     "release" => build.BuildMode.Release,
     "clean" => build.BuildMode.Clean,
@@ -243,6 +260,54 @@ fn new_version_cmd() -> mut cobra.Command {
 }
 
 // ---------------------------------------------------------------------------
+// env command
+// ---------------------------------------------------------------------------
+
+fn new_env_cmd() -> mut cobra.Command {
+  let mut json_flag = false
+  let mut grammar_path = ""
+  let mut cmd = make_command(
+    "env",
+    "Report the host environment and grammar libraries, for support",
+    |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      if json_flag {
+        env.print_json(VERSION, grammar_path)
+      } else {
+        env.print_text(VERSION, grammar_path)
+      }
+    },
+  )
+  cmd.Flags().BoolVar(&json_flag, "json", false, "output JSON")
+  cmd
+    .Flags()
+    .StringVar(
+      &grammar_path,
+      "grammar",
+      "",
+      "explicit path to grammar library, reported as an override",
+    )
+  cmd
+}
+
+// The hidden probe command inspects one grammar library in its own process;
+// env runs it for every library it finds.
+fn new_probe_cmd() -> mut cobra.Command {
+  let mut cmd = make_command_with_args(
+    f"{env.PROBE_COMMAND} path",
+    "Inspect one grammar library (internal)",
+    |_c: Ref<cobra.Command>, args: Slice<string>| {
+      if args.length() != 1 {
+        fmt.Fprintln(os.Stderr, "error: expected one library path")
+        os.Exit(2)
+      }
+      env.probe_main(args[0])
+    },
+  )
+  cmd.Hidden = true
+  cmd
+}
+
+// ---------------------------------------------------------------------------
 // verify commands
 // ---------------------------------------------------------------------------
 
@@ -312,6 +377,7 @@ fn new_smoke_cmd() -> mut cobra.Command {
     "capp",
     "Smoke-test capp-parse interop",
     |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      require_ready(capp_grammar)
       let result = smoke.smoke_capp(capp_grammar)
       let icon = if result.ok { "✓" } else { "✗" }
       fmt.Println(f"{icon}  {result.name}: {result.note}")
@@ -326,6 +392,7 @@ fn new_smoke_cmd() -> mut cobra.Command {
     "boundary",
     "Verify the capp-parse surface matches BoundaryVersion 2",
     |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      require_ready(boundary_grammar)
       let result = smoke.smoke_boundary(boundary_grammar)
       let icon = if result.ok { "✓" } else { "✗" }
       fmt.Println(f"{icon}  {result.name}: {result.note}")
@@ -345,6 +412,7 @@ fn new_smoke_cmd() -> mut cobra.Command {
     "all",
     "Run all smoke tests",
     |_c: Ref<cobra.Command>, _args: Slice<string>| {
+      require_ready(all_grammar)
       smoke.smoke_all(all_grammar)
     },
   )
@@ -369,9 +437,13 @@ fn main() {
   let mut version_cmd = new_version_cmd()
   let mut verify_cmd = new_verify_cmd()
   let mut smoke_cmd = new_smoke_cmd()
+  let mut env_cmd = new_env_cmd()
+  let mut probe_cmd = new_probe_cmd()
   root.AddCommand(&build_cmd)
   root.AddCommand(&version_cmd)
   root.AddCommand(&verify_cmd)
   root.AddCommand(&smoke_cmd)
+  root.AddCommand(&env_cmd)
+  root.AddCommand(&probe_cmd)
   if let Err(e) = root.Execute() { fmt.Println(f"error: {e}") }
 }
