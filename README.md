@@ -29,7 +29,7 @@ xattr -d com.apple.quarantine /usr/local/lib/libtree-sitter-objj.dylib
 ---
 
 ## Performance
-`capp-build` is architected for real-time performance. On Apple Silicon M4, a full debug build of a NibApplication project — including framework copying and deliverable assembly — completes in under 100ms, and the full AppKit + Foundation corpus (221 files, production source) in 750–1,000ms. These are complete compilation runs, not incremental or partial builds. Incremental builds are a future enhancement. At these speeds, a full rebuild on every keystroke is practical, enabling real-time error reporting in the editor — a capability the Node toolchain cannot approach.
+`capp-build` is architected for real-time performance. On Apple Silicon M4, a full debug build of a NibApplication project — including framework copying and deliverable assembly — completes in under hundreds of milliseconds, and the full AppKit + Foundation corpus (221 files, production source) in several seconds. These are complete compilation runs, not incremental or partial builds. Incremental builds are a future enhancement. Further optimizations are a work-in-progress.
 
 ---
 
