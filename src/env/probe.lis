@@ -1,0 +1,68 @@
+//**
+// probe.lis
+// capp-build
+//
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// The hidden probe-grammar command: inspection of one grammar library in a
+// separate capp-build process. See library.lis for why.
+//
+//   probe()       runs in capp-build env: starts `capp-build probe-grammar
+//                 <path>` and reads back its ProbeResult.
+//   probe_main()  runs in the separate process: inspects the library and
+//                 prints the ProbeResult as JSON.
+// **
+import "go:encoding/json"
+import "go:errors"
+import "go:fmt"
+import "go:github.com/enquora-net/capp-parse/grammar"
+import "go:os"
+import "go:os/exec"
+
+// Name of the hidden command that inspects one library in its own process.
+pub const PROBE_COMMAND: string = "probe-grammar"
+
+// What probe-grammar prints, and probe() reads back. JSON crosses the process
+// boundary, so this keeps Go's shape: ok guards error and info.
+#[json]
+pub struct ProbeResult {
+  pub ok: bool,
+  pub error: string,
+  pub info: grammar.Info,
+}
+
+// probe inspects one library in a separate process. A crash there is a
+// ProbeFailed, not a crash here.
+pub fn probe(path: string) -> Result<grammar.Info, LoadFailure> {
+  let reply = run_probe(path).map_err(LoadFailure.ProbeFailed)?
+  if !reply.ok { return Err(LoadFailure.NotLoadable(errors.New(reply.error))) }
+  Ok(reply.info)
+}
+
+fn run_probe(path: string) -> Result<ProbeResult, error> {
+  let exe = os.Executable().wrap_err("cannot locate capp-build")?
+  let out = exec
+    .Command(exe, PROBE_COMMAND, path)
+    .Output()
+    .wrap_err("inspection process failed")?
+  let mut reply = ProbeResult { info: grammar.Info { Path: path, .. }, .. }
+  json.Unmarshal(out, &reply).wrap_err("unreadable inspection result")?
+  Ok(reply)
+}
+
+// probe_main implements the probe-grammar command, in the separate process:
+// inspect one library and print the result as JSON.
+pub fn probe_main(path: string) {
+  let result = match grammar.Inspect(path) {
+    Ok(info) => ProbeResult { ok: true, error: "", info },
+    Err(e) => ProbeResult {
+      ok: false,
+      error: f"{e}",
+      info: grammar.Info { Path: path, .. },
+    },
+  }
+  match json.Marshal(result) {
+    Ok(b) => fmt.Println(b as string),
+    Err(e) => fmt.Println(f"{{\"ok\":false,\"error\":\"{e}\"}}"),
+  }
+}

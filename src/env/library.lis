@@ -1,0 +1,342 @@
+//**
+// library.lis
+// capp-build
+//
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// Grammar libraries: which one is in use, searching the install locations,
+// inspecting one library, and deciding whether it is current.
+//
+// Which library is in use: library_in_use() answers for the report and the
+// launch checks alike. It defers to capp-parse's grammar.FindLibrary(), which
+// grammar.Language() also uses to load the library, so the report, the checks
+// and the loader cannot disagree.
+//
+// Why two ways to inspect: loading a library runs it inside the process, and
+// one process cannot reliably hold two copies of the same library. The launch
+// checks inspect only the library capp-build is about to load anyway, so they
+// do it InThisProcess. env inspects every library found, so it inspects each
+// InSeparateProcess (probe.lis); a library that crashes there costs one entry,
+// not the report.
+// **
+import "go:crypto/sha256"
+import "go:fmt"
+import "go:github.com/enquora-net/capp-parse/grammar"
+import "go:os"
+import "go:path/filepath"
+
+// ---------------------------------------------------------------------------
+// The library in use, and the search
+// ---------------------------------------------------------------------------
+
+// library_in_use returns the library capp-build loads: the --grammar override
+// if given, otherwise the first library grammar.FindLibrary() finds.
+pub fn library_in_use(grammar_override: string) -> Option<string> {
+  match grammar_override {
+    "" => Some(grammar.FindLibrary()).filter(|path| path != ""),
+    path => Some(path),
+  }
+}
+
+// The result of searching every install location.
+pub struct GrammarSearch {
+  // The library capp-build loads; matches the path of exactly one finding.
+  pub in_use: Option<string>,
+  // The --grammar override, which bypasses the search.
+  pub override: Option<Finding>,
+  // Every install location, in search order.
+  pub locations: Slice<LocationReport>,
+}
+
+pub struct LocationReport {
+  pub dir: string,
+  pub scope: Scope,
+  // At least one finding: Absent when the location holds no library.
+  pub findings: Slice<Finding>,
+}
+
+// Who an install location serves.
+pub enum Scope {
+  User,
+  System,
+  // All users, outside any managed location, such as /usr/local/lib.
+  Unmanaged,
+}
+
+impl Scope {
+  fn of(scope: grammar.Scope) -> Scope {
+    match scope as string {
+      "user" => Scope.User,
+      "system" => Scope.System,
+      _ => Scope.Unmanaged,
+    }
+  }
+
+  pub fn display(self) -> string {
+    match self {
+      User => "user",
+      System => "system",
+      Unmanaged => "unmanaged",
+    }
+  }
+}
+
+// search inspects every library in every install location, and the override.
+pub fn search(grammar_override: string) -> GrammarSearch {
+  GrammarSearch {
+    in_use: library_in_use(grammar_override),
+    override: Some(grammar_override)
+      .filter(|path| path != "")
+      .map(|path| inspect(path, Inspection.InSeparateProcess)),
+    locations: grammar
+      .Locations()
+      .map(|loc| LocationReport {
+        dir: loc.Dir,
+        scope: Scope.of(loc.Scope),
+        findings: findings_in(loc.Dir),
+      }),
+  }
+}
+
+// findings_in inspects each accepted library file in one location.
+fn findings_in(dir: string) -> Slice<Finding> {
+  let found = grammar
+    .LibraryNames()
+    .map(|name| filepath.Join(dir, name))
+    .filter(is_regular_file)
+    .map(|path| inspect(path, Inspection.InSeparateProcess))
+  if found.is_empty() { [Finding.Absent] } else { found }
+}
+
+fn is_regular_file(path: string) -> bool {
+  os.Stat(path).map_or(false, |fi| fi.Mode().IsRegular())
+}
+
+// ---------------------------------------------------------------------------
+// Findings: what a location holds
+// ---------------------------------------------------------------------------
+
+// What a search location holds. A location holding several accepted file
+// names yields one finding per file.
+pub enum Finding {
+  // No library in this location.
+  Absent,
+  // A library file that cannot be read, loaded or inspected. File facts are
+  // missing when the file itself could not be read.
+  LoadFailed { path: string, file: Option<FileFacts>, failure: LoadFailure },
+  // A library that loads but fails a Requirement.
+  Outdated { path: string, file: FileFacts, versions: Versions, unmet: Requirement },
+  // A library that meets every Requirement.
+  Supported { path: string, file: FileFacts, versions: Versions },
+}
+
+impl Finding {
+  // library_path returns the library this finding describes; Absent describes
+  // none.
+  pub fn library_path(self) -> Option<string> {
+    match self {
+      Absent => None,
+      LoadFailed { path, .. } | Outdated { path, .. } | Supported { path, .. } => Some(
+        path,
+      ),
+    }
+  }
+}
+
+// Why a library could not be inspected.
+pub enum LoadFailure {
+  // The file could not be read.
+  Unreadable(error),
+  // The file is not a loadable grammar library.
+  NotLoadable(error),
+  // The separate inspection process could not run, crashed, or replied
+  // unreadably.
+  ProbeFailed(error),
+}
+
+impl LoadFailure {
+  pub fn describe(self) -> string {
+    match self {
+      Unreadable(e) => f"cannot read the file: {e}",
+      NotLoadable(e) | ProbeFailed(e) => f"{e}",
+    }
+  }
+}
+
+// Facts about a library file itself, independent of its contents.
+pub struct FileFacts {
+  pub size: int,
+  pub modified: string,
+  pub sha256: string,
+}
+
+// What a library reports about itself.
+//
+// Why two versions: the release version comes from tree-sitter's own language
+// metadata, which any tree-sitter consumer can read, but it holds only
+// major.minor.patch, so it cannot tell pre-releases of one version apart. The
+// build version is exported by tree-sitter-objj itself and names the release
+// and the commit the library was built from.
+pub struct Versions {
+  // The tree-sitter language ABI the library was generated for.
+  pub abi: int,
+  // None before tree-sitter 0.25.
+  pub release: Option<Release>,
+  // None before tree-sitter-objj 1.0.0-beta.2.
+  pub build: Option<string>,
+}
+
+impl Versions {
+  // of converts capp-parse's report, whose flags guard zero-valued fields.
+  fn of(info: grammar.Info) -> Versions {
+    Versions {
+      abi: info.ABIVersion,
+      release: Some(
+          Release { major: info.Major, minor: info.Minor, patch: info.Patch },
+        ).filter(
+        |_| info.HasRelease,
+      ),
+      build: Some(info.Build).filter(|_| info.HasBuild),
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Inspecting one library
+// ---------------------------------------------------------------------------
+
+// Where a library is loaded to read its versions. See the file header for why
+// there are two.
+pub enum Inspection {
+  // Load it into this process: only for the library this process will use.
+  InThisProcess,
+  // Load it in a separate capp-build process (probe.lis).
+  InSeparateProcess,
+}
+
+impl Inspection {
+  fn read(self, path: string) -> Result<grammar.Info, LoadFailure> {
+    match self {
+      InThisProcess => grammar.Inspect(path).map_err(LoadFailure.NotLoadable),
+      InSeparateProcess => probe(path),
+    }
+  }
+}
+
+// inspect reads one library's file facts, then its versions, then classifies
+// it. A failure at either step is a LoadFailed finding.
+pub fn inspect(path: string, how: Inspection) -> Finding {
+  let file = match file_facts(path) {
+    Ok(file) => file,
+    Err(e) => {
+      return Finding.LoadFailed {
+        path,
+        file: None,
+        failure: LoadFailure.Unreadable(e),
+      }
+    },
+  }
+  match how.read(path) {
+    Ok(info) => classify(path, file, Versions.of(info)),
+    Err(failure) => Finding.LoadFailed { path, file: Some(file), failure },
+  }
+}
+
+fn file_facts(path: string) -> Result<FileFacts, error> {
+  let fi = os.Stat(path)?
+  let data = os.ReadFile(path)?
+  Ok(
+    FileFacts {
+      size: fi.Size() as int,
+      modified: fi.ModTime().Format("2006-01-02 15:04:05 MST"),
+      sha256: fmt.Sprintf("%x", sha256.Sum256(data)),
+    },
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Deciding whether a library is current
+// ---------------------------------------------------------------------------
+
+// What a library must report for capp-build to accept it, checked in
+// declaration order; the first unmet requirement makes it Outdated.
+//
+// Why the minimum release is 1.0.0: libraries generated before it report
+// 0.1.0 or no release version at all, and predate grammar fixes capp-build
+// depends on (a lone `long` type, quoted object-literal keys, unnamed
+// selector parts), so they produce parse errors on valid Cappuccino source.
+// Raise Release.minimum() whenever capp-build comes to depend on a newer
+// grammar.
+#[iterate]
+pub enum Requirement {
+  // It reports a release version: generated with tree-sitter 0.25 or later.
+  HasRelease,
+  // That release is at least Release.minimum().
+  MinimumRelease,
+  // It reports a build version: tree-sitter-objj 1.0.0-beta.2 or later.
+  HasBuild,
+}
+
+impl Requirement {
+  fn met_by(self, v: Versions) -> bool {
+    match self {
+      HasRelease => v.release.is_some(),
+      // A missing release is HasRelease's to report.
+      MinimumRelease => v.release.map_or(true, |r| !r.older_than(
+        Release.minimum(),
+      )),
+      HasBuild => v.build.is_some(),
+    }
+  }
+
+  // explain says why a library with these versions fails this requirement.
+  pub fn explain(self, v: Versions) -> string {
+    match self {
+      HasRelease => "no release version: generated before tree-sitter 0.25",
+      MinimumRelease => {
+        let release = v.release.map_or("none", |r| r.display())
+        f"release {release} is older than {Release.minimum().display()}"
+      },
+      HasBuild => "no build version: built before tree-sitter-objj 1.0.0-beta.2",
+    }
+  }
+}
+
+// classify finds the first Requirement a library fails: Outdated if there is
+// one, Supported if there is none.
+fn classify(path: string, file: FileFacts, versions: Versions) -> Finding {
+  Requirement
+    .variants()
+    .find(|r| !r.met_by(versions))
+    .map_or_else(
+      || Finding.Supported { path, file, versions },
+      |unmet| Finding.Outdated { path, file, versions, unmet },
+    )
+}
+
+// A grammar release version, as tree-sitter's language metadata reports it:
+// major, minor and patch only.
+pub struct Release {
+  pub major: int,
+  pub minor: int,
+  pub patch: int,
+}
+
+impl Release {
+  // minimum is the oldest grammar release capp-build accepts.
+  pub fn minimum() -> Release {
+    Release { major: 1, minor: 0, patch: 0 }
+  }
+
+  pub fn older_than(self, other: Release) -> bool {
+    match (self.major == other.major, self.minor == other.minor) {
+      (false, _) => self.major < other.major,
+      (true, false) => self.minor < other.minor,
+      (true, true) => self.patch < other.patch,
+    }
+  }
+
+  pub fn display(self) -> string {
+    f"{self.major}.{self.minor}.{self.patch}"
+  }
+}

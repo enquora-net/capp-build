@@ -1,0 +1,74 @@
+//**
+// launch.lis
+// capp-build
+//
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// The launch checks run by preflight() (env.lis) before build and the
+// grammar-loading smoke commands.
+//
+// Why at launch: each problem these checks catch would otherwise surface
+// later and look like something else. A translated capp-build works, only
+// slowly, until its grammar library fails to load; an outdated grammar
+// produces parse errors on valid source. Stopping first, with the cause and
+// the fix, turns either into one clear message.
+//
+// Why only some commands: the checks guard the commands that load the
+// grammar. version and env never run them, so the facts for a support case
+// can always be collected, even from a broken installation.
+//
+// Why translation has no override: native releases exist for every platform,
+// so a translated capp-build is never the right one to run. A virtual machine
+// is not translation: a hardware-virtualised guest runs natively, and a fully
+// emulated guest cannot see its emulation. On Linux translation cannot be
+// detected at all (see capp-parse's host package), so the check passes there.
+// **
+import "go:github.com/enquora-net/capp-parse/grammar"
+import "go:strings"
+
+// The launch checks, run in declaration order; the first failure stops
+// capp-build. Adding a variant without an arm in run() is a compile error.
+#[iterate]
+pub enum LaunchCheck {
+  // capp-build is not running under architecture translation.
+  NativeArchitecture,
+  // The grammar library in use exists, loads, and is current.
+  GrammarInUse,
+}
+
+impl LaunchCheck {
+  // run returns the message to stop with when the check fails.
+  fn run(self, facts: LaunchFacts) -> Result<(), string> {
+    match self {
+      NativeArchitecture => check_native_architecture(facts.host),
+      GrammarInUse => check_grammar_in_use(facts.grammar),
+    }
+  }
+}
+
+fn check_native_architecture(h: Host) -> Result<(), string> {
+  match h.translation {
+    Translation.Native | Translation.Undetectable => Ok(()),
+    Translation.Translated(translator) => Err(
+      f"capp-build is a {h.os}/{h.binary_arch} binary running under {translator} on a {h.machine_arch} machine.\nTranslation is not supported. Install the native {h.os}/{h.machine_arch} release of capp-build instead.",
+    ),
+  }
+}
+
+fn check_grammar_in_use(finding: Finding) -> Result<(), string> {
+  match finding {
+    Finding.Supported { .. } => Ok(()),
+    Finding.Absent => {
+      let searched = strings.Join(grammar.SearchPaths().map(|d| f"  {d}"), "\n")
+      Err(
+        f"grammar library not found\nsearched:\n{searched}\nRun `capp-build env` for details.",
+      )
+    },
+    Finding.Outdated { path, versions, unmet, .. } => Err(
+      f"grammar library is outdated: {path}\n  {unmet.explain(versions)}\nInstall the current tree-sitter-objj release. Run `capp-build env` for details.",
+    ),
+    Finding.LoadFailed { path, failure, .. } => Err(
+      f"grammar library cannot be loaded: {path}\n  {failure.describe()}\nRun `capp-build env` for details.",
+    ),
+  }
+}
