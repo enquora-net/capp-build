@@ -6,6 +6,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## 2.0.0-beta.4 — 2026-10-28
+
+### Added
+
+- Introduced `capp-build env` to gather and report environmental facts required for diagnostic analysis: capp-build's version, commit, and Go runtime details; host operating system and release; binary and host machine architectures (including active emulation or translation states); and all candidate grammar library locations in resolution order. For each library discovered, the output details release, build, and ABI versions, file size, modification timestamp, SHA-256 digest, and active selection status. Standard JSON output is supported via --json.
+
+- Implemented preflight launch checks: execution of build and grammar-dependent smoke subcommands halts with explicit diagnostic reasoning when running under architectural translation (Rosetta 2 on macOS or x64 emulation on Windows on ARM) or when the resolved grammar library is absent, unloadable, or outdated. Utility subcommands env and version execute unconditionally.
+
+### Changed
+
+- Advanced minimum grammar dependency to tree-sitter-objj 2.0.0-beta.2 or later; earlier library releases are rejected as outdated.
+- Consolidated grammar library search order across supported platforms:
+  - macOS: ~/Library/Application Support/dev.cappuccino/grammar, /Library/Application Support/dev.cappuccino/grammar, /usr/local/lib
+  - Linux: $XDG_DATA_HOME/cappuccino/grammar (defaulting to ~/.local/share/cappuccino/grammar), /usr/local/lib
+  - Windows: %LOCALAPPDATA%\Cappuccino\grammar, %ProgramFiles%\Cappuccino\grammar
+
+Compiled against capp-parse 2.0.0-beta2.
+
+### Platforms
+
+macOS (arm64, x86_64), Linux (arm64, x86_64), Windows (arm64, x86_64).
+
+---
+
 ## 2.0.0-beta.3 — 2026-10-20
 
 ### Added

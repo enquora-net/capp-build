@@ -182,7 +182,7 @@ pub struct Versions {
   pub abi: int,
   // None before tree-sitter 0.25.
   pub release: Option<Release>,
-  // None before tree-sitter-objj 1.0.0-beta.2.
+  // None before tree-sitter-objj 2.0.0-beta.2.
   pub build: Option<string>,
 }
 
@@ -261,10 +261,12 @@ fn file_facts(path: string) -> Result<FileFacts, error> {
 // What a library must report for capp-build to accept it, checked in
 // declaration order; the first unmet requirement makes it Outdated.
 //
-// Why the minimum release is 1.0.0: libraries generated before it report
-// 0.1.0 or no release version at all, and predate grammar fixes capp-build
-// depends on (a lone `long` type, quoted object-literal keys, unnamed
-// selector parts), so they produce parse errors on valid Cappuccino source.
+// Why the minimum release is 2.0.0: grammar versions follow Cappuccino, and
+// 2.0.0-beta.2 is the first release capp-build accepts. Earlier libraries
+// report no release version, 0.1.0, or 1.0.0 (interim builds made before the
+// numbering moved to 2.0.0), and predate grammar fixes capp-build depends on
+// (a lone `long` type, quoted object-literal keys, unnamed selector parts),
+// so they produce parse errors on valid Cappuccino source.
 // Raise Release.minimum() whenever capp-build comes to depend on a newer
 // grammar.
 #[iterate]
@@ -273,7 +275,7 @@ pub enum Requirement {
   HasRelease,
   // That release is at least Release.minimum().
   MinimumRelease,
-  // It reports a build version: tree-sitter-objj 1.0.0-beta.2 or later.
+  // It reports a build version: tree-sitter-objj 2.0.0-beta.2 or later.
   HasBuild,
 }
 
@@ -297,7 +299,7 @@ impl Requirement {
         let release = v.release.map_or("none", |r| r.display())
         f"release {release} is older than {Release.minimum().display()}"
       },
-      HasBuild => "no build version: built before tree-sitter-objj 1.0.0-beta.2",
+      HasBuild => "no build version: built before tree-sitter-objj 2.0.0-beta.2",
     }
   }
 }
@@ -325,7 +327,7 @@ pub struct Release {
 impl Release {
   // minimum is the oldest grammar release capp-build accepts.
   pub fn minimum() -> Release {
-    Release { major: 1, minor: 0, patch: 0 }
+    Release { major: 2, minor: 0, patch: 0 }
   }
 
   pub fn older_than(self, other: Release) -> bool {
