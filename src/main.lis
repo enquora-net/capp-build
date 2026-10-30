@@ -16,6 +16,7 @@
 //   capp-build smoke capp
 //   capp-build smoke boundary
 //   capp-build smoke all
+//   capp-build smoke serve [path] [--port n]
 //   capp-build version
 //   capp-build env [--json] [--grammar path]
 //
@@ -423,7 +424,29 @@ fn new_smoke_cmd() -> mut cobra.Command {
   smoke_cmd.AddCommand(&cobra_cmd)
   smoke_cmd.AddCommand(&capp_cmd)
   smoke_cmd.AddCommand(&boundary_cmd)
+  let mut serve_port = smoke.DEFAULT_SERVE_PORT
+  let mut serve_cmd = make_command_with_args(
+    "serve [path]",
+    "Serve a built application on localhost, for evaluation",
+    |_c: Ref<cobra.Command>, args: Slice<string>| {
+      let root = if !args.is_empty() { args[0] } else { "." }
+      if let Err(e) = smoke.serve(root, serve_port) {
+        fmt.Fprintln(os.Stderr, f"error: {e}")
+        os.Exit(1)
+      }
+    },
+  )
+  serve_cmd
+    .Flags()
+    .IntVar(
+      &serve_port,
+      "port",
+      smoke.DEFAULT_SERVE_PORT,
+      "port to serve on, on localhost",
+    )
+
   smoke_cmd.AddCommand(&all_cmd)
+  smoke_cmd.AddCommand(&serve_cmd)
   smoke_cmd
 }
 

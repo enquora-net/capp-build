@@ -6,6 +6,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## 2.0.0-beta.5 — 2026-10-30
+
+### Added
+
+- `capp-build smoke serve [path] [--port n]` serves a built application on
+  localhost, port 8080 by default, because browsers will not run an application
+  from a `file://` URL. It serves static files for evaluation and is not a
+  deployment server.
+
+### Platforms
+
+macOS (arm64, x86_64), Linux (arm64, x86_64), Windows (arm64, x86_64).
+
+---
+
 ## 2.0.0-beta.4 — 2026-10-28
 
 ### Added

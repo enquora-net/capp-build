@@ -46,6 +46,7 @@ Flags:
 ```
 capp-build verify model     verify the CST model against the grammar
 capp-build smoke            run smoke tests against the installed grammar
+capp-build smoke serve      serve a built application on localhost, for evaluation
 capp-build env [--json]     report capp-build, host and grammar library facts, for support
 capp-build version          print the version
 ```
@@ -58,6 +59,12 @@ cannot be loaded, or is older than capp-build accepts. `env` and `version`
 always run, and `env` lists every install location, every library found with
 its versions, and which one is in use. Attach `capp-build env --json` output to
 support requests.
+
+Browsers will not run an application from a `file://` URL, so
+`capp-build smoke serve [path] [--port n]` serves a built application at
+`http://localhost:8080/` for evaluation. It serves static files on localhost
+only and is not a deployment server: a Cappuccino application builds to static
+files, so anyone with a backend serves them from that.
 
 The command surface will be refined as development matures and absorbed into the `cappuccino` omnibus binary on release. Community feedback on the command surface is welcome during this beta.
 

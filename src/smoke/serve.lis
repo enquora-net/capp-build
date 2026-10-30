@@ -1,0 +1,43 @@
+//**
+// serve.lis
+// capp-build
+//
+// Copyright (c) 2026 David Richardson. All rights reserved.
+//
+// `capp-build smoke serve`: serves a built application on localhost, so that
+// it can be opened in a browser straight after building.
+//
+// Why it exists: browsers will not run a Cappuccino application from a
+// file:// URL without configuration, so anyone evaluating capp-build would
+// otherwise need Python, Node or another server just to see the result.
+//
+// Why it is so limited: this is a test aid, not a deployment server. It serves
+// static files, on localhost only, with nothing to configure but a path and a
+// port. A Cappuccino application builds to static files, so anyone with a
+// backend already has a server, and serves them from that. Requests for
+// proxying, HTTPS or other options belong to that server, not here.
+//
+// It is expected to move to the `cappuccino` tool when capp-build is folded
+// into it.
+// **
+import "go:errors"
+import "go:fmt"
+import "go:net"
+import "go:net/http"
+import "go:os"
+import "go:path/filepath"
+
+pub const DEFAULT_SERVE_PORT: int = 8080
+
+// serve serves the folder at path until capp-build is stopped. It reports the
+// address only once the port is bound, so a port already in use is an error
+// rather than a misleading address.
+pub fn serve(path: string, port: int) -> Result<(), error> {
+  let root = filepath.Abs(path)?
+  let fi = os.Stat(root)?
+  if !fi.IsDir() { return Err(errors.New(f"not a folder: {root}")) }
+  let listener = net.Listen("tcp", f"127.0.0.1:{port}")?
+  fmt.Println(f"serving {root}")
+  fmt.Println(f"open http://localhost:{port}/ (Ctrl+C to stop)")
+  http.Serve(listener, http.FileServer(http.Dir(root)))
+}
